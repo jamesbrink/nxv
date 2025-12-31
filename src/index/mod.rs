@@ -14,10 +14,11 @@ use crate::paths;
 use chrono::{DateTime, Utc};
 use git::NixpkgsRepo;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 /// Configuration for the indexer.
 #[derive(Debug, Clone)]
@@ -213,6 +214,88 @@ fn set_to_json(values: &HashSet<String>) -> Option<String> {
     serde_json::to_string(&list).ok()
 }
 
+/// Tracks timing data for smoothed ETA calculations.
+///
+/// Uses a sliding window of recent commit processing times to calculate
+/// a stable ETA that doesn't jump wildly when individual commits vary
+/// in processing time.
+struct EtaTracker {
+    /// Recent processing times (sliding window)
+    times: VecDeque<Duration>,
+    /// Maximum window size
+    window_size: usize,
+    /// When the current commit started processing
+    commit_start: Option<Instant>,
+    /// Total remaining commits
+    total_remaining: u64,
+}
+
+impl EtaTracker {
+    fn new(window_size: usize) -> Self {
+        Self {
+            times: VecDeque::with_capacity(window_size),
+            window_size,
+            commit_start: None,
+            total_remaining: 0,
+        }
+    }
+
+    /// Start timing a new commit.
+    fn start_commit(&mut self) {
+        self.commit_start = Some(Instant::now());
+    }
+
+    /// Finish timing the current commit and record its duration.
+    fn finish_commit(&mut self) {
+        if let Some(start) = self.commit_start.take() {
+            let elapsed = start.elapsed();
+            self.times.push_back(elapsed);
+            if self.times.len() > self.window_size {
+                self.times.pop_front();
+            }
+        }
+    }
+
+    /// Update the remaining count.
+    fn set_remaining(&mut self, remaining: u64) {
+        self.total_remaining = remaining;
+    }
+
+    /// Calculate the average time per commit from the sliding window.
+    fn avg_time_per_commit(&self) -> Option<Duration> {
+        if self.times.is_empty() {
+            return None;
+        }
+        let total: Duration = self.times.iter().sum();
+        Some(total / self.times.len() as u32)
+    }
+
+    /// Calculate smoothed ETA based on average processing time.
+    fn eta(&self) -> Option<Duration> {
+        let avg = self.avg_time_per_commit()?;
+        Some(avg * self.total_remaining as u32)
+    }
+
+    /// Format ETA as human-readable string.
+    fn eta_string(&self) -> String {
+        match self.eta() {
+            Some(eta) => {
+                let secs = eta.as_secs();
+                if secs < 60 {
+                    format!("{}s", secs)
+                } else if secs < 3600 {
+                    format!("{}m {}s", secs / 60, secs % 60)
+                } else {
+                    let hours = secs / 3600;
+                    let mins = (secs % 3600) / 60;
+                    format!("{}h {}m", hours, mins)
+                }
+            }
+            None => "calculating...".to_string(),
+        }
+    }
+}
+
 /// The main indexer that coordinates git traversal, extraction, and database insertion.
 pub struct Indexer {
     config: IndexerConfig,
@@ -312,9 +395,13 @@ impl Indexer {
                             eprintln!();
                             eprintln!("To fix this, either:");
                             eprintln!("  1. Update your nixpkgs repository to a newer commit:");
-                            eprintln!("     git -C <nixpkgs-path> fetch origin && git -C <nixpkgs-path> checkout origin/master");
+                            eprintln!(
+                                "     git -C <nixpkgs-path> fetch origin && git -C <nixpkgs-path> checkout origin/master"
+                            );
                             eprintln!();
-                            eprintln!("  2. Or use --full to rebuild the index from the current state:");
+                            eprintln!(
+                                "  2. Or use --full to rebuild the index from the current state:"
+                            );
                             eprintln!("     nxv index --nixpkgs-path <path> --full");
                             return Err(NxvError::Git(git2::Error::from_str(
                                 "Repository HEAD is behind last indexed commit. See above for solutions.",
@@ -397,13 +484,16 @@ impl Indexer {
             let pb = mp.add(ProgressBar::new(total_commits as u64));
             pb.set_style(
                 ProgressStyle::default_bar()
-                    .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")
+                    .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} {msg}")
                     .unwrap()
                     .progress_chars("█▓▒░  "),
             );
             pb.enable_steady_tick(std::time::Duration::from_millis(100));
             pb
         });
+
+        // ETA tracker with 20-commit sliding window for stable estimates
+        let mut eta_tracker = EtaTracker::new(20);
 
         // Track open ranges: attribute_path+version -> OpenRange
         let mut open_ranges: HashMap<String, OpenRange> = HashMap::new();
@@ -443,6 +533,10 @@ impl Indexer {
 
         // Process commits sequentially
         for (commit_idx, commit) in commits.iter().enumerate() {
+            // Start timing this commit
+            eta_tracker.start_commit();
+            eta_tracker.set_remaining((total_commits - commit_idx) as u64);
+
             // Check for shutdown
             if self.is_shutdown_requested() {
                 if let Some(ref pb) = progress_bar {
@@ -471,11 +565,12 @@ impl Indexer {
                 break;
             }
 
-            // Update progress bar
+            // Update progress bar with smoothed ETA
             if let Some(ref pb) = progress_bar {
                 pb.set_position(commit_idx as u64);
                 pb.set_message(format!(
-                    "{} ({}) | {} pkgs | {} ranges",
+                    "({}) {} ({}) | {} pkgs | {} ranges",
+                    eta_tracker.eta_string(),
                     &commit.short_hash,
                     commit.date.format("%Y-%m-%d"),
                     result.packages_found,
@@ -491,6 +586,7 @@ impl Indexer {
                 );
                 prev_commit_hash = Some(commit.hash.clone());
                 prev_commit_date = Some(commit.date);
+                eta_tracker.finish_commit();
                 continue;
             }
 
@@ -504,6 +600,7 @@ impl Indexer {
                     );
                     prev_commit_hash = Some(commit.hash.clone());
                     prev_commit_date = Some(commit.date);
+                    eta_tracker.finish_commit();
                     continue;
                 }
             };
@@ -553,6 +650,7 @@ impl Indexer {
                 result.commits_processed += 1;
                 prev_commit_hash = Some(commit.hash.clone());
                 prev_commit_date = Some(commit.date);
+                eta_tracker.finish_commit();
                 continue;
             }
 
@@ -654,6 +752,9 @@ impl Indexer {
             result.commits_processed += 1;
             prev_commit_hash = Some(commit.hash.clone());
             prev_commit_date = Some(commit.date);
+
+            // Record commit processing time for ETA calculation
+            eta_tracker.finish_commit();
 
             // Checkpoint if needed
             if (commit_idx + 1).is_multiple_of(self.config.checkpoint_interval)
@@ -819,7 +920,63 @@ mod tests {
     use crate::db::queries;
     use chrono::TimeZone;
     use std::process::Command;
+    use std::thread;
     use tempfile::tempdir;
+
+    #[test]
+    fn test_eta_tracker_empty() {
+        let tracker = EtaTracker::new(10);
+        assert!(tracker.avg_time_per_commit().is_none());
+        assert!(tracker.eta().is_none());
+        assert_eq!(tracker.eta_string(), "calculating...");
+    }
+
+    #[test]
+    fn test_eta_tracker_single_commit() {
+        let mut tracker = EtaTracker::new(10);
+        tracker.set_remaining(5);
+
+        tracker.start_commit();
+        thread::sleep(Duration::from_millis(50));
+        tracker.finish_commit();
+
+        let avg = tracker.avg_time_per_commit().unwrap();
+        assert!(avg >= Duration::from_millis(50));
+
+        let eta = tracker.eta().unwrap();
+        // 5 remaining * ~50ms = ~250ms
+        assert!(eta >= Duration::from_millis(200));
+    }
+
+    #[test]
+    fn test_eta_tracker_sliding_window() {
+        let mut tracker = EtaTracker::new(3);
+        tracker.set_remaining(10);
+
+        // Add 5 commits - only last 3 should be kept
+        for _ in 0..5 {
+            tracker.start_commit();
+            thread::sleep(Duration::from_millis(10));
+            tracker.finish_commit();
+        }
+
+        assert_eq!(tracker.times.len(), 3);
+    }
+
+    #[test]
+    fn test_eta_tracker_formatting() {
+        let mut tracker = EtaTracker::new(10);
+        tracker.set_remaining(1);
+
+        // Add a commit that takes ~100ms
+        tracker.start_commit();
+        thread::sleep(Duration::from_millis(100));
+        tracker.finish_commit();
+
+        // Should format as seconds
+        let eta_str = tracker.eta_string();
+        assert!(eta_str.contains("s") || eta_str.contains("calculating"));
+    }
 
     /// Create a test git repository with known commits and a pkgs/ directory.
     fn create_test_nixpkgs_repo() -> (tempfile::TempDir, std::path::PathBuf) {

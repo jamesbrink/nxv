@@ -438,7 +438,12 @@ impl NixpkgsRepo {
     pub fn is_ancestor(&self, ancestor_hash: &str, descendant_hash: &str) -> Result<bool> {
         let output = Command::new("git")
             .current_dir(&self.path)
-            .args(["merge-base", "--is-ancestor", ancestor_hash, descendant_hash])
+            .args([
+                "merge-base",
+                "--is-ancestor",
+                ancestor_hash,
+                descendant_hash,
+            ])
             .output()?;
 
         // Exit code 0 means ancestor_hash IS an ancestor of descendant_hash

@@ -4,15 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-nxv (Nix Versions) is a Rust CLI tool for quickly finding specific versions of Nix packages across nixpkgs history.
+nxv (Nix Versions) is a Rust CLI tool for quickly finding specific versions of Nix packages across nixpkgs history. It uses a pre-built SQLite index with bloom filters for fast lookups.
 
 ## Development Environment
 
-This project uses Nix flakes with rust-overlay for reproducible development:
+This project uses Nix flakes with crane for reproducible builds:
 
 ```bash
-nix develop          # Enter devshell
-direnv allow         # Or use direnv
+nix develop          # Enter devshell with Rust toolchain
+direnv allow         # Or use direnv for automatic shell activation
 ```
 
 ## Build Commands
@@ -20,93 +20,55 @@ direnv allow         # Or use direnv
 ```bash
 cargo build                      # Debug build
 cargo build --release            # Release build
-cargo build --features indexer   # Build with indexer feature
+cargo build --features indexer   # Build with indexer feature (requires libgit2)
 cargo run -- <args>              # Run with arguments
-cargo test                       # Run unit tests (40 tests)
-cargo test --features indexer    # Run all tests including indexer (57 tests)
-cargo test --test integration    # Run integration tests (27 tests)
+cargo test                       # Run tests (~56 tests)
+cargo test --features indexer    # Run all tests including indexer (~82 tests)
+cargo test <test_name>           # Run a single test by name
+cargo test db::                  # Run tests in a specific module
 cargo clippy -- -D warnings      # Lint with errors on warnings
 cargo fmt                        # Format code
+nix flake check                  # Run all Nix checks (build, clippy, fmt, tests)
 ```
 
-## CLI Commands
+## Architecture
 
-```bash
-# User commands (require downloaded index)
-nxv search <package>           # Search for packages by name
-nxv search <pkg> --version X   # Filter by version prefix
-nxv search <pkg> --exact       # Exact name match only
-nxv search --desc "text"       # Search in descriptions (FTS)
-nxv search <pkg> --format json # Output as JSON
-nxv history <package>          # Show version history
-nxv history <pkg> <version>    # Show specific version availability
-nxv info                       # Show index statistics
-nxv update                     # Download/update the index
-nxv update --force             # Force full re-download
-nxv completions <shell>        # Generate shell completions
+### Data Flow
 
-# Indexer commands (feature-gated, for developers)
-nxv index --nixpkgs-path <path>        # Incremental index
-nxv index --nixpkgs-path <path> --full # Full rebuild
-```
+1. **Index Download** (`remote/`): User runs `nxv update` → downloads compressed SQLite DB + bloom filter from remote manifest
+2. **Search** (`db/queries.rs`): Queries go through bloom filter first (fast negative lookup), then SQLite with FTS5
+3. **Output** (`output/`): Results formatted as table (default), JSON, or plain text
 
-## Project Structure
+### Indexer (feature-gated)
 
-```
-src/
-├── main.rs              # Entry point, command dispatch
-├── cli.rs               # Clap command definitions
-├── error.rs             # Error types (thiserror)
-├── paths.rs             # XDG paths, default locations
-├── bloom.rs             # Bloom filter for fast negative lookups
-├── db/
-│   ├── mod.rs           # Database connection, schema
-│   ├── queries.rs       # Search, stats queries
-│   └── import.rs        # Delta pack import (stub)
-├── index/               # (feature = "indexer")
-│   ├── mod.rs           # Indexing coordinator
-│   ├── git.rs           # Git repository traversal
-│   ├── extractor.rs     # Nix package extraction
-│   └── publisher.rs     # Generate artifacts (stub)
-├── remote/
-│   ├── mod.rs           # Remote index operations
-│   ├── download.rs      # HTTP download with progress
-│   ├── manifest.rs      # Manifest parsing
-│   └── update.rs        # Update logic
-└── output/
-    ├── mod.rs           # Output format dispatch
-    ├── table.rs         # Colored table output
-    ├── json.rs          # JSON output
-    └── plain.rs         # Plain text output
-tests/
-└── integration.rs       # CLI integration tests
-```
+The `indexer` feature enables building indexes from a local nixpkgs clone:
+- `git.rs`: Walks nixpkgs git history (commits from 2017+)
+- `extractor.rs`: Runs `nix eval` to extract package metadata per commit
+- `mod.rs`: Coordinates indexing with checkpointing for Ctrl+C resilience
+
+### Database Schema (`db/mod.rs`)
+
+- `package_versions`: Main table with version ranges (first/last commit dates)
+- `package_versions_fts`: FTS5 virtual table for description search
+- `meta`: Key-value store for index metadata (last_indexed_commit, schema_version)
+
+### Key Design Decisions
+
+- **Version ranges**: Instead of storing every commit where a package exists, stores (first_commit, last_commit) ranges to minimize DB size
+- **Bloom filter**: Serialized to separate file, loaded at search time for instant "not found" responses
+- **Feature gates**: Indexer code (git2, ctrlc) only compiled with `--features indexer` to keep user binary small
 
 ## Dependency Management
 
-**Always use current versions of dependencies.** Before adding or updating dependencies:
+**Always use current versions.** Before adding dependencies:
 
 ```bash
-cargo search <crate>           # Find latest version of a crate
-cargo search <crate> --limit 5 # Show multiple results
+cargo search <crate>           # Find latest version
 ```
-
-When adding dependencies to Cargo.toml:
-- Use `cargo search` to verify the latest version
-- Prefer crates with active maintenance and good documentation
-- Check crates.io for version info when needed
 
 ## Testing
 
 - Unit tests are in each module's `mod tests` section
-- Integration tests are in `tests/integration.rs`
-- Use `cargo test --features indexer` to run all tests
-- Tests create temporary databases using `tempfile` crate
-
-## Key Features
-
-- **Bloom filter**: Fast O(1) negative lookups for exact name searches
-- **FTS5**: Full-text search on package descriptions
-- **Delta updates**: Incremental index updates (infrastructure ready)
-- **Checkpointing**: Resumable indexing with Ctrl+C handling
-- **Multiple output formats**: Table, JSON, plain text
+- Integration tests in `tests/integration.rs` use `assert_cmd` to test CLI behavior
+- Tests create temporary databases using `tempfile`
+- Some indexer tests require `nix` to be installed (marked `#[ignore]`)

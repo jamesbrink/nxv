@@ -20,8 +20,17 @@ pub struct PackageInfo {
     pub platforms: Option<Vec<String>>,
 }
 
+/// Attribute position information for mapping attribute names to files.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttrPosition {
+    pub attr_path: String,
+    pub file: Option<String>,
+}
+
 impl PackageInfo {
     /// Serialize licenses to JSON for database storage.
+    #[allow(dead_code)]
     pub fn license_json(&self) -> Option<String> {
         self.license
             .as_ref()
@@ -29,6 +38,7 @@ impl PackageInfo {
     }
 
     /// Serialize maintainers to JSON for database storage.
+    #[allow(dead_code)]
     pub fn maintainers_json(&self) -> Option<String> {
         self.maintainers
             .as_ref()
@@ -36,6 +46,7 @@ impl PackageInfo {
     }
 
     /// Serialize platforms to JSON for database storage.
+    #[allow(dead_code)]
     pub fn platforms_json(&self) -> Option<String> {
         self.platforms
             .as_ref()
@@ -46,11 +57,11 @@ impl PackageInfo {
 /// The nix expression for extracting package information.
 /// This is embedded in the binary to avoid needing external files.
 const EXTRACT_NIX: &str = r#"
-{ nixpkgsPath }:
+{ nixpkgsPath, system, attrNames ? null }:
 let
   # Import nixpkgs with current system and permissive config
   pkgs = import nixpkgsPath {
-    system = builtins.currentSystem;
+    system = system;
     config = {
       allowUnfree = true;
       allowBroken = true;
@@ -154,11 +165,52 @@ let
     in if forcedResult.success then forcedResult.value else null;
 
   # Get list of attribute names and process them
-  attrNames = builtins.attrNames pkgs;
-  results = builtins.filter (x: x != null) (map processAttr attrNames);
+  names = if attrNames != null then attrNames else builtins.attrNames pkgs;
+  results = builtins.filter (x: x != null) (map processAttr names);
 in
   results
 "#;
+
+/// The nix expression for extracting attribute positions.
+/// Returns an empty list on any evaluation errors for resilience
+/// against older nixpkgs commits that may have evaluation issues.
+const POSITIONS_NIX: &str = r#"
+{ nixpkgsPath, system }:
+let
+  pkgs = import nixpkgsPath {
+    system = system;
+    config = {
+      allowUnfree = true;
+      allowBroken = true;
+      allowInsecure = true;
+      allowUnsupportedSystem = true;
+    };
+  };
+  # Get attr names - this should always succeed if import succeeded
+  attrNamesRes = builtins.tryEval (
+    if builtins.isAttrs pkgs then builtins.attrNames pkgs else []
+  );
+  attrNames = if attrNamesRes.success then attrNamesRes.value else [];
+  # Get position for each attr - force full evaluation with seq
+  getPos = name:
+    let
+      result = builtins.tryEval (
+        let
+          pos = builtins.unsafeGetAttrPos name pkgs;
+          file = if pos == null then null else if pos ? file then pos.file else null;
+          # Force evaluation of file (if it's a string, seq will evaluate it)
+          forcedFile = builtins.seq file file;
+        in { attrPath = name; file = forcedFile; }
+      );
+      # Also force the result record itself
+      forced = if result.success
+        then builtins.tryEval (builtins.seq result.value.attrPath (builtins.seq result.value.file result.value))
+        else { success = false; };
+    in if forced.success then forced.value else null;
+in
+  builtins.filter (x: x != null) (map getPos attrNames)
+"#;
+
 
 /// Extract packages from a nixpkgs checkout at a specific path.
 ///
@@ -168,6 +220,15 @@ in
 /// # Returns
 /// A vector of PackageInfo, or an error if extraction fails.
 pub fn extract_packages<P: AsRef<Path>>(repo_path: P) -> Result<Vec<PackageInfo>> {
+    extract_packages_for_attrs(repo_path, "x86_64-linux", &[])
+}
+
+/// Extract packages for a specific list of attribute names and system.
+pub fn extract_packages_for_attrs<P: AsRef<Path>>(
+    repo_path: P,
+    system: &str,
+    attr_names: &[String],
+) -> Result<Vec<PackageInfo>> {
     let repo_path = repo_path.as_ref();
 
     // Write the nix expression to a temp file
@@ -175,19 +236,23 @@ pub fn extract_packages<P: AsRef<Path>>(repo_path: P) -> Result<Vec<PackageInfo>
     let nix_file = temp_dir.path().join("extract.nix");
     std::fs::write(&nix_file, EXTRACT_NIX)?;
 
+    let extract_path = nix_string(&nix_file.display().to_string());
+    let repo_path_str = nix_string(&repo_path.display().to_string());
+    let system_str = nix_string(system);
+    let attr_list = nix_list(attr_names);
+
+    let expr = format!(
+        "let extractFile = builtins.toPath \"{extract_path}\";\n\
+         nixpkgsPath = builtins.toPath \"{repo_path_str}\";\n\
+         system = \"{system_str}\";\n\
+         attrNames = {attr_list};\n\
+         in import extractFile {{ inherit nixpkgsPath system attrNames; }}",
+    );
+
     // Run nix eval
     let output = Command::new("nix")
-        .args([
-            "eval",
-            "--json",
-            "--impure",
-            "--expr",
-            &format!(
-                "import {} {{ nixpkgsPath = {}; }}",
-                nix_file.display(),
-                repo_path.display()
-            ),
-        ])
+        .args(["eval", "--json", "--impure", "--expr"])
+        .arg(expr)
         .output()?;
 
     if !output.status.success() {
@@ -202,6 +267,69 @@ pub fn extract_packages<P: AsRef<Path>>(repo_path: P) -> Result<Vec<PackageInfo>
     let packages: Vec<PackageInfo> = serde_json::from_str(&stdout)?;
 
     Ok(packages)
+}
+
+/// Extract attribute positions for a nixpkgs checkout and system.
+pub fn extract_attr_positions<P: AsRef<Path>>(
+    repo_path: P,
+    system: &str,
+) -> Result<Vec<AttrPosition>> {
+    let repo_path = repo_path.as_ref();
+
+    // Canonicalize the path to avoid any relative path issues
+    let canonical_path = std::fs::canonicalize(repo_path)?;
+    let repo_path_str = canonical_path.display().to_string();
+
+    // Write the nix expression to a temp file
+    let temp_dir = tempfile::tempdir()?;
+    let nix_file = temp_dir.path().join("positions.nix");
+    std::fs::write(&nix_file, POSITIONS_NIX)?;
+
+    // Build an expression that imports and calls the positions file
+    let expr = format!(
+        "import {} {{ nixpkgsPath = {}; system = \"{}\"; }}",
+        nix_file.display(),
+        repo_path_str,
+        system
+    );
+
+    let output = Command::new("nix")
+        .args(["eval", "--json", "--impure", "--expr", &expr])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(NxvError::NixEval(format!(
+            "nix eval failed: {}",
+            stderr.lines().take(5).collect::<Vec<_>>().join("\n")
+        )));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let positions: Vec<AttrPosition> = serde_json::from_str(&stdout)?;
+
+    Ok(positions)
+}
+
+fn nix_string(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
+}
+
+fn nix_list(values: &[String]) -> String {
+    if values.is_empty() {
+        return "null".to_string();
+    }
+
+    let items: Vec<String> = values
+        .iter()
+        .map(|value| format!("\"{}\"", nix_string(value)))
+        .collect();
+    format!("[ {} ]", items.join(" "))
 }
 
 /// Extract packages at a specific commit.
@@ -476,5 +604,181 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_nix_list_empty_is_null() {
+        assert_eq!(super::nix_list(&[]), "null");
+    }
+
+    #[test]
+    fn test_nix_list_values_are_escaped() {
+        let values = vec![r#"a"b"#.to_string(), "c\\d".to_string()];
+        let list = super::nix_list(&values);
+        assert!(list.contains(r#""a\"b""#));
+        assert!(list.contains(r#""c\\d""#));
+    }
+
+    #[test]
+    fn test_extract_packages_with_empty_attr_list() {
+        let nix_check = Command::new("nix").arg("--version").output();
+        if nix_check.is_err() || !nix_check.unwrap().status.success() {
+            eprintln!("Skipping: nix not available");
+            return;
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path();
+        std::fs::create_dir_all(path.join("pkgs")).unwrap();
+
+        let default_nix = r#"
+{ system, config }:
+{
+  hello = {
+    pname = "hello";
+    version = "1.0.0";
+    type = "derivation";
+    meta = {
+      description = "A test package";
+    };
+  };
+}
+"#;
+        std::fs::write(path.join("default.nix"), default_nix).unwrap();
+
+        let packages = extract_packages_for_attrs(path, "x86_64-linux", &[]).unwrap();
+        assert!(!packages.is_empty());
+        assert!(packages.iter().any(|pkg| pkg.name == "hello"));
+    }
+
+    #[test]
+    fn test_extract_attr_positions_returns_files() {
+        let nix_check = Command::new("nix").arg("--version").output();
+        if nix_check.is_err() || !nix_check.unwrap().status.success() {
+            eprintln!("Skipping: nix not available");
+            return;
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path();
+        std::fs::create_dir_all(path.join("pkgs")).unwrap();
+
+        let default_nix = r#"
+{ system, config }:
+{
+  hello = {
+    pname = "hello";
+    version = "1.0.0";
+    type = "derivation";
+    meta = {
+      description = "A test package";
+    };
+  };
+}
+"#;
+        std::fs::write(path.join("default.nix"), default_nix).unwrap();
+
+        let positions = extract_attr_positions(path, "x86_64-linux").unwrap();
+        assert!(positions.iter().any(|pos| pos.attr_path == "hello"));
+    }
+
+    #[test]
+    fn test_extract_attr_positions_handles_non_attrset() {
+        let nix_check = Command::new("nix").arg("--version").output();
+        if nix_check.is_err() || !nix_check.unwrap().status.success() {
+            eprintln!("Skipping: nix not available");
+            return;
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path();
+        std::fs::create_dir_all(path.join("pkgs")).unwrap();
+
+        let default_nix = r#"
+{ system, config }:
+  x: x
+"#;
+        std::fs::write(path.join("default.nix"), default_nix).unwrap();
+
+        let positions = extract_attr_positions(path, "x86_64-linux").unwrap();
+        assert!(positions.is_empty());
+    }
+
+    #[test]
+    fn test_extract_packages_with_attr_filter() {
+        let nix_check = Command::new("nix").arg("--version").output();
+        if nix_check.is_err() || !nix_check.unwrap().status.success() {
+            eprintln!("Skipping: nix not available");
+            return;
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path();
+        std::fs::create_dir_all(path.join("pkgs")).unwrap();
+
+        let default_nix = r#"
+{ system, config }:
+{
+  hello = {
+    pname = "hello";
+    version = "1.0.0";
+    type = "derivation";
+  };
+  world = {
+    pname = "world";
+    version = "2.0.0";
+    type = "derivation";
+  };
+}
+"#;
+        std::fs::write(path.join("default.nix"), default_nix).unwrap();
+
+        let names = vec!["hello".to_string()];
+        let packages = extract_packages_for_attrs(path, "x86_64-linux", &names).unwrap();
+        assert!(packages.iter().any(|pkg| pkg.name == "hello"));
+        assert!(!packages.iter().any(|pkg| pkg.name == "world"));
+    }
+
+    /// Test that extract_attr_positions handles attributes that throw errors.
+    /// This simulates older nixpkgs commits where some attributes may fail to evaluate.
+    #[test]
+    fn test_extract_attr_positions_handles_throwing_attrs() {
+        let nix_check = Command::new("nix").arg("--version").output();
+        if nix_check.is_err() || !nix_check.unwrap().status.success() {
+            eprintln!("Skipping: nix not available");
+            return;
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path();
+        std::fs::create_dir_all(path.join("pkgs")).unwrap();
+
+        // Create a nixpkgs-like structure where one attribute throws an error
+        let default_nix = r#"
+{ system, config }:
+{
+  goodPkg = {
+    pname = "good-pkg";
+    version = "1.0.0";
+    type = "derivation";
+  };
+  # This attribute will throw when accessed
+  badPkg = throw "This package is broken";
+  anotherGoodPkg = {
+    pname = "another-good-pkg";
+    version = "2.0.0";
+    type = "derivation";
+  };
+}
+"#;
+        std::fs::write(path.join("default.nix"), default_nix).unwrap();
+
+        // Should not fail even though badPkg throws
+        let positions = extract_attr_positions(path, "x86_64-linux").unwrap();
+
+        // Should have positions for the good packages
+        assert!(positions.iter().any(|p| p.attr_path == "goodPkg"));
+        assert!(positions.iter().any(|p| p.attr_path == "anotherGoodPkg"));
+        // badPkg may or may not have a position depending on when the error occurs
     }
 }

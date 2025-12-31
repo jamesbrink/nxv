@@ -516,6 +516,13 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
     let config = IndexerConfig {
         checkpoint_interval: args.checkpoint_interval,
         show_progress: !cli.quiet,
+        systems: args
+            .systems
+            .clone()
+            .unwrap_or_else(|| IndexerConfig::default().systems),
+        since: args.since.clone(),
+        until: args.until.clone(),
+        max_commits: args.max_commits,
     };
 
     let indexer = Indexer::new(config);

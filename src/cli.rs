@@ -166,6 +166,22 @@ pub struct IndexArgs {
     /// Commits between checkpoints.
     #[arg(long, default_value_t = 100)]
     pub checkpoint_interval: usize,
+
+    /// Comma-separated list of systems to evaluate (e.g. x86_64-linux,aarch64-linux).
+    #[arg(long, value_delimiter = ',')]
+    pub systems: Option<Vec<String>>,
+
+    /// Limit commits to those after this date (YYYY-MM-DD) or git date string.
+    #[arg(long)]
+    pub since: Option<String>,
+
+    /// Limit commits to those before this date (YYYY-MM-DD) or git date string.
+    #[arg(long)]
+    pub until: Option<String>,
+
+    /// Limit the number of commits processed.
+    #[arg(long)]
+    pub max_commits: Option<usize>,
 }
 
 #[cfg(feature = "indexer")]
@@ -338,5 +354,27 @@ mod tests {
     fn test_quiet_conflicts_with_verbose() {
         let result = Cli::try_parse_from(["nxv", "-v", "-q", "info"]);
         assert!(result.is_err());
+    }
+
+    #[cfg(feature = "indexer")]
+    #[test]
+    fn test_index_systems_parsing() {
+        let args = Cli::try_parse_from([
+            "nxv",
+            "index",
+            "--nixpkgs-path",
+            "./nixpkgs",
+            "--systems",
+            "x86_64-linux,aarch64-linux",
+        ])
+        .unwrap();
+
+        match args.command {
+            Commands::Index(index) => {
+                let systems = index.systems.unwrap();
+                assert_eq!(systems, vec!["x86_64-linux", "aarch64-linux"]);
+            }
+            _ => panic!("Expected Index command"),
+        }
     }
 }

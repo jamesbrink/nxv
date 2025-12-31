@@ -4,6 +4,7 @@ use crate::error::{NxvError, Result};
 use chrono::{DateTime, TimeZone, Utc};
 use git2::{Oid, Repository, Sort};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// The earliest commit date we support for indexing.
 /// Before this date, nixpkgs had a different structure that doesn't work
@@ -53,20 +54,32 @@ pub struct NixpkgsRepo {
 pub struct Worktree {
     /// Path to the worktree directory.
     pub path: PathBuf,
+    /// Path to the main repository for cleanup.
+    repo_path: PathBuf,
     /// Whether this worktree should be cleaned up on drop.
     cleanup: bool,
 }
 
 impl Worktree {
     /// Create a new worktree handle.
-    pub fn new(path: PathBuf, cleanup: bool) -> Self {
-        Self { path, cleanup }
+    pub fn new(path: PathBuf, repo_path: PathBuf, cleanup: bool) -> Self {
+        Self {
+            path,
+            repo_path,
+            cleanup,
+        }
     }
 }
 
 impl Drop for Worktree {
     fn drop(&mut self) {
         if self.cleanup {
+            let _ = Command::new("git")
+                .current_dir(&self.repo_path)
+                .args(["worktree", "remove", "--force"])
+                .arg(&self.path)
+                .output();
+
             // Remove the worktree directory
             let _ = std::fs::remove_dir_all(&self.path);
         }
@@ -111,6 +124,7 @@ impl NixpkgsRepo {
     ///
     /// This filters out commits before MIN_INDEXABLE_DATE which have
     /// a different structure that doesn't work with modern Nix evaluation.
+    #[allow(dead_code)]
     pub fn get_indexable_commits(&self) -> Result<Vec<CommitInfo>> {
         let min_date = chrono::NaiveDate::parse_from_str(MIN_INDEXABLE_DATE, "%Y-%m-%d")
             .expect("Invalid MIN_INDEXABLE_DATE format");
@@ -123,6 +137,154 @@ impl NixpkgsRepo {
         let head_commit = head.peel_to_commit()?;
 
         self.walk_commits_from(head_commit.id(), None, Some(min_datetime))
+    }
+
+    /// Get indexable commits that touched specific paths (newest first, then reversed).
+    pub fn get_indexable_commits_touching_paths(
+        &self,
+        paths: &[&str],
+        since: Option<&str>,
+        until: Option<&str>,
+    ) -> Result<Vec<CommitInfo>> {
+        let since_arg = since.unwrap_or(MIN_INDEXABLE_DATE);
+        let mut args = vec!["log", "--first-parent", "--format=%H", "--since", since_arg];
+        if let Some(until) = until {
+            args.push("--until");
+            args.push(until);
+        }
+        args.push("--");
+
+        let output = Command::new("git")
+            .current_dir(&self.path)
+            .args(args)
+            .args(paths)
+            .output()?;
+
+        if !output.status.success() {
+            return Err(NxvError::Git(git2::Error::from_str(
+                "Failed to list commits touching paths.",
+            )));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut commits = Vec::new();
+        for line in stdout.lines() {
+            let hash = line.trim();
+            if hash.is_empty() {
+                continue;
+            }
+            let oid = Oid::from_str(hash).map_err(|_| {
+                NxvError::Git(git2::Error::from_str(&format!(
+                    "Invalid commit hash: {}",
+                    hash
+                )))
+            })?;
+            let commit = self.repo.find_commit(oid)?;
+            commits.push(CommitInfo::from_commit(&commit));
+        }
+
+        commits.reverse();
+        Ok(commits)
+    }
+
+    /// Get commits since a specific hash that touched specific paths.
+    pub fn get_commits_since_touching_paths(
+        &self,
+        since_hash: &str,
+        paths: &[&str],
+        since: Option<&str>,
+        until: Option<&str>,
+    ) -> Result<Vec<CommitInfo>> {
+        let since_oid = Oid::from_str(since_hash).map_err(|_| {
+            NxvError::Git(git2::Error::from_str(&format!(
+                "Invalid commit hash: {}",
+                since_hash
+            )))
+        })?;
+
+        self.repo.find_commit(since_oid).map_err(|_| {
+            NxvError::Git(git2::Error::from_str(&format!(
+                "Invalid commit hash: {}",
+                since_hash
+            )))
+        })?;
+
+        let range = format!("{}..HEAD", since_hash);
+        let mut args = vec!["log", "--first-parent", "--format=%H", &range];
+        if let Some(since) = since {
+            args.push("--since");
+            args.push(since);
+        }
+        if let Some(until) = until {
+            args.push("--until");
+            args.push(until);
+        }
+        args.push("--");
+
+        let output = Command::new("git")
+            .current_dir(&self.path)
+            .args(args)
+            .args(paths)
+            .output()?;
+
+        if !output.status.success() {
+            return Err(NxvError::Git(git2::Error::from_str(
+                "Failed to list commits touching paths.",
+            )));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut commits = Vec::new();
+        for line in stdout.lines() {
+            let hash = line.trim();
+            if hash.is_empty() {
+                continue;
+            }
+            let oid = Oid::from_str(hash).map_err(|_| {
+                NxvError::Git(git2::Error::from_str(&format!(
+                    "Invalid commit hash: {}",
+                    hash
+                )))
+            })?;
+            let commit = self.repo.find_commit(oid)?;
+            commits.push(CommitInfo::from_commit(&commit));
+        }
+
+        commits.reverse();
+        Ok(commits)
+    }
+
+    /// Get changed paths for a commit (including rename sources and destinations).
+    pub fn get_commit_changed_paths(&self, commit_hash: &str) -> Result<Vec<String>> {
+        let output = Command::new("git")
+            .current_dir(&self.path)
+            .args(["diff-tree", "--name-status", "-r", commit_hash])
+            .output()?;
+
+        if !output.status.success() {
+            return Err(NxvError::Git(git2::Error::from_str(
+                "Failed to list commit changes.",
+            )));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut paths = Vec::new();
+        for line in stdout.lines() {
+            let mut parts = line.split('\t');
+            let status = parts.next().unwrap_or_default();
+            if status.starts_with('R') {
+                if let Some(old_path) = parts.next() {
+                    paths.push(old_path.to_string());
+                }
+                if let Some(new_path) = parts.next() {
+                    paths.push(new_path.to_string());
+                }
+            } else if let Some(path) = parts.next() {
+                paths.push(path.to_string());
+            }
+        }
+
+        Ok(paths)
     }
 
     /// Get commits since a specific hash (exclusive, newest commits first, then reversed to chronological).
@@ -272,48 +434,25 @@ impl NixpkgsRepo {
     /// Worktrees allow parallel checkouts of different commits without modifying
     /// the main repository's working directory.
     pub fn create_worktree(&self, worktree_path: &Path, commit_hash: &str) -> Result<Worktree> {
-        let oid = Oid::from_str(commit_hash).map_err(|_| {
-            NxvError::Git(git2::Error::from_str(&format!(
-                "Invalid commit hash: {}",
-                commit_hash
-            )))
-        })?;
+        let output = Command::new("git")
+            .current_dir(&self.path)
+            .args(["worktree", "add", "--detach"])
+            .arg(worktree_path)
+            .arg(commit_hash)
+            .output()?;
 
-        // Create the worktree directory
-        std::fs::create_dir_all(worktree_path)?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(NxvError::Git(git2::Error::from_str(
+                stderr.lines().take(3).collect::<Vec<_>>().join("\n").as_str(),
+            )));
+        }
 
-        // Create a unique branch name for this worktree
-        let branch_name = format!("nxv-worktree-{}", &commit_hash[..8]);
-
-        // Add the worktree using git2
-        let commit = self.repo.find_commit(oid)?;
-
-        // Create a reference for the worktree
-        let reference = self.repo.reference(
-            &format!("refs/heads/{}", branch_name),
-            oid,
+        Ok(Worktree::new(
+            worktree_path.to_path_buf(),
+            self.path.clone(),
             true,
-            "nxv worktree",
-        )?;
-
-        // Add the worktree
-        self.repo.worktree(
-            &branch_name,
-            worktree_path,
-            Some(
-                git2::WorktreeAddOptions::new()
-                    .reference(Some(&reference))
-                    .checkout_existing(true),
-            ),
-        )?;
-
-        // Checkout the specific commit in the worktree
-        let worktree_repo = Repository::open(worktree_path)?;
-        let tree = commit.tree()?;
-        worktree_repo.checkout_tree(tree.as_object(), None)?;
-        worktree_repo.set_head_detached(oid)?;
-
-        Ok(Worktree::new(worktree_path.to_path_buf(), true))
+        ))
     }
 
     /// Create multiple worktrees for parallel processing.
@@ -589,5 +728,39 @@ mod tests {
         // Should be able to count commits (just verify it doesn't error)
         let count = repo.count_commits().unwrap();
         assert!(count > 0);
+    }
+
+    #[test]
+    fn test_get_commit_changed_paths_includes_rename() {
+        let (_dir, path) = create_test_repo();
+        let repo = NixpkgsRepo::open(&path).unwrap();
+
+        std::fs::write(path.join("file.txt"), "one").unwrap();
+        Command::new("git")
+            .args(["add", "file.txt"])
+            .current_dir(&path)
+            .output()
+            .expect("Failed to add file");
+        Command::new("git")
+            .args(["commit", "-m", "Add file"])
+            .current_dir(&path)
+            .output()
+            .expect("Failed to commit file");
+
+        Command::new("git")
+            .args(["mv", "file.txt", "file-renamed.txt"])
+            .current_dir(&path)
+            .output()
+            .expect("Failed to rename file");
+        Command::new("git")
+            .args(["commit", "-am", "Rename file"])
+            .current_dir(&path)
+            .output()
+            .expect("Failed to commit rename");
+
+        let head = repo.head_commit().unwrap();
+        let changed = repo.get_commit_changed_paths(&head).unwrap();
+        assert!(changed.contains(&"file.txt".to_string()));
+        assert!(changed.contains(&"file-renamed.txt".to_string()));
     }
 }

@@ -16,6 +16,9 @@ Thumbs.db
 # Claude Code
 .claude/settings.local.json
 
+# Direnv
+.direnv/
+
 # Environment
 .env
 .env.local

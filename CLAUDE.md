@@ -26,3 +26,17 @@ cargo test <name>    # Run specific test
 cargo clippy         # Lint
 cargo fmt            # Format code
 ```
+
+## Dependency Management
+
+**Always use current versions of dependencies.** Before adding or updating dependencies:
+
+```bash
+cargo search <crate>           # Find latest version of a crate
+cargo search <crate> --limit 5 # Show multiple results
+```
+
+When adding dependencies to Cargo.toml:
+- Use `cargo search` to verify the latest version
+- Prefer crates with active maintenance and good documentation
+- Check crates.io for version info when needed

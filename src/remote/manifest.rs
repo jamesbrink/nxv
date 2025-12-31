@@ -17,8 +17,7 @@ use std::io::Cursor;
 /// minisign -S -s nxv.key -m manifest.json
 /// ```
 #[allow(dead_code)]
-pub const MANIFEST_PUBLIC_KEY: &str =
-    "untrusted comment: nxv manifest signing key\nRWTHy8Hb+LSqSJNRMBXPzXl8J5F5WTWmYu5J0CxmZWQ3z8rLnVJk9ABC";
+pub const MANIFEST_PUBLIC_KEY: &str = "untrusted comment: nxv manifest signing key\nRWTHy8Hb+LSqSJNRMBXPzXl8J5F5WTWmYu5J0CxmZWQ3z8rLnVJk9ABC";
 
 /// Remote index manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]

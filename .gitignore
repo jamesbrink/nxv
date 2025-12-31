@@ -1,6 +1,8 @@
 # Rust
 /target/
-Cargo.lock
+
+# Nix build output
+/result
 
 # IDE
 .idea/

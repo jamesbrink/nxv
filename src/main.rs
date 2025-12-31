@@ -96,7 +96,10 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
 
                 if input.is_empty() || input == "y" || input == "yes" {
                     // Run the update command
-                    let update_args = cli::UpdateArgs { force: false, manifest_url: None };
+                    let update_args = cli::UpdateArgs {
+                        force: false,
+                        manifest_url: None,
+                    };
                     cmd_update(cli, &update_args)?;
 
                     // Try to open the database again
@@ -189,7 +192,10 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
             results.sort_by(|a, b| {
                 // Semver-aware version comparison
                 // Try to parse as semver, fall back to string comparison
-                match (semver::Version::parse(&a.version), semver::Version::parse(&b.version)) {
+                match (
+                    semver::Version::parse(&a.version),
+                    semver::Version::parse(&b.version),
+                ) {
                     (Ok(va), Ok(vb)) => va.cmp(&vb),
                     (Ok(_), Err(_)) => std::cmp::Ordering::Less, // Valid semver sorts before invalid
                     (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
@@ -387,7 +393,10 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
 
                 if input.is_empty() || input == "y" || input == "yes" {
                     // Run the update command
-                    let update_args = cli::UpdateArgs { force: false, manifest_url: None };
+                    let update_args = cli::UpdateArgs {
+                        force: false,
+                        manifest_url: None,
+                    };
                     cmd_update(cli, &update_args)?;
 
                     // Try to open the database again

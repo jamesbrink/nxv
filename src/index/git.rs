@@ -265,11 +265,7 @@ impl NixpkgsRepo {
     ///
     /// Returns a vector of worktrees, each checked out to a different commit.
     #[allow(dead_code)]
-    pub fn create_worktrees(
-        &self,
-        base_path: &Path,
-        commits: &[&str],
-    ) -> Result<Vec<Worktree>> {
+    pub fn create_worktrees(&self, base_path: &Path, commits: &[&str]) -> Result<Vec<Worktree>> {
         let mut worktrees = Vec::with_capacity(commits.len());
 
         for (i, commit_hash) in commits.iter().enumerate() {

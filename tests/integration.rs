@@ -1527,7 +1527,11 @@ fn test_update_checksum_mismatch() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("checksum").or(predicate::str::contains("mismatch")).or(predicate::str::contains("Checksum")));
+        .stderr(
+            predicate::str::contains("checksum")
+                .or(predicate::str::contains("mismatch"))
+                .or(predicate::str::contains("Checksum")),
+        );
 }
 
 #[test]
@@ -1569,12 +1573,7 @@ fn test_works_offline_after_index_download() {
     // Search should work without any network access
     // (no manifest URL configured, bloom filter doesn't exist)
     nxv()
-        .args([
-            "--db-path",
-            db_path.to_str().unwrap(),
-            "search",
-            "python",
-        ])
+        .args(["--db-path", db_path.to_str().unwrap(), "search", "python"])
         .env("NXV_BLOOM_PATH", bloom_path.to_str().unwrap())
         .assert()
         .success()
@@ -1582,23 +1581,14 @@ fn test_works_offline_after_index_download() {
 
     // History should also work offline
     nxv()
-        .args([
-            "--db-path",
-            db_path.to_str().unwrap(),
-            "history",
-            "python",
-        ])
+        .args(["--db-path", db_path.to_str().unwrap(), "history", "python"])
         .assert()
         .success()
         .stdout(predicate::str::contains("python"));
 
     // Info should work offline
     nxv()
-        .args([
-            "--db-path",
-            db_path.to_str().unwrap(),
-            "info",
-        ])
+        .args(["--db-path", db_path.to_str().unwrap(), "info"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Index Information"));
@@ -1615,12 +1605,7 @@ fn test_clear_error_message_no_index() {
 
     // Should give clear error about missing index
     nxv()
-        .args([
-            "--db-path",
-            db_path.to_str().unwrap(),
-            "search",
-            "python",
-        ])
+        .args(["--db-path", db_path.to_str().unwrap(), "search", "python"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("No index found"))
@@ -1689,7 +1674,7 @@ fn test_clear_error_message_package_not_found() {
             "nonexistent_package_xyz",
         ])
         .assert()
-        .success()  // Not an error, just no results
+        .success() // Not an error, just no results
         .stderr(predicate::str::contains("No packages found"));
 }
 
@@ -1778,7 +1763,7 @@ fn test_no_data_corruption_on_failed_download() {
             "update",
             "--manifest-url",
             &manifest_url,
-            "--force",  // Force full download to test failure path
+            "--force", // Force full download to test failure path
         ])
         .assert()
         .failure();
@@ -1792,12 +1777,7 @@ fn test_no_data_corruption_on_failed_download() {
 
     // Verify the database is still usable
     nxv()
-        .args([
-            "--db-path",
-            db_path.to_str().unwrap(),
-            "search",
-            "python",
-        ])
+        .args(["--db-path", db_path.to_str().unwrap(), "search", "python"])
         .assert()
         .success()
         .stdout(predicate::str::contains("python"));
@@ -2434,12 +2414,7 @@ fn test_index_then_search_workflow() {
 
             // Test history command
             nxv()
-                .args([
-                    "--db-path",
-                    db_path.to_str().unwrap(),
-                    "history",
-                    "hello",
-                ])
+                .args(["--db-path", db_path.to_str().unwrap(), "history", "hello"])
                 .assert()
                 .success();
 

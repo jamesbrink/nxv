@@ -3,8 +3,8 @@
 use crate::db::queries::PackageVersion;
 use crate::output::TableOptions;
 use comfy_table::{
-    presets::{ASCII_FULL, UTF8_FULL},
     Cell, Color, ContentArrangement, Table,
+    presets::{ASCII_FULL, UTF8_FULL},
 };
 
 /// Print search results as a colored table.

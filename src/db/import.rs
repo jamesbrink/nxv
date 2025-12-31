@@ -37,10 +37,7 @@ pub fn import_delta_pack<P: AsRef<Path>>(conn: &Connection, path: P) -> Result<(
         conn.execute_batch(&sql_content)?;
     } else {
         // Wrap in transaction for safety
-        conn.execute_batch(&format!(
-            "BEGIN TRANSACTION;\n{}\nCOMMIT;",
-            sql_content
-        ))?;
+        conn.execute_batch(&format!("BEGIN TRANSACTION;\n{}\nCOMMIT;", sql_content))?;
     }
 
     Ok(())
@@ -54,10 +51,7 @@ pub fn import_delta_sql(conn: &Connection, sql_content: &str) -> Result<()> {
     if sql_content.contains("BEGIN TRANSACTION") {
         conn.execute_batch(sql_content)?;
     } else {
-        conn.execute_batch(&format!(
-            "BEGIN TRANSACTION;\n{}\nCOMMIT;",
-            sql_content
-        ))?;
+        conn.execute_batch(&format!("BEGIN TRANSACTION;\n{}\nCOMMIT;", sql_content))?;
     }
 
     Ok(())

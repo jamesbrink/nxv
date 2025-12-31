@@ -23,7 +23,11 @@ const READ_TIMEOUT_SECS: u64 = 300;
 /// Retry a network operation with exponential backoff.
 ///
 /// Returns the result of the operation, or the last error if all retries failed.
-fn retry_with_backoff<T, E, F>(max_retries: u32, show_progress: bool, mut operation: F) -> std::result::Result<T, E>
+fn retry_with_backoff<T, E, F>(
+    max_retries: u32,
+    show_progress: bool,
+    mut operation: F,
+) -> std::result::Result<T, E>
 where
     F: FnMut() -> std::result::Result<T, E>,
     E: std::fmt::Display,
@@ -110,8 +114,7 @@ pub fn download_file<P: AsRef<Path>>(
     if !is_partial && !is_full {
         return Err(NxvError::NetworkMessage(format!(
             "HTTP {} for {}",
-            status,
-            url
+            status, url
         )));
     }
 
@@ -154,9 +157,7 @@ pub fn download_file<P: AsRef<Path>>(
 
     // Open temp file (append if resuming, create if not)
     let mut temp_file = if actual_offset > 0 {
-        let file = OpenOptions::new()
-            .append(true)
-            .open(&temp_path)?;
+        let file = OpenOptions::new().append(true).open(&temp_path)?;
         BufWriter::new(file)
     } else {
         BufWriter::new(File::create(&temp_path)?)
@@ -346,8 +347,7 @@ mod tests {
 
     #[test]
     fn test_retry_with_backoff_succeeds_first_try() {
-        let result: std::result::Result<i32, &str> =
-            retry_with_backoff(3, false, || Ok(42));
+        let result: std::result::Result<i32, &str> = retry_with_backoff(3, false, || Ok(42));
         assert_eq!(result.unwrap(), 42);
     }
 

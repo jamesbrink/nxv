@@ -168,12 +168,26 @@ pub struct InfoArgs {
     /// Package name to show info for.
     pub package: String,
 
-    /// Specific version to show info for.
+    /// Specific version to show info for (positional).
+    #[arg(conflicts_with = "version_flag")]
     pub version: Option<String>,
+
+    /// Specific version to show info for (flag).
+    #[arg(short = 'V', long = "version", conflicts_with = "version")]
+    pub version_flag: Option<String>,
 
     /// Output format.
     #[arg(short, long, value_enum, default_value_t = OutputFormatArg::Table)]
     pub format: OutputFormatArg,
+}
+
+impl InfoArgs {
+    /// Get the version from either positional or flag argument.
+    pub fn get_version(&self) -> Option<&str> {
+        self.version
+            .as_deref()
+            .or(self.version_flag.as_deref())
+    }
 }
 
 /// Arguments for the index command (feature-gated).

@@ -357,7 +357,8 @@ fn cmd_pkg_info(cli: &Cli, args: &cli::InfoArgs) -> Result<()> {
 
     // Get package info - search by attribute path first (what users install with),
     // then fall back to name prefix search
-    let packages = if let Some(ref version) = args.version {
+    let version = args.get_version();
+    let packages = if let Some(version) = version {
         // With version: search by name+version
         queries::search_by_name_version(db.connection(), &args.package, version)?
     } else {
@@ -379,8 +380,7 @@ fn cmd_pkg_info(cli: &Cli, args: &cli::InfoArgs) -> Result<()> {
         println!(
             "Package '{}' not found{}.",
             args.package,
-            args.version
-                .as_ref()
+            version
                 .map(|v| format!(" version {}", v))
                 .unwrap_or_default()
         );

@@ -495,13 +495,7 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
                     ]);
 
                 for pkg in packages {
-                    let desc = pkg
-                        .description
-                        .as_deref()
-                        .unwrap_or("-")
-                        .chars()
-                        .take(50)
-                        .collect::<String>();
+                    let desc = pkg.description.as_deref().unwrap_or("-");
                     table.add_row(vec![
                         Cell::new(&pkg.version).fg(Color::Green),
                         Cell::new(&pkg.attribute_path).fg(Color::Cyan),
@@ -509,12 +503,14 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
                             "{} ({})",
                             pkg.first_commit_short(),
                             pkg.first_commit_date.format("%Y-%m-%d")
-                        )),
+                        ))
+                        .fg(Color::Yellow),
                         Cell::new(format!(
                             "{} ({})",
                             pkg.last_commit_short(),
                             pkg.last_commit_date.format("%Y-%m-%d")
-                        )),
+                        ))
+                        .fg(Color::Yellow),
                         Cell::new(desc),
                     ]);
                 }
@@ -573,8 +569,8 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
                 for (version, first, last) in history {
                     table.add_row(vec![
                         Cell::new(&version).fg(Color::Green),
-                        Cell::new(first.format("%Y-%m-%d").to_string()),
-                        Cell::new(last.format("%Y-%m-%d").to_string()),
+                        Cell::new(first.format("%Y-%m-%d").to_string()).fg(Color::White),
+                        Cell::new(last.format("%Y-%m-%d").to_string()).fg(Color::White),
                     ]);
                 }
 

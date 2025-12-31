@@ -14,8 +14,9 @@ use crate::paths;
 use chrono::{DateTime, Utc};
 use git::NixpkgsRepo;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -34,6 +35,8 @@ pub struct IndexerConfig {
     pub until: Option<String>,
     /// Optional limit on number of commits.
     pub max_commits: Option<usize>,
+    /// Number of parallel workers for extraction.
+    pub jobs: usize,
 }
 
 impl Default for IndexerConfig {
@@ -50,6 +53,9 @@ impl Default for IndexerConfig {
             since: None,
             until: None,
             max_commits: None,
+            jobs: std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4),
         }
     }
 }
@@ -213,6 +219,23 @@ fn set_to_json(values: &HashSet<String>) -> Option<String> {
     serde_json::to_string(&list).ok()
 }
 
+/// Result of extracting a single commit (used for parallel processing).
+#[derive(Debug)]
+struct ExtractedCommit {
+    /// Index of this commit in the batch.
+    batch_index: usize,
+    /// The commit info.
+    commit: git::CommitInfo,
+    /// Aggregated packages across all systems.
+    aggregates: HashMap<String, PackageAggregate>,
+    /// Attribute paths that were targeted for extraction.
+    target_attrs: Vec<String>,
+    /// Whether extraction failed for this commit.
+    extraction_failed: bool,
+    /// Warning messages generated during extraction.
+    warnings: Vec<String>,
+}
+
 /// The main indexer that coordinates git traversal, extraction, and database insertion.
 pub struct Indexer {
     config: IndexerConfig,
@@ -337,6 +360,8 @@ impl Indexer {
     }
 
     /// Process a list of commits, extracting packages and inserting into the database.
+    ///
+    /// Uses parallel extraction with multiple worktrees when jobs > 1.
     fn process_commits<P: AsRef<Path>>(
         &self,
         db: &mut Database,
@@ -347,10 +372,10 @@ impl Indexer {
     ) -> Result<IndexResult> {
         let total_commits = commits.len();
         let systems = &self.config.systems;
+        let num_workers = self.config.jobs.min(total_commits).max(1);
         let _nixpkgs_path = nixpkgs_path.as_ref();
 
         // Set up progress bar if enabled
-        // We use a single combined progress bar to avoid scrolling issues
         let multi_progress = if self.config.show_progress {
             Some(MultiProgress::new())
         } else {
@@ -361,9 +386,7 @@ impl Indexer {
             let pb = mp.add(ProgressBar::new(total_commits as u64));
             pb.set_style(
                 ProgressStyle::default_bar()
-                    .template(
-                        "{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}",
-                    )
+                    .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")
                     .unwrap()
                     .progress_chars("█▓▒░  "),
             );
@@ -372,15 +395,10 @@ impl Indexer {
         });
 
         // Track open ranges: attribute_path+version -> OpenRange
-        // We need to close ranges when a specific version disappears
         let mut open_ranges: HashMap<String, OpenRange> = HashMap::new();
 
         // Track unique package names for bloom filter
         let mut unique_names: HashSet<String> = HashSet::new();
-
-        // If resuming, we should load existing open ranges from the database
-        // For simplicity in initial implementation, we start fresh
-        // A production version would track open ranges in a separate table
 
         let mut result = IndexResult {
             commits_processed: 0,
@@ -394,18 +412,26 @@ impl Indexer {
         let mut prev_commit_date: Option<DateTime<Utc>> = None;
         let mut pending_inserts: Vec<PackageVersion> = Vec::new();
 
+        // Create temporary directory for worktrees
         let temp_dir = tempfile::tempdir()?;
-        let worktree_path = temp_dir.path().join("worktree");
         let first_commit = commits
             .first()
             .ok_or_else(|| NxvError::Git(git2::Error::from_str("No commits to process")))?;
-        let _worktree = repo.create_worktree(&worktree_path, &first_commit.hash)?;
-        let worktree_repo = NixpkgsRepo::open(&worktree_path)?;
 
-        // Build the initial file-to-attribute map from the worktree (at first commit),
-        // NOT from the main repo at HEAD. This ensures the mapping matches the
-        // file structure at the commits we're actually processing.
-        let mut file_attr_map = build_file_attr_map(&worktree_path, systems)?;
+        // Create worker worktrees (repos will be opened per-thread for thread safety)
+        // We must keep the Worktree objects alive to prevent cleanup on drop
+        let mut worktree_paths: Vec<PathBuf> = Vec::with_capacity(num_workers);
+        let mut _worktrees: Vec<git::Worktree> = Vec::with_capacity(num_workers);
+
+        for i in 0..num_workers {
+            let worktree_path = temp_dir.path().join(format!("worker-{}", i));
+            let worktree = repo.create_worktree(&worktree_path, &first_commit.hash)?;
+            worktree_paths.push(worktree_path);
+            _worktrees.push(worktree);
+        }
+
+        // Build the initial file-to-attribute map from the first worktree
+        let mut file_attr_map = build_file_attr_map(&worktree_paths[0], systems)?;
         let mut mapping_commit = first_commit.hash.clone();
 
         // Helper to print warnings without disrupting progress bar
@@ -417,7 +443,17 @@ impl Indexer {
             }
         };
 
-        for (i, commit) in commits.iter().enumerate() {
+        // Configure rayon thread pool
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_workers)
+            .build()
+            .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
+
+        // Process commits in batches for parallel extraction
+        let batch_size = num_workers;
+        let mut commit_idx = 0;
+
+        while commit_idx < commits.len() {
             // Check for shutdown
             if self.is_shutdown_requested() {
                 if let Some(ref pb) = progress_bar {
@@ -446,231 +482,322 @@ impl Indexer {
                 break;
             }
 
-            // Update progress bar with current commit info
-            if let Some(ref pb) = progress_bar {
-                pb.set_position(i as u64);
-                pb.set_message(format!(
-                    "{} ({}) | {} pkgs | {} ranges",
-                    &commit.short_hash,
-                    commit.date.format("%Y-%m-%d"),
-                    result.packages_found,
-                    result.ranges_created
-                ));
-            }
+            // Get the batch of commits to process
+            let batch_end = (commit_idx + batch_size).min(commits.len());
+            let batch = &commits[commit_idx..batch_end];
 
-            // Checkout the commit in the worktree
-            if let Err(e) = worktree_repo.checkout_commit(&commit.hash) {
-                warn(
-                    &progress_bar,
-                    format!("Failed to checkout {}: {}", &commit.short_hash, e),
-                );
-                prev_commit_hash = Some(commit.hash.clone());
-                prev_commit_date = Some(commit.date);
-                continue;
-            }
-
-            let changed_paths = match repo.get_commit_changed_paths(&commit.hash) {
-                Ok(paths) => paths,
-                Err(e) => {
-                    warn(
-                        &progress_bar,
-                        format!("Failed to list changes for {}: {}", &commit.short_hash, e),
-                    );
-                    prev_commit_hash = Some(commit.hash.clone());
-                    prev_commit_date = Some(commit.date);
-                    continue;
-                }
-            };
-
-            if should_refresh_file_map(&changed_paths) && mapping_commit != commit.hash {
-                match build_file_attr_map(&worktree_path, systems) {
-                    Ok(map) => {
+            // Check if we need to refresh the file map (do this before parallel extraction)
+            for commit in batch {
+                let changed_paths = repo
+                    .get_commit_changed_paths(&commit.hash)
+                    .unwrap_or_default();
+                if should_refresh_file_map(&changed_paths) && mapping_commit != commit.hash {
+                    // Checkout first worktree to this commit to refresh the map
+                    if let Ok(worktree_repo) = NixpkgsRepo::open(&worktree_paths[0])
+                        && worktree_repo.checkout_commit(&commit.hash).is_ok()
+                        && let Ok(map) = build_file_attr_map(&worktree_paths[0], systems)
+                    {
                         file_attr_map = map;
                         mapping_commit = commit.hash.clone();
                     }
-                    Err(e) => {
-                        warn(
-                            &progress_bar,
-                            format!(
-                                "Failed to refresh attribute map at {}: {}",
-                                &commit.short_hash, e
-                            ),
-                        );
-                    }
+                    break; // Only need to refresh once per batch
                 }
             }
 
-            let mut target_attr_paths: HashSet<String> = HashSet::new();
+            // Parallel extraction phase
+            let file_attr_map_ref = &file_attr_map;
+            let systems_ref = systems;
+            let worktree_paths_ref = &worktree_paths;
+            let shutdown_flag = &self.shutdown;
 
-            // Get the list of all known attrs from all-packages.nix for fallback lookups
-            let all_attrs: Option<&Vec<String>> = file_attr_map.get("pkgs/top-level/all-packages.nix");
+            let extracted: Vec<ExtractedCommit> = pool.install(|| {
+                batch
+                    .par_iter()
+                    .enumerate()
+                    .map(|(batch_idx, commit)| {
+                        // Check shutdown in parallel workers too
+                        if shutdown_flag.load(Ordering::SeqCst) {
+                            return ExtractedCommit {
+                                batch_index: batch_idx,
+                                commit: commit.clone(),
+                                aggregates: HashMap::new(),
+                                target_attrs: Vec::new(),
+                                extraction_failed: true,
+                                warnings: vec!["Shutdown requested".to_string()],
+                            };
+                        }
 
-            for path in &changed_paths {
-                if let Some(attr_paths) = file_attr_map.get(path) {
-                    // Direct match in file_attr_map
-                    for attr in attr_paths {
-                        target_attr_paths.insert(attr.clone());
-                    }
-                } else if path.starts_with("pkgs/") && path.ends_with(".nix") {
-                    // Try to infer package name from path like:
-                    // pkgs/os-specific/linux/wireguard/default.nix -> wireguard
-                    // pkgs/development/python-modules/requests/default.nix -> requests
-                    // pkgs/tools/misc/hello/default.nix -> hello
-                    let parts: Vec<&str> = path.split('/').collect();
-                    if parts.len() >= 2 {
-                        // Get the parent directory name as a potential package name
-                        let potential_name = if parts.last() == Some(&"default.nix") && parts.len() >= 2 {
-                            parts[parts.len() - 2]
-                        } else {
-                            // For files like pkgs/foo/bar.nix, try "bar" (without .nix)
-                            parts.last()
-                                .map(|f| f.trim_end_matches(".nix"))
-                                .unwrap_or("")
+                        let worker_idx = batch_idx % num_workers;
+                        let worktree_path = &worktree_paths_ref[worker_idx];
+
+                        let mut warnings = Vec::new();
+
+                        // Open repo for this thread (git2::Repository is not Sync)
+                        let worktree_repo = match NixpkgsRepo::open(worktree_path) {
+                            Ok(repo) => repo,
+                            Err(e) => {
+                                warnings.push(format!(
+                                    "Failed to open worktree for {}: {}",
+                                    &commit.short_hash, e
+                                ));
+                                return ExtractedCommit {
+                                    batch_index: batch_idx,
+                                    commit: commit.clone(),
+                                    aggregates: HashMap::new(),
+                                    target_attrs: Vec::new(),
+                                    extraction_failed: true,
+                                    warnings,
+                                };
+                            }
                         };
 
-                        // Check if this potential name exists as an attribute
-                        if let Some(all_attrs_list) = all_attrs
-                            && all_attrs_list.contains(&potential_name.to_string())
-                        {
-                            target_attr_paths.insert(potential_name.to_string());
+                        // Checkout the commit
+                        if let Err(e) = worktree_repo.checkout_commit(&commit.hash) {
+                            warnings
+                                .push(format!("Failed to checkout {}: {}", &commit.short_hash, e));
+                            return ExtractedCommit {
+                                batch_index: batch_idx,
+                                commit: commit.clone(),
+                                aggregates: HashMap::new(),
+                                target_attrs: Vec::new(),
+                                extraction_failed: true,
+                                warnings,
+                            };
                         }
-                    }
+
+                        // Get changed paths (use worktree_repo to avoid shared reference)
+                        let changed_paths =
+                            match worktree_repo.get_commit_changed_paths(&commit.hash) {
+                                Ok(paths) => paths,
+                                Err(e) => {
+                                    warnings.push(format!(
+                                        "Failed to list changes for {}: {}",
+                                        &commit.short_hash, e
+                                    ));
+                                    return ExtractedCommit {
+                                        batch_index: batch_idx,
+                                        commit: commit.clone(),
+                                        aggregates: HashMap::new(),
+                                        target_attrs: Vec::new(),
+                                        extraction_failed: true,
+                                        warnings,
+                                    };
+                                }
+                            };
+
+                        // Determine target attributes
+                        let mut target_attr_paths: HashSet<String> = HashSet::new();
+                        let all_attrs: Option<&Vec<String>> =
+                            file_attr_map_ref.get("pkgs/top-level/all-packages.nix");
+
+                        for path in &changed_paths {
+                            if let Some(attr_paths) = file_attr_map_ref.get(path) {
+                                for attr in attr_paths {
+                                    target_attr_paths.insert(attr.clone());
+                                }
+                            } else if path.starts_with("pkgs/") && path.ends_with(".nix") {
+                                let parts: Vec<&str> = path.split('/').collect();
+                                if parts.len() >= 2 {
+                                    let potential_name = if parts.last() == Some(&"default.nix")
+                                        && parts.len() >= 2
+                                    {
+                                        parts[parts.len() - 2]
+                                    } else {
+                                        parts
+                                            .last()
+                                            .map(|f| f.trim_end_matches(".nix"))
+                                            .unwrap_or("")
+                                    };
+
+                                    if let Some(all_attrs_list) = all_attrs
+                                        && all_attrs_list.contains(&potential_name.to_string())
+                                    {
+                                        target_attr_paths.insert(potential_name.to_string());
+                                    }
+                                }
+                            }
+                        }
+
+                        if target_attr_paths.is_empty() {
+                            return ExtractedCommit {
+                                batch_index: batch_idx,
+                                commit: commit.clone(),
+                                aggregates: HashMap::new(),
+                                target_attrs: Vec::new(),
+                                extraction_failed: false,
+                                warnings,
+                            };
+                        }
+
+                        let mut target_list: Vec<String> = target_attr_paths.into_iter().collect();
+                        target_list.sort();
+
+                        // Extract packages for all systems
+                        let mut aggregates: HashMap<String, PackageAggregate> = HashMap::new();
+                        let extraction_failed = false;
+
+                        for system in systems_ref {
+                            let packages = match extractor::extract_packages_for_attrs(
+                                worktree_path,
+                                system,
+                                &target_list,
+                            ) {
+                                Ok(pkgs) => pkgs,
+                                Err(e) => {
+                                    warnings.push(format!(
+                                        "Extraction failed at {} ({}): {}",
+                                        &commit.short_hash, system, e
+                                    ));
+                                    // Continue with other systems instead of failing completely
+                                    continue;
+                                }
+                            };
+
+                            for pkg in packages {
+                                let key = format!("{}::{}", pkg.attribute_path, pkg.version);
+                                if let Some(existing) = aggregates.get_mut(&key) {
+                                    existing.merge(pkg);
+                                } else {
+                                    aggregates.insert(key, PackageAggregate::new(pkg));
+                                }
+                            }
+                        }
+
+                        ExtractedCommit {
+                            batch_index: batch_idx,
+                            commit: commit.clone(),
+                            aggregates,
+                            target_attrs: target_list,
+                            extraction_failed,
+                            warnings,
+                        }
+                    })
+                    .collect()
+            });
+
+            // Sequential processing phase - update version ranges
+            // Sort by batch_index to maintain commit order
+            let mut sorted_extracted = extracted;
+            sorted_extracted.sort_by_key(|e| e.batch_index);
+
+            for extracted_commit in sorted_extracted {
+                // Print any warnings
+                for warning in &extracted_commit.warnings {
+                    warn(&progress_bar, warning.clone());
                 }
-            }
 
-            if target_attr_paths.is_empty() {
-                result.commits_processed += 1;
-                prev_commit_hash = Some(commit.hash.clone());
-                prev_commit_date = Some(commit.date);
-                continue;
-            }
+                // Update progress bar
+                if let Some(ref pb) = progress_bar {
+                    pb.set_position((commit_idx + extracted_commit.batch_index) as u64);
+                    pb.set_message(format!(
+                        "{} ({}) | {} pkgs | {} ranges",
+                        &extracted_commit.commit.short_hash,
+                        extracted_commit.commit.date.format("%Y-%m-%d"),
+                        result.packages_found,
+                        result.ranges_created
+                    ));
+                }
 
-            // Extract packages for all configured systems and aggregate results.
-            let mut aggregates: HashMap<String, PackageAggregate> = HashMap::new();
-            let mut extraction_failed = false;
-            let mut target_list: Vec<String> = target_attr_paths.into_iter().collect();
-            target_list.sort();
+                if extracted_commit.extraction_failed && extracted_commit.aggregates.is_empty() {
+                    prev_commit_hash = Some(extracted_commit.commit.hash.clone());
+                    prev_commit_date = Some(extracted_commit.commit.date);
+                    continue;
+                }
 
-            for system in systems {
-                let packages = match extractor::extract_packages_for_attrs(
-                    &worktree_path,
-                    system,
-                    &target_list,
-                ) {
-                    Ok(pkgs) => pkgs,
-                    Err(e) => {
-                        warn(
-                            &progress_bar,
-                            format!(
-                                "Extraction failed at {} ({}): {}",
-                                &commit.short_hash, system, e
-                            ),
+                if extracted_commit.target_attrs.is_empty() {
+                    result.commits_processed += 1;
+                    prev_commit_hash = Some(extracted_commit.commit.hash.clone());
+                    prev_commit_date = Some(extracted_commit.commit.date);
+                    continue;
+                }
+
+                result.packages_found += extracted_commit.aggregates.len() as u64;
+
+                // Track which packages we saw in this commit
+                let mut seen_keys: HashSet<String> = HashSet::new();
+                let target_set: HashSet<String> =
+                    extracted_commit.target_attrs.iter().cloned().collect();
+
+                for aggregate in extracted_commit.aggregates.values() {
+                    let key = aggregate.key();
+                    seen_keys.insert(key.clone());
+
+                    // Track unique package names for bloom filter
+                    unique_names.insert(aggregate.name.clone());
+
+                    let license_json = aggregate.license_json();
+                    let maintainers_json = aggregate.maintainers_json();
+                    let platforms_json = aggregate.platforms_json();
+
+                    if let Some(existing) = open_ranges.get_mut(&key) {
+                        existing.update_metadata(
+                            aggregate.description.clone(),
+                            license_json,
+                            aggregate.homepage.clone(),
+                            maintainers_json,
+                            platforms_json,
                         );
-                        extraction_failed = true;
-                        break;
-                    }
-                };
-
-                for pkg in packages {
-                    let key = format!("{}::{}", pkg.attribute_path, pkg.version);
-                    if let Some(existing) = aggregates.get_mut(&key) {
-                        existing.merge(pkg);
                     } else {
-                        aggregates.insert(key, PackageAggregate::new(pkg));
+                        open_ranges.insert(
+                            key.clone(),
+                            OpenRange {
+                                name: aggregate.name.clone(),
+                                version: aggregate.version.clone(),
+                                first_commit_hash: extracted_commit.commit.hash.clone(),
+                                first_commit_date: extracted_commit.commit.date,
+                                attribute_path: aggregate.attribute_path.clone(),
+                                description: aggregate.description.clone(),
+                                license: license_json,
+                                homepage: aggregate.homepage.clone(),
+                                maintainers: maintainers_json,
+                                platforms: platforms_json,
+                            },
+                        );
                     }
                 }
-            }
 
-            if extraction_failed {
-                prev_commit_hash = Some(commit.hash.clone());
-                prev_commit_date = Some(commit.date);
-                continue;
-            }
+                // Close ranges for packages that disappeared
+                let disappeared: Vec<String> = open_ranges
+                    .iter()
+                    .filter(|(key, range)| {
+                        target_set.contains(&range.attribute_path) && !seen_keys.contains(*key)
+                    })
+                    .map(|(key, _)| key.clone())
+                    .collect();
 
-            result.packages_found += aggregates.len() as u64;
-
-            // Track which packages we saw in this commit
-            let mut seen_keys: HashSet<String> = HashSet::new();
-            let mut seen_attr_paths: HashSet<String> = HashSet::new();
-            let target_set: HashSet<String> = target_list.iter().cloned().collect();
-
-            for aggregate in aggregates.values() {
-                let key = aggregate.key();
-                seen_keys.insert(key.clone());
-                seen_attr_paths.insert(aggregate.attribute_path.clone());
-
-                // Track unique package names for bloom filter
-                unique_names.insert(aggregate.name.clone());
-
-                let license_json = aggregate.license_json();
-                let maintainers_json = aggregate.maintainers_json();
-                let platforms_json = aggregate.platforms_json();
-
-                if let Some(existing) = open_ranges.get_mut(&key) {
-                    existing.update_metadata(
-                        aggregate.description.clone(),
-                        license_json,
-                        aggregate.homepage.clone(),
-                        maintainers_json,
-                        platforms_json,
-                    );
-                } else {
-                    open_ranges.insert(
-                        key.clone(),
-                        OpenRange {
-                            name: aggregate.name.clone(),
-                            version: aggregate.version.clone(),
-                            first_commit_hash: commit.hash.clone(),
-                            first_commit_date: commit.date,
-                            attribute_path: aggregate.attribute_path.clone(),
-                            description: aggregate.description.clone(),
-                            license: license_json,
-                            homepage: aggregate.homepage.clone(),
-                            maintainers: maintainers_json,
-                            platforms: platforms_json,
-                        },
-                    );
+                for key in disappeared {
+                    if let Some(range) = open_ranges.remove(&key)
+                        && let (Some(prev_hash), Some(prev_date)) =
+                            (&prev_commit_hash, prev_commit_date)
+                    {
+                        pending_inserts.push(range.to_package_version(prev_hash, prev_date));
+                    }
                 }
-            }
 
-            // Close ranges for packages that disappeared
-            let disappeared: Vec<String> = open_ranges
-                .iter()
-                .filter(|(key, range)| {
-                    target_set.contains(&range.attribute_path) && !seen_keys.contains(*key)
-                })
-                .map(|(key, _)| key.clone())
-                .collect();
-
-            for key in disappeared {
-                if let Some(range) = open_ranges.remove(&key)
-                    && let (Some(prev_hash), Some(prev_date)) =
-                        (&prev_commit_hash, prev_commit_date)
-                {
-                    pending_inserts.push(range.to_package_version(prev_hash, prev_date));
-                }
+                result.commits_processed += 1;
+                prev_commit_hash = Some(extracted_commit.commit.hash.clone());
+                prev_commit_date = Some(extracted_commit.commit.date);
             }
 
             // Checkpoint if needed
-            if (i + 1) % self.config.checkpoint_interval == 0 {
-                // Insert pending ranges
+            let global_idx = commit_idx + batch.len();
+            if global_idx.is_multiple_of(self.config.checkpoint_interval)
+                || global_idx == commits.len()
+            {
                 if !pending_inserts.is_empty() {
                     result.ranges_created +=
                         db.insert_package_ranges_batch(&pending_inserts)? as u64;
                     pending_inserts.clear();
                 }
 
-                // Save checkpoint metadata
-                db.set_meta("last_indexed_commit", &commit.hash)?;
-                db.set_meta("checkpoint_open_ranges", &open_ranges.len().to_string())?;
-
-                // Flush WAL to disk
-                db.checkpoint()?;
+                if let Some(ref prev_hash) = prev_commit_hash {
+                    db.set_meta("last_indexed_commit", prev_hash)?;
+                    db.set_meta("checkpoint_open_ranges", &open_ranges.len().to_string())?;
+                    db.checkpoint()?;
+                }
             }
 
-            result.commits_processed += 1;
-            prev_commit_hash = Some(commit.hash.clone());
-            prev_commit_date = Some(commit.date);
+            commit_idx = batch_end;
         }
 
         // Final: close all remaining open ranges at the last commit
@@ -682,12 +809,10 @@ impl Indexer {
                 pending_inserts.push(range.to_package_version(last_hash, last_date));
             }
 
-            // Insert any remaining pending ranges
             if !pending_inserts.is_empty() {
                 result.ranges_created += db.insert_package_ranges_batch(&pending_inserts)? as u64;
             }
 
-            // Save final state
             if let Some(ref last_hash) = prev_commit_hash {
                 db.set_meta("last_indexed_commit", last_hash)?;
             }
@@ -708,7 +833,10 @@ impl Indexer {
     }
 }
 
-fn build_file_attr_map(repo_path: &Path, systems: &[String]) -> Result<HashMap<String, Vec<String>>> {
+fn build_file_attr_map(
+    repo_path: &Path,
+    systems: &[String],
+) -> Result<HashMap<String, Vec<String>>> {
     let system = systems
         .first()
         .ok_or_else(|| NxvError::NixEval("No systems configured".to_string()))?;
@@ -719,9 +847,7 @@ fn build_file_attr_map(repo_path: &Path, systems: &[String]) -> Result<HashMap<S
         if let Some(file) = position.file
             && let Some(relative) = normalize_position_file(repo_path, &file)
         {
-            map.entry(relative)
-                .or_default()
-                .push(position.attr_path);
+            map.entry(relative).or_default().push(position.attr_path);
         }
     }
 
@@ -737,7 +863,9 @@ fn normalize_position_file(repo_path: &Path, file: &str) -> Option<String> {
     let trimmed = file.split(':').next().unwrap_or(file);
     let repo_str = repo_path.display().to_string();
     if trimmed.starts_with(&repo_str) {
-        let rel = trimmed.trim_start_matches(&repo_str).trim_start_matches('/');
+        let rel = trimmed
+            .trim_start_matches(&repo_str)
+            .trim_start_matches('/');
         return Some(rel.to_string());
     }
 
@@ -986,6 +1114,7 @@ mod tests {
             since: None,
             until: None,
             max_commits: None,
+            jobs: 1,
         };
         let _indexer = Indexer::new(config);
 
@@ -1016,6 +1145,7 @@ mod tests {
             since: None,
             until: None,
             max_commits: None,
+            jobs: 1,
         };
         let _indexer = Indexer::new(config);
 
@@ -1194,5 +1324,64 @@ mod tests {
             let chromium = queries::search_by_name(db.connection(), "chromium", true).unwrap();
             assert_eq!(chromium.len(), 1);
         }
+    }
+
+    #[test]
+    fn test_indexer_config_jobs_default() {
+        let config = IndexerConfig::default();
+        // Default should be based on available parallelism
+        assert!(config.jobs >= 1);
+    }
+
+    #[test]
+    fn test_indexer_config_custom_jobs() {
+        let config = IndexerConfig {
+            jobs: 8,
+            ..IndexerConfig::default()
+        };
+        assert_eq!(config.jobs, 8);
+    }
+
+    #[test]
+    fn test_extracted_commit_structure() {
+        // Test that ExtractedCommit can be created and accessed
+        let commit = git::CommitInfo {
+            hash: "abc123def456".to_string(),
+            short_hash: "abc123d".to_string(),
+            date: Utc::now(),
+        };
+
+        let extracted = ExtractedCommit {
+            batch_index: 0,
+            commit: commit.clone(),
+            aggregates: HashMap::new(),
+            target_attrs: vec!["hello".to_string()],
+            extraction_failed: false,
+            warnings: Vec::new(),
+        };
+
+        assert_eq!(extracted.batch_index, 0);
+        assert_eq!(extracted.commit.hash, "abc123def456");
+        assert!(extracted.target_attrs.contains(&"hello".to_string()));
+        assert!(!extracted.extraction_failed);
+    }
+
+    #[test]
+    fn test_parallel_config_num_workers_clamped() {
+        // Test that num_workers is clamped to at least 1 and at most total_commits
+        let config = IndexerConfig {
+            jobs: 100,
+            ..IndexerConfig::default()
+        };
+
+        // With 5 commits and 100 jobs, should use 5 workers
+        let total_commits = 5;
+        let num_workers = config.jobs.min(total_commits).max(1);
+        assert_eq!(num_workers, 5);
+
+        // With 0 commits and 100 jobs, should use 1 worker (max of min result and 1)
+        let total_commits = 0;
+        let num_workers = config.jobs.min(total_commits).max(1);
+        assert_eq!(num_workers, 1);
     }
 }

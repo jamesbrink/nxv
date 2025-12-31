@@ -42,7 +42,8 @@ impl Database {
     /// Call this at regular intervals during long-running operations.
     #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
     pub fn checkpoint(&self) -> Result<()> {
-        self.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        self.conn
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
         Ok(())
     }
 
@@ -407,11 +408,15 @@ mod tests {
         };
 
         // First insert should succeed
-        let inserted1 = db.insert_package_ranges_batch(&[pkg.clone()]).unwrap();
+        let inserted1 = db
+            .insert_package_ranges_batch(std::slice::from_ref(&pkg))
+            .unwrap();
         assert_eq!(inserted1, 1);
 
         // Second insert of same package should be ignored (no error)
-        let inserted2 = db.insert_package_ranges_batch(&[pkg]).unwrap();
+        let inserted2 = db
+            .insert_package_ranges_batch(std::slice::from_ref(&pkg))
+            .unwrap();
         assert_eq!(inserted2, 0);
 
         // Verify only one row exists

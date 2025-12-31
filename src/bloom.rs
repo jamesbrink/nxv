@@ -157,7 +157,7 @@ mod tests {
 
         // Should be between 1MB and 2MB for 1M items at 1% FPR
         assert!(
-            size_mb >= 1.0 && size_mb <= 2.0,
+            (1.0..=2.0).contains(&size_mb),
             "Bloom filter size {:.2}MB is outside expected range (1-2MB)",
             size_mb
         );

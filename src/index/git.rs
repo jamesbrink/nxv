@@ -389,7 +389,8 @@ impl NixpkgsRepo {
         checkout_opts.force();
         checkout_opts.remove_untracked(true);
 
-        self.repo.checkout_tree(tree.as_object(), Some(&mut checkout_opts))?;
+        self.repo
+            .checkout_tree(tree.as_object(), Some(&mut checkout_opts))?;
         self.repo.set_head_detached(oid)?;
 
         Ok(())
@@ -444,7 +445,12 @@ impl NixpkgsRepo {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(NxvError::Git(git2::Error::from_str(
-                stderr.lines().take(3).collect::<Vec<_>>().join("\n").as_str(),
+                stderr
+                    .lines()
+                    .take(3)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    .as_str(),
             )));
         }
 

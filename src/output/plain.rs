@@ -23,21 +23,12 @@ pub fn print_plain(results: &[PackageVersion], show_platforms: bool) {
             let platforms = pkg.platforms.as_deref().unwrap_or("-");
             println!(
                 "{}\t{}\t{}\t{}\t{}\t{}",
-                pkg.name,
-                pkg.version,
-                pkg.last_commit_hash,
-                date,
-                pkg.attribute_path,
-                platforms
+                pkg.name, pkg.version, pkg.last_commit_hash, date, pkg.attribute_path, platforms
             );
         } else {
             println!(
                 "{}\t{}\t{}\t{}\t{}",
-                pkg.name,
-                pkg.version,
-                pkg.last_commit_hash,
-                date,
-                pkg.attribute_path
+                pkg.name, pkg.version, pkg.last_commit_hash, date, pkg.attribute_path
             );
         }
     }

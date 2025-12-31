@@ -177,21 +177,15 @@ fn bench_insertion_rate(c: &mut Criterion) {
         group.throughput(Throughput::Elements(*size as u64));
 
         group.bench_with_input(BenchmarkId::new("one_by_one", size), size, |b, _| {
-            b.iter_with_setup(
-                || create_benchmark_db(),
-                |(_dir, conn)| {
-                    insert_packages_one_by_one(&conn, &packages);
-                },
-            );
+            b.iter_with_setup(create_benchmark_db, |(_dir, conn)| {
+                insert_packages_one_by_one(&conn, &packages);
+            });
         });
 
         group.bench_with_input(BenchmarkId::new("batch", size), size, |b, _| {
-            b.iter_with_setup(
-                || create_benchmark_db(),
-                |(_dir, conn)| {
-                    insert_packages_batch(&conn, &packages);
-                },
-            );
+            b.iter_with_setup(create_benchmark_db, |(_dir, conn)| {
+                insert_packages_batch(&conn, &packages);
+            });
         });
     }
 

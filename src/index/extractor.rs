@@ -258,7 +258,6 @@ in
   ) attrNames
 "#;
 
-
 /// Extract packages from a nixpkgs checkout at a specific path.
 ///
 /// # Arguments
@@ -651,13 +650,13 @@ mod tests {
                     .iter()
                     .find(|p| p.name == "int-version-pkg")
                     .unwrap();
-                assert_eq!(int_ver.version, "61", "Integer version should be converted to string");
+                assert_eq!(
+                    int_ver.version, "61",
+                    "Integer version should be converted to string"
+                );
             }
             Err(e) => {
-                panic!(
-                    "Extraction should not fail with edge case packages: {}",
-                    e
-                );
+                panic!("Extraction should not fail with edge case packages: {}", e);
             }
         }
     }

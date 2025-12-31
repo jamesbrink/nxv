@@ -19,14 +19,14 @@ nxv is a CLI tool for discovering specific versions of Nix packages across nixpk
 
 ## Architecture
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                           DEVELOPMENT / CI                                   │
+│                           DEVELOPMENT / CI                                  │
 │                                                                             │
-│  ┌─────────────┐     ┌──────────────┐     ┌─────────────┐                  │
-│  │  nixpkgs    │────▶│   Indexer    │────▶│   SQLite    │                  │
-│  │  (git repo) │     │  (git2+nix)  │     │   Index     │                  │
-│  └─────────────┘     └──────────────┘     └─────────────┘                  │
+│  ┌─────────────┐     ┌──────────────┐     ┌─────────────┐                   │
+│  │  nixpkgs    │────▶│   Indexer    │────▶│   SQLite    │                   │
+│  │  (git repo) │     │  (git2+nix)  │     │   Index     │                   │
+│  └─────────────┘     └──────────────┘     └─────────────┘                   │
 │                                                  │                          │
 │                            ┌─────────────────────┼─────────────────────┐    │
 │                            │                     │                     │    │
@@ -49,12 +49,12 @@ nxv is a CLI tool for discovering specific versions of Nix packages across nixpk
                                                    │ HTTPS
                                                    ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                              USER RUNTIME                                    │
+│                              USER RUNTIME                                   │
 │                                                                             │
-│  ┌─────────────┐     ┌──────────────┐     ┌─────────────┐                  │
-│  │   nxv CLI   │────▶│  Downloader  │────▶│   Local     │                  │
-│  │             │     │  (reqwest)   │     │   Index     │                  │
-│  └─────────────┘     └──────────────┘     └─────────────┘                  │
+│  ┌─────────────┐     ┌──────────────┐     ┌─────────────┐                   │
+│  │   nxv CLI   │────▶│  Downloader  │────▶│   Local     │                   │
+│  │             │     │  (reqwest)   │     │   Index     │                   │
+│  └─────────────┘     └──────────────┘     └─────────────┘                   │
 │         │                                        │                          │
 │         │            ┌──────────────┐            │                          │
 │         └───────────▶│ Bloom Filter │◀───────────┘                          │
@@ -72,23 +72,27 @@ nxv is a CLI tool for discovering specific versions of Nix packages across nixpk
 ## Design Decisions
 
 ### Channel Strategy
+
 - **Single channel: nixpkgs-unstable (master branch)**
 - Rationale: All package development happens in unstable; stable branches only backport security fixes
 - Future: Schema supports adding `channel` column if multi-channel is needed
 
 ### Index Distribution
+
 - **Primary:** GitHub Releases (free, reliable, global CDN via GitHub)
 - **Format:** zstd-compressed SQLite database + bloom filter
 - **Updates:** Delta packs (new ranges + range updates since last indexed commit)
 - **Integrity:** manifest is signed; client verifies using an embedded public key
 
 ### Delta Update Strategy
+
 - Index stores version ranges; deltas contain new ranges and range updates since a specific commit
 - Format: `delta-<from_commit_short>-<to_commit_short>.pack.zst`
 - Client downloads applicable delta and imports into local database
 - Manifest file tracks available deltas and full index versions
 
 ### Bloom Filter Strategy
+
 - Bloom filter of all unique package names
 - ~1.2MB for 1M entries at 1% false positive rate
 - Loaded into memory on startup
@@ -97,6 +101,7 @@ nxv is a CLI tool for discovering specific versions of Nix packages across nixpk
 - Only used for exact-name searches; prefix/description searches bypass the filter
 
 ### Storage Model
+
 - Store contiguous ranges where an attribute path has the same version
 - When a package's version does not change, keep the range open without updating `last_commit_*`
 - When a version changes or a package disappears, close the prior range by setting `last_commit_*` to the previous commit
@@ -174,6 +179,7 @@ USING fts5(name, description, content=package_versions, content_rowid=id);
 ```
 
 Manifest integrity:
+
 - `manifest.json` is signed as `manifest.json.sig` (minisign or cosign)
 - Client verifies signature using an embedded public key before trusting URLs/hashes
 
@@ -236,7 +242,7 @@ indexer = ["git2"]  # Enable indexer functionality (dev only)
 
 ## Module Structure
 
-```
+```shell
 src/
 ├── main.rs              # Entry point, command dispatch
 ├── cli.rs               # Clap command definitions
@@ -268,7 +274,7 @@ src/
 
 ## Phase 1: Project Scaffolding & CLI Structure
 
-### Tasks
+### Tasks (Phase 1: Project Scaffolding & CLI Structure)
 
 - [x] Initialize Cargo project with `cargo init`
 - [x] Add all dependencies to `Cargo.toml` with feature flags
@@ -296,7 +302,7 @@ src/
   - [x] `get_index_path()` - path to index.db
   - [x] `get_bloom_path()` - path to bloom filter
 
-### Success Criteria
+### Success Criteria (Phase 1: Project Scaffolding & CLI Structure)
 
 - [x] `cargo build` succeeds with no warnings
 - [x] `cargo build --features indexer` succeeds
@@ -310,7 +316,7 @@ src/
 
 ## Phase 2: Database Layer
 
-### Tasks
+### Tasks (Phase 2: Database Layer)
 
 - [x] Implement `Database` struct in `db/mod.rs`:
   - [x] `Database::open(path)` - open or create database
@@ -325,6 +331,7 @@ src/
   - [x] `set_meta(key, value)`
   - [x] Keys: `last_indexed_commit`, `index_version`, `created_at`
 - [x] Implement `PackageVersion` struct:
+
   ```rust
   pub struct PackageVersion {
       pub id: i64,
@@ -342,6 +349,7 @@ src/
       pub platforms: Option<String>,    // JSON
   }
   ```
+
 - [x] Implement package queries in `db/queries.rs`:
   - [x] `search_by_name(name, exact: bool) -> Vec<PackageVersion>`
   - [x] `search_by_attr(attr_path) -> Vec<PackageVersion>`
@@ -356,7 +364,7 @@ src/
 - [x] Implement delta import in `db/import.rs`:
   - [x] `import_delta_pack(path)` - import rows and apply range updates from delta pack file
 
-### Success Criteria
+### Success Criteria (Phase 2: Database Layer)
 
 - [x] Unit tests for all database operations pass
 - [x] Test: create db, insert package, query returns correct result
@@ -375,7 +383,7 @@ src/
 
 ## Phase 3: Git Repository Traversal (Indexer Feature)
 
-### Tasks
+### Tasks (Phase 3: Git Repository Traversal (Indexer Feature))
 
 - [x] Gate all git code behind `#[cfg(feature = "indexer")]`
 - [x] Implement `NixpkgsRepo` struct in `index/git.rs`:
@@ -387,6 +395,7 @@ src/
   - [x] Walk first-parent history (avoid merge commit explosion)
   - [x] Return in chronological order (oldest first) for correct insertion order
 - [x] Implement `CommitInfo` struct:
+
   ```rust
   pub struct CommitInfo {
       pub hash: String,      // full 40-char
@@ -394,6 +403,7 @@ src/
       pub short_hash: String, // 7-char for display
   }
   ```
+
 - [x] Implement checkout/file access:
   - [x] `checkout_commit(hash)` - for nix eval at specific commit
   - [x] Or use `git worktree` for parallel extraction (implemented in git.rs)
@@ -401,7 +411,7 @@ src/
   - [x] `count_commits()` and `count_commits_since()` for progress calculation
   - [x] Integrate with indicatif (implemented in Phase 5)
 
-### Success Criteria
+### Success Criteria (Phase 3: Git Repository Traversal (Indexer Feature))
 
 - [x] Tests use a small test git repository (created in test setup with known commits)
 - [x] Test: `get_all_commits()` returns commits in chronological order
@@ -416,7 +426,7 @@ src/
 
 ## Phase 4: Nix Package Extraction (Indexer Feature)
 
-### Tasks
+### Tasks (Phase 4: Nix Package Extraction (Indexer Feature))
 
 - [x] Implement extraction strategy in `index/extractor.rs`:
   - [x] Use `nix eval` with custom expression to extract package info
@@ -426,6 +436,7 @@ src/
   - [x] Handle `nix eval` failures gracefully (some commits won't eval)
   - [x] Log failed commits but continue (`try_extract_at_commit`)
 - [x] Implement `PackageInfo` struct:
+
   ```rust
   pub struct PackageInfo {
       pub name: String,
@@ -438,6 +449,7 @@ src/
       pub platforms: Option<Vec<String>>,
   }
   ```
+
 - [x] Write nix expression for extraction:
   - [x] Iterate over all packages in `legacyPackages.${system}` or equivalent
   - [x] Extract `pname`, `version`, `meta.description`, `meta.license`, `meta.homepage`, `meta.maintainers`, `meta.platforms`
@@ -453,7 +465,7 @@ src/
   - [x] Platform-specific packages - capture `meta.platforms` into `platforms`
   - [x] Aliases - resolve to real package (only derivations are extracted)
 
-### Success Criteria
+### Success Criteria (Phase 4: Nix Package Extraction (Indexer Feature))
 
 - [x] Test: extraction expression evaluates successfully on current nixpkgs (integration test)
 - [x] Test: extracted data includes expected fields (name, version, description, etc.)
@@ -469,7 +481,7 @@ src/
 
 ## Phase 5: Indexing Pipeline (Indexer Feature)
 
-### Tasks
+### Tasks (Phase 5: Indexing Pipeline (Indexer Feature))
 
 - [x] Implement `Indexer` in `index/mod.rs`:
   - [x] Coordinates: git traversal → extraction → database insertion
@@ -504,7 +516,7 @@ src/
   - [x] Save checkpoint
   - [x] Exit cleanly
 
-### Success Criteria
+### Success Criteria (Phase 5: Indexing Pipeline (Indexer Feature))
 
 - [x] Test: full index creates database with correct schema
 - [x] Test: full index stores `last_indexed_commit` in meta
@@ -519,7 +531,7 @@ src/
 
 ## Phase 6: Bloom Filter
 
-### Tasks
+### Tasks (Phase 6: Bloom Filter)
 
 - [x] Implement bloom filter in `bloom.rs`:
   - [x] `BloomFilter::new(expected_items, false_positive_rate) -> Self`
@@ -540,7 +552,7 @@ src/
   - [x] Rebuild on index update (after indexing completes)
   - [x] Or use growable bloom filter for incremental adds (not needed - rebuilt each time)
 
-### Success Criteria
+### Success Criteria (Phase 6: Bloom Filter)
 
 - [x] Test: bloom filter correctly reports "definitely not present" for unknown names
 - [x] Test: bloom filter correctly reports "maybe present" for known names
@@ -554,7 +566,7 @@ src/
 
 ## Phase 7: Remote Index Distribution
 
-### Tasks
+### Tasks (Phase 7: Remote Index Distribution)
 
 - [x] Implement manifest parsing in `remote/manifest.rs`:
   - [x] `Manifest` struct matching JSON schema
@@ -593,7 +605,7 @@ src/
   - [x] `generate_bloom_filter(db_path, output_dir)`
   - [x] `sign_manifest(output_dir)` - create manifest.json.sig (placeholder)
 
-### Success Criteria
+### Success Criteria (Phase 7: Remote Index Distribution)
 
 - [x] Test: manifest parsing handles valid manifest
 - [x] Test: manifest parsing rejects invalid/future version manifest
@@ -614,7 +626,7 @@ src/
 
 ## Phase 8: Query Interface & Output
 
-### Tasks
+### Tasks (Phase 8: Query Interface & Output)
 
 - [x] Implement search in `db/queries.rs` (enhance from Phase 2):
   - [x] Exact name match: `nxv search python`
@@ -663,7 +675,7 @@ src/
   - [x] Database file size
   - [x] Bloom filter status
 
-### Success Criteria
+### Success Criteria (Phase 8: Query Interface & Output)
 
 - [x] Test: exact search `python` returns only packages named "python"
 - [x] Test: prefix search `pyth` returns python, python2, python3, etc.
@@ -686,9 +698,10 @@ src/
 
 ## Phase 9: Error Handling & Edge Cases
 
-### Tasks
+### Tasks (Phase 9: Error Handling & Edge Cases)
 
 - [x] Define error types in `error.rs` with thiserror:
+
   ```rust
   #[derive(Error, Debug)]
   pub enum NxvError {
@@ -716,6 +729,7 @@ src/
       // etc.
   }
   ```
+
 - [x] Implement user-friendly error display:
   - [x] Suggest actionable fixes
   - [x] Include relevant context (paths, commits, URLs)
@@ -739,7 +753,7 @@ src/
   - [x] Update: save valid state before exit (ctrlc handler for indexer)
   - [x] Search: just exit (no cleanup needed)
 
-### Success Criteria
+### Success Criteria (Phase 9: Error Handling & Edge Cases)
 
 - [x] Test: all error variants display user-friendly messages
 - [x] Test: `NoIndex` error suggests `nxv update`
@@ -755,7 +769,7 @@ src/
 
 ## Phase 10: Final Integration & Polish
 
-### Tasks
+### Tasks (Phase 10: Final Integration & Polish)
 
 - [x] End-to-end integration tests:
   - [x] Full user workflow: `nxv update` → `nxv search python` → verify output (27 CLI tests)
@@ -786,6 +800,7 @@ src/
 ### Final Success Criteria
 
 **Build & Quality:**
+
 - [x] `cargo build --release` succeeds with no errors or warnings
 - [x] `cargo build --release --features indexer` succeeds
 - [x] `cargo clippy -- -D warnings` passes (both default and indexer features)
@@ -797,6 +812,7 @@ src/
 - [x] Binary runs without external runtime dependencies (uses rustls instead of OpenSSL, bundled SQLite; only system libs on macOS)
 
 **User Commands:**
+
 - [x] `nxv --help` displays complete, accurate help
 - [x] `nxv --version` displays version
 - [x] `nxv update` downloads index from remote successfully (tested via mock server: test_update_with_mock_http_server)
@@ -813,12 +829,14 @@ src/
 - [x] `nxv info` shows accurate index statistics
 
 **Indexer Commands (feature-gated, requires real nixpkgs clone):**
+
 - [x] `nxv index --nixpkgs-path ./nixpkgs` creates index from local repo (test_index_command_creates_database)
 - [x] `nxv index` (incremental) only processes new commits (test_incremental_index_processes_only_new_commits)
 - [x] `nxv index --full` forces full rebuild (test_index_command_creates_database)
 - [x] Index creation is resumable after interrupt (test_index_resumable_after_interrupt)
 
 **Robustness:**
+
 - [x] Graceful handling of Ctrl+C at any point
 - [x] No data corruption on interrupt during update
 - [x] Clear error messages for all failure modes
@@ -826,6 +844,7 @@ src/
 - [x] No memory leaks (Rust ownership system prevents leaks; test_batch_insert_10k_performance verifies no OOM on large operations; ASAN/valgrind can be used for additional verification)
 
 **Output Quality:**
+
 - [x] Table output renders correctly in standard 80-column terminal
 - [x] Table output adapts to wider terminals (comfy-table dynamic widths)
 - [x] Colors are correct and readable (owo-colors)

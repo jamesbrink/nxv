@@ -184,9 +184,7 @@ pub struct InfoArgs {
 impl InfoArgs {
     /// Get the version from either positional or flag argument.
     pub fn get_version(&self) -> Option<&str> {
-        self.version
-            .as_deref()
-            .or(self.version_flag.as_deref())
+        self.version.as_deref().or(self.version_flag.as_deref())
     }
 }
 

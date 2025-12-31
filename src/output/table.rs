@@ -38,7 +38,7 @@ pub fn print_table(results: &[PackageVersion], options: TableOptions) {
         let mut row = vec![
             Cell::new(&pkg.name).fg(Color::Cyan),
             Cell::new(&pkg.version).fg(Color::Green),
-            Cell::new(pkg.last_commit_short()).fg(Color::Yellow),
+            Cell::new(&pkg.last_commit_hash).fg(Color::Yellow),
             Cell::new(&date).fg(Color::White),
             Cell::new(&pkg.attribute_path),
         ];

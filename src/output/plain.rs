@@ -25,7 +25,7 @@ pub fn print_plain(results: &[PackageVersion], show_platforms: bool) {
                 "{}\t{}\t{}\t{}\t{}\t{}",
                 pkg.name,
                 pkg.version,
-                pkg.last_commit_short(),
+                pkg.last_commit_hash,
                 date,
                 pkg.attribute_path,
                 platforms
@@ -35,7 +35,7 @@ pub fn print_plain(results: &[PackageVersion], show_platforms: bool) {
                 "{}\t{}\t{}\t{}\t{}",
                 pkg.name,
                 pkg.version,
-                pkg.last_commit_short(),
+                pkg.last_commit_hash,
                 date,
                 pkg.attribute_path
             );

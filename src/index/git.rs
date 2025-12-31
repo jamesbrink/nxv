@@ -430,6 +430,33 @@ impl NixpkgsRepo {
         &self.path
     }
 
+    /// Check if commit A is an ancestor of commit B.
+    ///
+    /// Returns true if A is reachable from B (i.e., A is older than or equal to B).
+    /// This is useful for detecting if the repository HEAD has been reset to
+    /// an older commit than the last indexed commit.
+    pub fn is_ancestor(&self, ancestor_hash: &str, descendant_hash: &str) -> Result<bool> {
+        let output = Command::new("git")
+            .current_dir(&self.path)
+            .args(["merge-base", "--is-ancestor", ancestor_hash, descendant_hash])
+            .output()?;
+
+        // Exit code 0 means ancestor_hash IS an ancestor of descendant_hash
+        // Exit code 1 means it is NOT an ancestor
+        // Other exit codes indicate an error
+        match output.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                Err(NxvError::Git(git2::Error::from_str(&format!(
+                    "Failed to check ancestry: {}",
+                    stderr.trim()
+                ))))
+            }
+        }
+    }
+
     /// Create a new worktree at the specified path, checked out to a specific commit.
     ///
     /// Worktrees allow parallel checkouts of different commits without modifying
@@ -734,6 +761,31 @@ mod tests {
         // Should be able to count commits (just verify it doesn't error)
         let count = repo.count_commits().unwrap();
         assert!(count > 0);
+    }
+
+    #[test]
+    fn test_is_ancestor() {
+        let (_dir, path) = create_test_repo();
+        let repo = NixpkgsRepo::open(&path).unwrap();
+
+        let commits = repo.get_all_commits().unwrap();
+        assert_eq!(commits.len(), 3);
+
+        let first = &commits[0].hash;
+        let second = &commits[1].hash;
+        let third = &commits[2].hash;
+
+        // First commit is an ancestor of third
+        assert!(repo.is_ancestor(first, third).unwrap());
+
+        // First commit is an ancestor of second
+        assert!(repo.is_ancestor(first, second).unwrap());
+
+        // Third commit is NOT an ancestor of first (it's newer)
+        assert!(!repo.is_ancestor(third, first).unwrap());
+
+        // A commit is an ancestor of itself
+        assert!(repo.is_ancestor(first, first).unwrap());
     }
 
     #[test]

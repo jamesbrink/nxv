@@ -293,6 +293,43 @@ impl Indexer {
 
         match last_commit {
             Some(hash) => {
+                // Get current HEAD
+                let head_hash = repo.head_commit()?;
+
+                // Check if HEAD is an ancestor of last_indexed_commit
+                // This means the repo has been reset to an older state
+                if head_hash != hash {
+                    match repo.is_ancestor(&head_hash, &hash) {
+                        Ok(true) => {
+                            eprintln!(
+                                "Error: Repository HEAD ({}) is older than last indexed commit ({}).",
+                                &head_hash[..7],
+                                &hash[..7]
+                            );
+                            eprintln!(
+                                "This can happen if the repository was reset or the submodule is out of date."
+                            );
+                            eprintln!();
+                            eprintln!("To fix this, either:");
+                            eprintln!("  1. Update your nixpkgs repository to a newer commit:");
+                            eprintln!("     git -C <nixpkgs-path> fetch origin && git -C <nixpkgs-path> checkout origin/master");
+                            eprintln!();
+                            eprintln!("  2. Or use --full to rebuild the index from the current state:");
+                            eprintln!("     nxv index --nixpkgs-path <path> --full");
+                            return Err(NxvError::Git(git2::Error::from_str(
+                                "Repository HEAD is behind last indexed commit. See above for solutions.",
+                            )));
+                        }
+                        Ok(false) => {
+                            // HEAD is not an ancestor, so it's either ahead or diverged - continue normally
+                        }
+                        Err(e) => {
+                            // If we can't check ancestry, warn but continue
+                            eprintln!("Warning: Could not verify commit ancestry: {}", e);
+                        }
+                    }
+                }
+
                 // Try to get commits since that hash
                 match repo.get_commits_since_touching_paths(
                     &hash,

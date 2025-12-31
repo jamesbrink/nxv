@@ -106,9 +106,9 @@ pub struct HealthResponse {
     pub index_commit: Option<String>,
 }
 
-/// Version history entry.
+/// Version history entry for API responses.
 #[derive(Debug, Serialize, ToSchema)]
-pub struct VersionHistoryEntry {
+pub struct VersionHistorySchema {
     /// Package version string.
     pub version: String,
     /// First time this version was seen.

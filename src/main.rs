@@ -1,7 +1,9 @@
 //! nxv - CLI tool for finding specific versions of Nix packages.
 
+mod backend;
 mod bloom;
 mod cli;
+mod client;
 mod db;
 mod error;
 mod output;
@@ -66,30 +68,36 @@ fn main() {
     }
 }
 
-fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
-    use crate::bloom::PackageBloomFilter;
-    use crate::cli::Verbosity;
-    use crate::db::Database;
-    use crate::output::{OutputFormat, TableOptions, print_results};
-    use crate::search::{SearchOptions, execute_search};
+/// Get the backend based on NXV_API_URL environment variable.
+///
+/// If NXV_API_URL is set, uses a remote API client.
+/// Otherwise, uses the local database.
+fn get_backend(cli: &Cli) -> Result<backend::Backend> {
+    use backend::Backend;
+
+    if let Ok(url) = std::env::var("NXV_API_URL") {
+        let client = client::ApiClient::new(&url)?;
+        Ok(Backend::Remote(client))
+    } else {
+        let db = db::Database::open_readonly(&cli.db_path)?;
+        Ok(Backend::Local(db))
+    }
+}
+
+/// Get backend with first-run experience (prompt to download index).
+fn get_backend_with_prompt(cli: &Cli) -> Result<backend::Backend> {
+    use backend::Backend;
     use std::io::{IsTerminal, Write};
 
-    let verbosity = cli.verbosity();
-
-    // Debug: show search parameters
-    if verbosity >= Verbosity::Debug {
-        eprintln!("[debug] Search parameters:");
-        eprintln!("[debug]   package: {:?}", args.package);
-        eprintln!("[debug]   version: {:?}", args.version);
-        eprintln!("[debug]   exact: {}", args.exact);
-        eprintln!("[debug]   desc: {}", args.desc);
-        eprintln!("[debug]   license: {:?}", args.license);
-        eprintln!("[debug]   db_path: {:?}", cli.db_path);
+    // If using remote API, no need for local database
+    if let Ok(url) = std::env::var("NXV_API_URL") {
+        let client = client::ApiClient::new(&url)?;
+        return Ok(Backend::Remote(client));
     }
 
-    // Open database - handle first-run experience
-    let db = match Database::open_readonly(&cli.db_path) {
-        Ok(db) => db,
+    // Try to open local database
+    match db::Database::open_readonly(&cli.db_path) {
+        Ok(db) => Ok(Backend::Local(db)),
         Err(error::NxvError::NoIndex) => {
             // First-run experience: offer to download the index
             if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() && !cli.quiet {
@@ -110,20 +118,48 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
                     cmd_update(cli, &update_args)?;
 
                     // Try to open the database again
-                    Database::open_readonly(&cli.db_path)?
+                    let db = db::Database::open_readonly(&cli.db_path)?;
+                    Ok(Backend::Local(db))
                 } else {
-                    return Err(error::NxvError::NoIndex.into());
+                    Err(error::NxvError::NoIndex.into())
                 }
             } else {
-                return Err(error::NxvError::NoIndex.into());
+                Err(error::NxvError::NoIndex.into())
             }
         }
-        Err(e) => return Err(e.into()),
-    };
+        Err(e) => Err(e.into()),
+    }
+}
 
-    // For exact package searches, check bloom filter first for instant "not found"
+fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
+    use crate::bloom::PackageBloomFilter;
+    use crate::cli::Verbosity;
+    use crate::output::{OutputFormat, TableOptions, print_results};
+    use crate::search::SearchOptions;
+
+    let verbosity = cli.verbosity();
+
+    // Debug: show search parameters
+    if verbosity >= Verbosity::Debug {
+        eprintln!("[debug] Search parameters:");
+        eprintln!("[debug]   package: {:?}", args.package);
+        eprintln!("[debug]   version: {:?}", args.version);
+        eprintln!("[debug]   exact: {}", args.exact);
+        eprintln!("[debug]   desc: {}", args.desc);
+        eprintln!("[debug]   license: {:?}", args.license);
+        if std::env::var("NXV_API_URL").is_ok() {
+            eprintln!("[debug]   backend: remote API");
+        } else {
+            eprintln!("[debug]   db_path: {:?}", cli.db_path);
+        }
+    }
+
+    // Get backend (local DB or remote API)
+    let backend = get_backend_with_prompt(cli)?;
+
+    // For exact package searches with local backend, check bloom filter first
     // This only applies to exact searches (not prefix or description searches)
-    if args.exact && !args.desc {
+    if args.exact && !args.desc && !backend.is_remote() {
         let bloom_path = paths::get_bloom_path();
         if bloom_path.exists()
             && let Ok(filter) = PackageBloomFilter::load(&bloom_path)
@@ -135,7 +171,7 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
             }
             return Ok(());
         }
-        // If bloom filter says maybe present or couldn't load, continue with DB query
+        // If bloom filter says maybe present or couldn't load, continue with query
     }
 
     // Build search options from CLI args
@@ -169,8 +205,8 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
         eprintln!("Searching for '{}'...", args.package);
     }
 
-    // Execute search using shared logic
-    let result = execute_search(db.connection(), &opts)?;
+    // Execute search using backend
+    let result = backend.search(&opts)?;
 
     if verbosity >= Verbosity::Debug {
         eprintln!("[debug] Total results: {}", result.total);
@@ -261,61 +297,15 @@ fn cmd_update(cli: &Cli, args: &cli::UpdateArgs) -> Result<()> {
 }
 
 fn cmd_pkg_info(cli: &Cli, args: &cli::InfoArgs) -> Result<()> {
-    use crate::db::Database;
-    use crate::db::queries;
     use owo_colors::OwoColorize;
-    use std::io::{IsTerminal, Write};
 
-    // Open database - handle first-run experience
-    let db = match Database::open_readonly(&cli.db_path) {
-        Ok(db) => db,
-        Err(error::NxvError::NoIndex) => {
-            if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() && !cli.quiet {
-                eprintln!("No package index found.");
-                eprint!("Would you like to download it now? [Y/n] ");
-                std::io::stderr().flush()?;
-
-                let mut input = String::new();
-                std::io::stdin().read_line(&mut input)?;
-                let input = input.trim().to_lowercase();
-
-                if input.is_empty() || input == "y" || input == "yes" {
-                    let update_args = cli::UpdateArgs {
-                        force: false,
-                        manifest_url: None,
-                    };
-                    cmd_update(cli, &update_args)?;
-                    Database::open_readonly(&cli.db_path)?
-                } else {
-                    return Err(error::NxvError::NoIndex.into());
-                }
-            } else {
-                return Err(error::NxvError::NoIndex.into());
-            }
-        }
-        Err(e) => return Err(e.into()),
-    };
+    // Get backend (local DB or remote API)
+    let backend = get_backend_with_prompt(cli)?;
 
     // Get package info - search by attribute path first (what users install with),
     // then fall back to name prefix search
     let version = args.get_version();
-    let packages = if let Some(version) = version {
-        // With version: search by name+version
-        queries::search_by_name_version(db.connection(), &args.package, version)?
-    } else {
-        // Without version: try exact attribute path match first
-        let by_attr: Vec<_> = queries::search_by_attr(db.connection(), &args.package)?
-            .into_iter()
-            .filter(|p| p.attribute_path == args.package)
-            .collect();
-
-        if !by_attr.is_empty() {
-            by_attr
-        } else {
-            // Fall back to name prefix search
-            queries::search_by_name(db.connection(), &args.package, false)?
-        }
-    };
+    let packages = backend.search_by_name_version(&args.package, version)?;
 
     if packages.is_empty() {
         println!(
@@ -512,28 +502,42 @@ fn cmd_pkg_info(cli: &Cli, args: &cli::InfoArgs) -> Result<()> {
 }
 
 fn cmd_stats(cli: &Cli) -> Result<()> {
-    use crate::db::Database;
-    use crate::db::queries::get_stats;
+    // Check if using remote API
+    let is_remote = std::env::var("NXV_API_URL").is_ok();
 
-    let db = match Database::open_readonly(&cli.db_path) {
-        Ok(db) => db,
-        Err(error::NxvError::NoIndex) => {
-            println!("No index found at {:?}", cli.db_path);
-            println!("Run 'nxv update' to download the package index.");
-            return Ok(());
+    let backend = match get_backend(cli) {
+        Ok(b) => b,
+        Err(e) => {
+            // Check if it's a NoIndex error for local backend
+            if !is_remote
+                && e.downcast_ref::<error::NxvError>()
+                    .is_some_and(|e| matches!(e, error::NxvError::NoIndex))
+            {
+                println!("No index found at {:?}", cli.db_path);
+                println!("Run 'nxv update' to download the package index.");
+                return Ok(());
+            }
+            return Err(e);
         }
-        Err(e) => return Err(e.into()),
     };
 
-    let stats = get_stats(db.connection())?;
+    let stats = backend.get_stats()?;
 
     // Get meta info
-    let last_commit = db.get_meta("last_indexed_commit")?;
-    let index_version = db.get_meta("index_version")?;
+    let last_commit = backend.get_meta("last_indexed_commit")?;
+    let index_version = backend.get_meta("index_version")?;
 
     println!("Index Information");
     println!("=================");
-    println!("Database path: {:?}", cli.db_path);
+
+    if is_remote {
+        println!(
+            "API endpoint: {}",
+            std::env::var("NXV_API_URL").unwrap_or_default()
+        );
+    } else {
+        println!("Database path: {:?}", cli.db_path);
+    }
 
     if let Some(version) = index_version {
         println!("Index version: {}", version);
@@ -558,71 +562,38 @@ fn cmd_stats(cli: &Cli) -> Result<()> {
         println!("Newest commit: {}", newest.format("%Y-%m-%d"));
     }
 
-    // File size
-    if cli.db_path.exists()
-        && let Ok(metadata) = std::fs::metadata(&cli.db_path)
-    {
-        let size_mb = metadata.len() as f64 / (1024.0 * 1024.0);
-        println!("Database size: {:.2} MB", size_mb);
-    }
+    // Local-only info: file sizes
+    if !is_remote {
+        if cli.db_path.exists()
+            && let Ok(metadata) = std::fs::metadata(&cli.db_path)
+        {
+            let size_mb = metadata.len() as f64 / (1024.0 * 1024.0);
+            println!("Database size: {:.2} MB", size_mb);
+        }
 
-    // Bloom filter status
-    let bloom_path = paths::get_bloom_path();
-    if bloom_path.exists()
-        && let Ok(metadata) = std::fs::metadata(&bloom_path)
-    {
-        let size_kb = metadata.len() as f64 / 1024.0;
-        println!("Bloom filter: present ({:.2} KB)", size_kb);
-    } else if !bloom_path.exists() {
-        println!("Bloom filter: not found");
+        // Bloom filter status
+        let bloom_path = paths::get_bloom_path();
+        if bloom_path.exists()
+            && let Ok(metadata) = std::fs::metadata(&bloom_path)
+        {
+            let size_kb = metadata.len() as f64 / 1024.0;
+            println!("Bloom filter: present ({:.2} KB)", size_kb);
+        } else if !bloom_path.exists() {
+            println!("Bloom filter: not found");
+        }
     }
 
     Ok(())
 }
 
 fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
-    use crate::db::Database;
-    use crate::db::queries;
-    use std::io::{IsTerminal, Write};
-
-    // Open database - handle first-run experience
-    let db = match Database::open_readonly(&cli.db_path) {
-        Ok(db) => db,
-        Err(error::NxvError::NoIndex) => {
-            // First-run experience: offer to download the index
-            if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() && !cli.quiet {
-                eprintln!("No package index found.");
-                eprint!("Would you like to download it now? [Y/n] ");
-                std::io::stderr().flush()?;
-
-                let mut input = String::new();
-                std::io::stdin().read_line(&mut input)?;
-                let input = input.trim().to_lowercase();
-
-                if input.is_empty() || input == "y" || input == "yes" {
-                    // Run the update command
-                    let update_args = cli::UpdateArgs {
-                        force: false,
-                        manifest_url: None,
-                    };
-                    cmd_update(cli, &update_args)?;
-
-                    // Try to open the database again
-                    Database::open_readonly(&cli.db_path)?
-                } else {
-                    return Err(error::NxvError::NoIndex.into());
-                }
-            } else {
-                return Err(error::NxvError::NoIndex.into());
-            }
-        }
-        Err(e) => return Err(e.into()),
-    };
+    // Get backend (local DB or remote API)
+    let backend = get_backend_with_prompt(cli)?;
 
     if let Some(ref version) = args.version {
         // Show when a specific version was available
-        let first = queries::get_first_occurrence(db.connection(), &args.package, version)?;
-        let last = queries::get_last_occurrence(db.connection(), &args.package, version)?;
+        let first = backend.get_first_occurrence(&args.package, version)?;
+        let last = backend.get_last_occurrence(&args.package, version)?;
 
         match (first, last) {
             (Some(first_pkg), Some(last_pkg)) => {
@@ -652,7 +623,7 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
         }
     } else if args.full {
         // Show full details for all versions
-        let packages = queries::search_by_name(db.connection(), &args.package, true)?;
+        let packages = backend.search_by_name(&args.package, true)?;
 
         if packages.is_empty() {
             println!("No history found for package '{}'", args.package);
@@ -728,7 +699,7 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
         }
     } else {
         // Show summary (versions only)
-        let history = queries::get_version_history(db.connection(), &args.package)?;
+        let history = backend.get_version_history(&args.package)?;
 
         if history.is_empty() {
             println!("No history found for package '{}'", args.package);

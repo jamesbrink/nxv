@@ -147,7 +147,7 @@ pub async fn get_package(
         ("attr" = String, Path, description = "Package attribute path"),
     ),
     responses(
-        (status = 200, description = "Version history", body = ApiResponse<Vec<VersionHistoryEntry>>),
+        (status = 200, description = "Version history", body = ApiResponse<Vec<VersionHistorySchema>>),
         (status = 404, description = "Package not found"),
         (status = 503, description = "Index not available"),
     ),
@@ -156,7 +156,7 @@ pub async fn get_package(
 pub async fn get_version_history(
     State(state): State<Arc<AppState>>,
     Path(attr): Path<String>,
-) -> Result<Json<ApiResponse<Vec<VersionHistoryEntry>>>, ApiError> {
+) -> Result<Json<ApiResponse<Vec<VersionHistorySchema>>>, ApiError> {
     let db = state.get_db()?;
 
     let history = queries::get_version_history(db.connection(), &attr)?;
@@ -167,7 +167,7 @@ pub async fn get_version_history(
 
     let entries: Vec<_> = history
         .into_iter()
-        .map(|(version, first, last)| VersionHistoryEntry {
+        .map(|(version, first, last)| VersionHistorySchema {
             version,
             first_seen: first,
             last_seen: last,

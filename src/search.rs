@@ -67,7 +67,7 @@ impl Default for SearchOptions {
 }
 
 /// Result of a search operation with pagination metadata.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResult {
     /// The matching packages.
     pub data: Vec<PackageVersion>,

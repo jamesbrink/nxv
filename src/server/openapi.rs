@@ -31,7 +31,7 @@ use super::types::*;
     components(schemas(
         PaginationMeta,
         HealthResponse,
-        VersionHistoryEntry,
+        VersionHistorySchema,
         PackageVersionSchema,
         IndexStatsSchema,
     )),

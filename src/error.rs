@@ -30,6 +30,9 @@ pub enum NxvError {
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
+    #[error("API error: {0}")]
+    ApiError(String),
+
     #[error("Invalid manifest version: {0}. Please update nxv to the latest version.")]
     InvalidManifestVersion(u32),
 

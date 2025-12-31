@@ -340,11 +340,24 @@ fn cmd_pkg_info(cli: &Cli, args: &cli::InfoArgs) -> Result<()> {
         Err(e) => return Err(e.into()),
     };
 
-    // Get package info
+    // Get package info - search by attribute path first (what users install with),
+    // then fall back to name prefix search
     let packages = if let Some(ref version) = args.version {
+        // With version: search by name+version
         queries::search_by_name_version(db.connection(), &args.package, version)?
     } else {
-        queries::search_by_name(db.connection(), &args.package, true)?
+        // Without version: try exact attribute path match first
+        let by_attr: Vec<_> = queries::search_by_attr(db.connection(), &args.package)?
+            .into_iter()
+            .filter(|p| p.attribute_path == args.package)
+            .collect();
+
+        if !by_attr.is_empty() {
+            by_attr
+        } else {
+            // Fall back to name prefix search
+            queries::search_by_name(db.connection(), &args.package, false)?
+        }
     };
 
     if packages.is_empty() {

@@ -9,11 +9,11 @@ pub fn print_plain(results: &[PackageVersion], show_platforms: bool) {
         return;
     }
 
-    // Print header
+    // Print header - PACKAGE (attr path) is what users install with
     if show_platforms {
-        println!("NAME\tVERSION\tCOMMIT\tDATE\tATTR_PATH\tPLATFORMS");
+        println!("PACKAGE\tVERSION\tCOMMIT\tDATE\tPLATFORMS");
     } else {
-        println!("NAME\tVERSION\tCOMMIT\tDATE\tATTR_PATH");
+        println!("PACKAGE\tVERSION\tCOMMIT\tDATE");
     }
 
     for pkg in results {
@@ -22,13 +22,13 @@ pub fn print_plain(results: &[PackageVersion], show_platforms: bool) {
         if show_platforms {
             let platforms = pkg.platforms.as_deref().unwrap_or("-");
             println!(
-                "{}\t{}\t{}\t{}\t{}\t{}",
-                pkg.name, pkg.version, pkg.last_commit_hash, date, pkg.attribute_path, platforms
+                "{}\t{}\t{}\t{}\t{}",
+                pkg.attribute_path, pkg.version, pkg.last_commit_hash, date, platforms
             );
         } else {
             println!(
-                "{}\t{}\t{}\t{}\t{}",
-                pkg.name, pkg.version, pkg.last_commit_hash, date, pkg.attribute_path
+                "{}\t{}\t{}\t{}",
+                pkg.attribute_path, pkg.version, pkg.last_commit_hash, date
             );
         }
     }

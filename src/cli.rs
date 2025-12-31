@@ -159,10 +159,6 @@ pub struct IndexArgs {
     #[arg(long)]
     pub full: bool,
 
-    /// Number of parallel workers.
-    #[arg(short, long, default_value_t = num_cpus())]
-    pub jobs: usize,
-
     /// Commits between checkpoints.
     #[arg(long, default_value_t = 100)]
     pub checkpoint_interval: usize,
@@ -182,13 +178,6 @@ pub struct IndexArgs {
     /// Limit the number of commits processed.
     #[arg(long)]
     pub max_commits: Option<usize>,
-}
-
-#[cfg(feature = "indexer")]
-fn num_cpus() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
 }
 
 /// Output format argument.

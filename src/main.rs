@@ -523,7 +523,6 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
         since: args.since.clone(),
         until: args.until.clone(),
         max_commits: args.max_commits,
-        jobs: args.jobs,
     };
 
     let indexer = Indexer::new(config);

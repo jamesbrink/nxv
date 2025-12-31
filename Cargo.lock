@@ -1444,7 +1444,6 @@ dependencies = [
  "mockito",
  "owo-colors",
  "predicates",
- "rayon",
  "reqwest",
  "rusqlite",
  "semver",

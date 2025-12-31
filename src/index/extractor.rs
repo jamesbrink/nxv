@@ -231,28 +231,35 @@ pub fn extract_packages_for_attrs<P: AsRef<Path>>(
 ) -> Result<Vec<PackageInfo>> {
     let repo_path = repo_path.as_ref();
 
+    // Canonicalize the path to avoid any relative path issues
+    let canonical_path = std::fs::canonicalize(repo_path)?;
+    let repo_path_str = canonical_path.display().to_string();
+
     // Write the nix expression to a temp file
     let temp_dir = tempfile::tempdir()?;
     let nix_file = temp_dir.path().join("extract.nix");
     std::fs::write(&nix_file, EXTRACT_NIX)?;
 
-    let extract_path = nix_string(&nix_file.display().to_string());
-    let repo_path_str = nix_string(&repo_path.display().to_string());
-    let system_str = nix_string(system);
-    let attr_list = nix_list(attr_names);
+    // Build the attrNames argument - either null or a list
+    let attr_names_arg = if attr_names.is_empty() {
+        "null".to_string()
+    } else {
+        let items: Vec<String> = attr_names.iter().map(|s| format!("\"{}\"", s)).collect();
+        format!("[ {} ]", items.join(" "))
+    };
 
+    // Build an expression that imports and calls the extract file
     let expr = format!(
-        "let extractFile = builtins.toPath \"{extract_path}\";\n\
-         nixpkgsPath = builtins.toPath \"{repo_path_str}\";\n\
-         system = \"{system_str}\";\n\
-         attrNames = {attr_list};\n\
-         in import extractFile {{ inherit nixpkgsPath system attrNames; }}",
+        "import {} {{ nixpkgsPath = {}; system = \"{}\"; attrNames = {}; }}",
+        nix_file.display(),
+        repo_path_str,
+        system,
+        attr_names_arg
     );
 
     // Run nix eval
     let output = Command::new("nix")
-        .args(["eval", "--json", "--impure", "--expr"])
-        .arg(expr)
+        .args(["eval", "--json", "--impure", "--expr", &expr])
         .output()?;
 
     if !output.status.success() {
@@ -311,6 +318,7 @@ pub fn extract_attr_positions<P: AsRef<Path>>(
     Ok(positions)
 }
 
+#[allow(dead_code)]
 fn nix_string(value: &str) -> String {
     value
         .replace('\\', "\\\\")
@@ -320,6 +328,7 @@ fn nix_string(value: &str) -> String {
         .replace('\t', "\\t")
 }
 
+#[allow(dead_code)]
 fn nix_list(values: &[String]) -> String {
     if values.is_empty() {
         return "null".to_string();

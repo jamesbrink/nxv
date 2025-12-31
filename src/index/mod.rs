@@ -347,7 +347,7 @@ impl Indexer {
     ) -> Result<IndexResult> {
         let total_commits = commits.len();
         let systems = &self.config.systems;
-        let nixpkgs_path = nixpkgs_path.as_ref();
+        let _nixpkgs_path = nixpkgs_path.as_ref();
 
         // Set up progress bar if enabled
         // We use a single combined progress bar to avoid scrolling issues
@@ -401,8 +401,12 @@ impl Indexer {
             .ok_or_else(|| NxvError::Git(git2::Error::from_str("No commits to process")))?;
         let _worktree = repo.create_worktree(&worktree_path, &first_commit.hash)?;
         let worktree_repo = NixpkgsRepo::open(&worktree_path)?;
-        let mut file_attr_map = build_file_attr_map(nixpkgs_path, systems)?;
-        let mut mapping_commit = "HEAD".to_string();
+
+        // Build the initial file-to-attribute map from the worktree (at first commit),
+        // NOT from the main repo at HEAD. This ensures the mapping matches the
+        // file structure at the commits we're actually processing.
+        let mut file_attr_map = build_file_attr_map(&worktree_path, systems)?;
+        let mut mapping_commit = first_commit.hash.clone();
 
         // Helper to print warnings without disrupting progress bar
         let warn = |pb: &Option<ProgressBar>, msg: String| {
@@ -497,10 +501,39 @@ impl Indexer {
             }
 
             let mut target_attr_paths: HashSet<String> = HashSet::new();
+
+            // Get the list of all known attrs from all-packages.nix for fallback lookups
+            let all_attrs: Option<&Vec<String>> = file_attr_map.get("pkgs/top-level/all-packages.nix");
+
             for path in &changed_paths {
                 if let Some(attr_paths) = file_attr_map.get(path) {
+                    // Direct match in file_attr_map
                     for attr in attr_paths {
                         target_attr_paths.insert(attr.clone());
+                    }
+                } else if path.starts_with("pkgs/") && path.ends_with(".nix") {
+                    // Try to infer package name from path like:
+                    // pkgs/os-specific/linux/wireguard/default.nix -> wireguard
+                    // pkgs/development/python-modules/requests/default.nix -> requests
+                    // pkgs/tools/misc/hello/default.nix -> hello
+                    let parts: Vec<&str> = path.split('/').collect();
+                    if parts.len() >= 2 {
+                        // Get the parent directory name as a potential package name
+                        let potential_name = if parts.last() == Some(&"default.nix") && parts.len() >= 2 {
+                            parts[parts.len() - 2]
+                        } else {
+                            // For files like pkgs/foo/bar.nix, try "bar" (without .nix)
+                            parts.last()
+                                .map(|f| f.trim_end_matches(".nix"))
+                                .unwrap_or("")
+                        };
+
+                        // Check if this potential name exists as an attribute
+                        if let Some(all_attrs_list) = all_attrs
+                            && all_attrs_list.contains(&potential_name.to_string())
+                        {
+                            target_attr_paths.insert(potential_name.to_string());
+                        }
                     }
                 }
             }
@@ -627,9 +660,12 @@ impl Indexer {
                     pending_inserts.clear();
                 }
 
-                // Save checkpoint
+                // Save checkpoint metadata
                 db.set_meta("last_indexed_commit", &commit.hash)?;
                 db.set_meta("checkpoint_open_ranges", &open_ranges.len().to_string())?;
+
+                // Flush WAL to disk
+                db.checkpoint()?;
             }
 
             result.commits_processed += 1;

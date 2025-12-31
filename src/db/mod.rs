@@ -22,10 +22,28 @@ impl Database {
     #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let conn = Connection::open(path)?;
+
+        // Enable WAL mode for better concurrent performance and durability
+        conn.execute_batch(
+            r#"
+            PRAGMA journal_mode = WAL;
+            PRAGMA synchronous = NORMAL;
+            PRAGMA wal_autocheckpoint = 1000;
+            "#,
+        )?;
+
         let db = Self { conn };
         db.init_schema()?;
         db.migrate_if_needed()?;
         Ok(db)
+    }
+
+    /// Checkpoint the WAL to ensure data is flushed to disk.
+    /// Call this at regular intervals during long-running operations.
+    #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
+    pub fn checkpoint(&self) -> Result<()> {
+        self.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        Ok(())
     }
 
     /// Open a database in read-only mode.

@@ -145,7 +145,8 @@ impl Indexer {
 
     /// Run a full index from scratch.
     ///
-    /// This processes all commits in the repository and builds a complete index.
+    /// This processes all indexable commits (2017+) in the repository and builds a complete index.
+    /// Commits before 2017 have a different structure that doesn't work with modern Nix.
     pub fn index_full<P: AsRef<Path>, Q: AsRef<Path>>(
         &self,
         nixpkgs_path: P,
@@ -154,11 +155,15 @@ impl Indexer {
         let repo = NixpkgsRepo::open(&nixpkgs_path)?;
         let mut db = Database::open(&db_path)?;
 
-        // Get all commits in chronological order
-        let commits = repo.get_all_commits()?;
+        // Get indexable commits (2017+) in chronological order
+        let commits = repo.get_indexable_commits()?;
         let total_commits = commits.len();
 
-        eprintln!("Found {} commits to process", total_commits);
+        eprintln!(
+            "Found {} indexable commits (starting from {})",
+            total_commits,
+            git::MIN_INDEXABLE_DATE
+        );
 
         self.process_commits(&mut db, &nixpkgs_path, &repo, commits, None)
     }
@@ -227,44 +232,25 @@ impl Indexer {
         let nixpkgs_path = nixpkgs_path.as_ref();
         let total_commits = commits.len();
 
-        // Set up progress bars if enabled
+        // Set up progress bar if enabled
+        // We use a single combined progress bar to avoid scrolling issues
         let multi_progress = if self.config.show_progress {
             Some(MultiProgress::new())
         } else {
             None
         };
 
-        let commit_progress = multi_progress.as_ref().map(|mp| {
+        let progress_bar = multi_progress.as_ref().map(|mp| {
             let pb = mp.add(ProgressBar::new(total_commits as u64));
             pb.set_style(
                 ProgressStyle::default_bar()
-                    .template("{prefix:.bold} [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
+                    .template(
+                        "{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}",
+                    )
                     .unwrap()
                     .progress_chars("█▓▒░  "),
             );
-            pb.set_prefix("Commits");
-            pb
-        });
-
-        let packages_progress = multi_progress.as_ref().map(|mp| {
-            let pb = mp.add(ProgressBar::new_spinner());
-            pb.set_style(
-                ProgressStyle::default_spinner()
-                    .template("{prefix:.bold} {msg}")
-                    .unwrap(),
-            );
-            pb.set_prefix("Packages");
-            pb
-        });
-
-        let status_progress = multi_progress.as_ref().map(|mp| {
-            let pb = mp.add(ProgressBar::new_spinner());
-            pb.set_style(
-                ProgressStyle::default_spinner()
-                    .template("{prefix:.bold} {msg}")
-                    .unwrap(),
-            );
-            pb.set_prefix("Current");
+            pb.enable_steady_tick(std::time::Duration::from_millis(100));
             pb
         });
 
@@ -291,10 +277,21 @@ impl Indexer {
         let mut prev_commit_date: Option<DateTime<Utc>> = None;
         let mut pending_inserts: Vec<PackageVersion> = Vec::new();
 
+        // Helper to print warnings without disrupting progress bar
+        let warn = |pb: &Option<ProgressBar>, msg: String| {
+            if let Some(bar) = pb {
+                bar.println(format!("⚠ {}", msg));
+            } else {
+                eprintln!("Warning: {}", msg);
+            }
+        };
+
         for (i, commit) in commits.iter().enumerate() {
             // Check for shutdown
             if self.is_shutdown_requested() {
-                eprintln!("\nShutdown requested, saving checkpoint...");
+                if let Some(ref pb) = progress_bar {
+                    pb.println("Shutdown requested, saving checkpoint...");
+                }
                 result.was_interrupted = true;
 
                 // Close all open ranges at the previous commit
@@ -318,21 +315,24 @@ impl Indexer {
                 break;
             }
 
-            // Update progress
-            if let Some(ref pb) = commit_progress {
+            // Update progress bar with current commit info
+            if let Some(ref pb) = progress_bar {
                 pb.set_position(i as u64);
-            }
-            if let Some(ref pb) = status_progress {
                 pb.set_message(format!(
-                    "{} ({})",
+                    "{} ({}) | {} pkgs | {} ranges",
                     &commit.short_hash,
-                    commit.date.format("%Y-%m-%d")
+                    commit.date.format("%Y-%m-%d"),
+                    result.packages_found,
+                    result.ranges_created
                 ));
             }
 
             // Checkout the commit
             if let Err(e) = repo.checkout_commit(&commit.hash) {
-                eprintln!("Warning: Failed to checkout {}: {}", &commit.short_hash, e);
+                warn(
+                    &progress_bar,
+                    format!("Failed to checkout {}: {}", &commit.short_hash, e),
+                );
                 continue;
             }
 
@@ -340,9 +340,9 @@ impl Indexer {
             let packages = match extractor::extract_packages(nixpkgs_path) {
                 Ok(pkgs) => pkgs,
                 Err(e) => {
-                    eprintln!(
-                        "Warning: Extraction failed at {}: {}",
-                        &commit.short_hash, e
+                    warn(
+                        &progress_bar,
+                        format!("Extraction failed at {}: {}", &commit.short_hash, e),
                     );
                     // On extraction failure, we don't close ranges - the packages might still exist
                     // Just skip this commit
@@ -351,10 +351,6 @@ impl Indexer {
             };
 
             result.packages_found += packages.len() as u64;
-
-            if let Some(ref pb) = packages_progress {
-                pb.set_message(format!("{} total found", result.packages_found));
-            }
 
             // Track which packages we saw in this commit
             let mut seen_attr_paths: std::collections::HashSet<String> =
@@ -494,15 +490,12 @@ impl Indexer {
         // Set final unique names count
         result.unique_names = unique_names.len() as u64;
 
-        // Finish progress bars
-        if let Some(ref pb) = commit_progress {
-            pb.finish_with_message("done");
-        }
-        if let Some(ref pb) = packages_progress {
-            pb.finish();
-        }
-        if let Some(ref pb) = status_progress {
-            pb.finish();
+        // Finish progress bar
+        if let Some(ref pb) = progress_bar {
+            pb.finish_with_message(format!(
+                "done | {} commits | {} pkgs | {} ranges",
+                result.commits_processed, result.packages_found, result.ranges_created
+            ));
         }
 
         Ok(result)

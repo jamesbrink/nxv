@@ -5,6 +5,16 @@ use chrono::{DateTime, TimeZone, Utc};
 use git2::{Oid, Repository, Sort};
 use std::path::{Path, PathBuf};
 
+/// The earliest commit date we support for indexing.
+/// Before this date, nixpkgs had a different structure that doesn't work
+/// with modern Nix evaluation. This corresponds to early 2017 when
+/// pname/version standardization began.
+pub const MIN_INDEXABLE_DATE: &str = "2017-01-01";
+
+/// The first commit in 2017, used as a default starting point.
+#[allow(dead_code)]
+pub const MIN_INDEXABLE_COMMIT: &str = "75ce71481842b0b9b1f81cd99cebf7aeba64243d";
+
 /// Information about a git commit.
 #[derive(Debug, Clone)]
 pub struct CommitInfo {
@@ -87,11 +97,32 @@ impl NixpkgsRepo {
     /// Get all commits on the current branch in chronological order (oldest first).
     ///
     /// Uses first-parent traversal to avoid merge commit explosion.
+    /// Note: This returns ALL commits including very old ones that may not
+    /// be indexable. For indexing, use `get_indexable_commits` instead.
+    #[allow(dead_code)]
     pub fn get_all_commits(&self) -> Result<Vec<CommitInfo>> {
         let head = self.repo.head()?;
         let head_commit = head.peel_to_commit()?;
 
-        self.walk_commits_from(head_commit.id(), None)
+        self.walk_commits_from(head_commit.id(), None, None)
+    }
+
+    /// Get commits that are indexable (from 2017 onwards).
+    ///
+    /// This filters out commits before MIN_INDEXABLE_DATE which have
+    /// a different structure that doesn't work with modern Nix evaluation.
+    pub fn get_indexable_commits(&self) -> Result<Vec<CommitInfo>> {
+        let min_date = chrono::NaiveDate::parse_from_str(MIN_INDEXABLE_DATE, "%Y-%m-%d")
+            .expect("Invalid MIN_INDEXABLE_DATE format");
+        let min_datetime = min_date
+            .and_hms_opt(0, 0, 0)
+            .expect("Invalid time")
+            .and_utc();
+
+        let head = self.repo.head()?;
+        let head_commit = head.peel_to_commit()?;
+
+        self.walk_commits_from(head_commit.id(), None, Some(min_datetime))
     }
 
     /// Get commits since a specific hash (exclusive, newest commits first, then reversed to chronological).
@@ -122,11 +153,17 @@ impl NixpkgsRepo {
             return Ok(Vec::new());
         }
 
-        self.walk_commits_from(head_commit.id(), Some(since_oid))
+        self.walk_commits_from(head_commit.id(), Some(since_oid), None)
     }
 
-    /// Walk commits from a starting point, optionally stopping before a given commit.
-    fn walk_commits_from(&self, from: Oid, stop_before: Option<Oid>) -> Result<Vec<CommitInfo>> {
+    /// Walk commits from a starting point, optionally stopping before a given commit
+    /// or filtering by minimum date.
+    fn walk_commits_from(
+        &self,
+        from: Oid,
+        stop_before: Option<Oid>,
+        min_date: Option<DateTime<Utc>>,
+    ) -> Result<Vec<CommitInfo>> {
         let mut revwalk = self.repo.revwalk()?;
         revwalk.push(from)?;
 
@@ -149,7 +186,18 @@ impl NixpkgsRepo {
             }
 
             let commit = self.repo.find_commit(oid)?;
-            commits.push(CommitInfo::from_commit(&commit));
+            let info = CommitInfo::from_commit(&commit);
+
+            // Skip commits before the minimum date
+            if let Some(min) = min_date
+                && info.date < min
+            {
+                // Since we're walking newest-first, once we hit an old commit,
+                // all remaining commits will be older, so we can stop
+                break;
+            }
+
+            commits.push(info);
         }
 
         // Reverse to get chronological order (oldest first)
@@ -157,10 +205,12 @@ impl NixpkgsRepo {
         Ok(commits)
     }
 
-    /// Checkout a specific commit (detached HEAD).
+    /// Checkout a specific commit (detached HEAD) with force.
     ///
     /// This is used for nix evaluation at a specific commit.
     /// Note: This modifies the working directory.
+    /// Uses force checkout to handle conflicts when switching between
+    /// commits with very different file structures.
     pub fn checkout_commit(&self, hash: &str) -> Result<()> {
         let oid = Oid::from_str(hash).map_err(|_| {
             NxvError::Git(git2::Error::from_str(&format!(
@@ -172,7 +222,12 @@ impl NixpkgsRepo {
         let commit = self.repo.find_commit(oid)?;
         let tree = commit.tree()?;
 
-        self.repo.checkout_tree(tree.as_object(), None)?;
+        // Use force checkout to avoid conflicts
+        let mut checkout_opts = git2::build::CheckoutBuilder::new();
+        checkout_opts.force();
+        checkout_opts.remove_untracked(true);
+
+        self.repo.checkout_tree(tree.as_object(), Some(&mut checkout_opts))?;
         self.repo.set_head_detached(oid)?;
 
         Ok(())

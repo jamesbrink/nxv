@@ -108,12 +108,54 @@
           };
         });
 
+        # Static musl build using pkgsStatic (Linux only, native build)
+        nxv-static = pkgs.lib.optionalAttrs pkgs.stdenv.isLinux (
+          let
+            pkgsStatic = pkgs.pkgsStatic;
+            rustToolchainStatic = pkgsStatic.rust-bin.stable.latest.minimal;
+            craneLibStatic = (crane.mkLib pkgsStatic).overrideToolchain rustToolchainStatic;
+            cargoArtifactsStatic = craneLibStatic.buildDepsOnly {
+              inherit src;
+              inherit (crateInfo) pname version;
+              strictDeps = true;
+              doCheck = false;
+            };
+          in
+          craneLibStatic.buildPackage {
+            inherit src;
+            inherit (crateInfo) version;
+            pname = "nxv-static";
+            cargoArtifacts = cargoArtifactsStatic;
+            strictDeps = true;
+            doCheck = false;
+
+            nativeBuildInputs = [ pkgsStatic.installShellFiles ];
+
+            postInstall = ''
+              installShellCompletion --cmd nxv \
+                --bash <($out/bin/nxv completions bash) \
+                --zsh <($out/bin/nxv completions zsh) \
+                --fish <($out/bin/nxv completions fish)
+            '';
+
+            meta = {
+              description = "CLI tool for finding specific versions of Nix packages (static musl build)";
+              homepage = "https://github.com/jamesbrink/nxv";
+              license = pkgs.lib.licenses.mit;
+              maintainers = [ ];
+              mainProgram = "nxv";
+            };
+          }
+        );
+
       in
       {
         # Packages
         packages = {
           inherit nxv nxv-indexer;
           default = nxv;
+        } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          nxv-static = nxv-static;
         };
 
         # Development shell

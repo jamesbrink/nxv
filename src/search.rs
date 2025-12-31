@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 /// Sort order for search results.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ValueEnum, utoipa::ToSchema)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ValueEnum, utoipa::ToSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum SortOrder {
     /// Sort by date (newest first).

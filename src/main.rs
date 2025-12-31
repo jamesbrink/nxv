@@ -447,7 +447,27 @@ fn cmd_pkg_info(cli: &Cli, args: &cli::InfoArgs) -> Result<()> {
             if let Some(ref platforms) = pkg.platforms {
                 println!("{}", "Platforms".bold().underline());
                 if let Ok(list) = serde_json::from_str::<Vec<String>>(platforms) {
-                    // Group by arch
+                    // Detect current platform
+                    let current_platform = format!(
+                        "{}-{}",
+                        std::env::consts::ARCH,
+                        if std::env::consts::OS == "macos" {
+                            "darwin"
+                        } else {
+                            std::env::consts::OS
+                        }
+                    );
+
+                    // Helper to format platform with highlighting
+                    let format_platform = |p: &str| -> String {
+                        if p == current_platform {
+                            format!("{}", p.green().bold())
+                        } else {
+                            p.to_string()
+                        }
+                    };
+
+                    // Group by OS
                     let mut linux: Vec<&str> = Vec::new();
                     let mut darwin: Vec<&str> = Vec::new();
                     let mut other: Vec<&str> = Vec::new();
@@ -463,13 +483,16 @@ fn cmd_pkg_info(cli: &Cli, args: &cli::InfoArgs) -> Result<()> {
                     }
 
                     if !linux.is_empty() {
-                        println!("  Linux:  {}", linux.join(", "));
+                        let formatted: Vec<_> = linux.iter().map(|p| format_platform(p)).collect();
+                        println!("  Linux:  {}", formatted.join(", "));
                     }
                     if !darwin.is_empty() {
-                        println!("  Darwin: {}", darwin.join(", "));
+                        let formatted: Vec<_> = darwin.iter().map(|p| format_platform(p)).collect();
+                        println!("  Darwin: {}", formatted.join(", "));
                     }
                     if !other.is_empty() {
-                        println!("  Other:  {}", other.join(", "));
+                        let formatted: Vec<_> = other.iter().map(|p| format_platform(p)).collect();
+                        println!("  Other:  {}", formatted.join(", "));
                     }
                 } else {
                     println!("  {}", platforms);

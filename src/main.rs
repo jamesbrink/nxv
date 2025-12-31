@@ -551,8 +551,9 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
     eprintln!("  Version ranges created: {}", result.ranges_created);
     eprintln!("  Unique package names: {}", result.unique_names);
 
-    // Build and save bloom filter unless interrupted
-    if !result.was_interrupted && result.ranges_created > 0 {
+    // Build and save bloom filter from current database state
+    // We do this even after interruption since the DB is consistent via checkpoints
+    {
         eprintln!();
         eprintln!("Building bloom filter...");
         let db = Database::open_readonly(&cli.db_path)?;

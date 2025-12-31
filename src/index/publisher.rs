@@ -4,7 +4,7 @@
 
 use crate::bloom::PackageBloomFilter;
 use crate::db::Database;
-use crate::db::queries::get_all_unique_names;
+use crate::db::queries::get_all_unique_attrs;
 use crate::error::Result;
 use crate::remote::download::{compress_zstd, file_sha256};
 use crate::remote::manifest::{DeltaFile, IndexFile, Manifest};
@@ -233,16 +233,16 @@ pub fn generate_bloom_filter<P: AsRef<Path>, Q: AsRef<Path>>(
     let bloom_name = "nxv-bloom.bin";
     let bloom_path = output_dir.join(bloom_name);
 
-    // Get all unique package names from database
+    // Get all unique attribute paths from database
     let db = Database::open(db_path)?;
-    let names = get_all_unique_names(db.connection())?;
+    let attrs = get_all_unique_attrs(db.connection())?;
 
     // Create bloom filter with 1% FPR
-    let count = names.len();
+    let count = attrs.len();
     let mut filter = PackageBloomFilter::new(count.max(1000), 0.01);
 
-    for name in &names {
-        filter.insert(name);
+    for attr in &attrs {
+        filter.insert(attr);
     }
 
     // Save the filter
@@ -365,10 +365,10 @@ mod tests {
         let bloom_path = output_dir.join("nxv-bloom.bin");
         assert!(bloom_path.exists());
 
-        // Load and verify the bloom filter works
+        // Load and verify the bloom filter works (uses attribute_path, not name)
         let filter = PackageBloomFilter::load(&bloom_path).unwrap();
-        assert!(filter.contains("python"));
-        assert!(filter.contains("nodejs"));
+        assert!(filter.contains("python311"));
+        assert!(filter.contains("nodejs_20"));
         assert!(!filter.contains("nonexistent"));
     }
 

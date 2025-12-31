@@ -84,13 +84,18 @@ let
   );
 
   # Safely get licenses - force evaluation of each license
+  # Each element access is wrapped in tryEval to handle thunks that throw
   getLicenses = l: tryDeep (
     let
       extractOne = x:
-        if builtins.isAttrs x then (x.spdxId or x.shortName or "unknown")
-        else if builtins.isString x then x
-        else if builtins.isInt x || builtins.isFloat x then builtins.toString x
-        else "unknown";
+        let
+          result = builtins.tryEval (
+            if builtins.isAttrs x then (x.spdxId or x.shortName or "unknown")
+            else if builtins.isString x then x
+            else if builtins.isInt x || builtins.isFloat x then builtins.toString x
+            else "unknown"
+          );
+        in if result.success then result.value else "unknown";
     in
       if builtins.isList l then map extractOne l
       else [ (extractOne l) ]
@@ -98,28 +103,38 @@ let
 
   # Safely get maintainers - force evaluation of each maintainer
   # Handle both list of maintainers and single string/maintainer
+  # Each element access is wrapped in tryEval to handle thunks that throw
   getMaintainers = m: tryDeep (
     if m == null then null
     else if builtins.isString m then [ m ]
     else if builtins.isList m then map (x:
-      if builtins.isAttrs x then (x.github or x.name or "unknown")
-      else if builtins.isString x then x
-      else if builtins.isInt x || builtins.isFloat x then builtins.toString x
-      else "unknown"
+      let
+        result = builtins.tryEval (
+          if builtins.isAttrs x then (x.github or x.name or "unknown")
+          else if builtins.isString x then x
+          else if builtins.isInt x || builtins.isFloat x then builtins.toString x
+          else "unknown"
+        );
+      in if result.success then result.value else "unknown"
     ) m
     else null
   );
 
   # Safely get platforms - force evaluation of each platform
   # Handle both list of platforms and single string/platform
+  # Each element access is wrapped in tryEval to handle thunks that throw
   getPlatforms = p: tryDeep (
     if p == null then null
     else if builtins.isString p then [ p ]
     else if builtins.isList p then map (x:
-      if builtins.isString x then x
-      else if builtins.isAttrs x then (x.system or "unknown")
-      else if builtins.isInt x || builtins.isFloat x then builtins.toString x
-      else "unknown"
+      let
+        result = builtins.tryEval (
+          if builtins.isString x then x
+          else if builtins.isAttrs x then (x.system or "unknown")
+          else if builtins.isInt x || builtins.isFloat x then builtins.toString x
+          else "unknown"
+        );
+      in if result.success then result.value else "unknown"
     ) p
     else null
   );
@@ -166,7 +181,24 @@ let
 
   # Get list of attribute names and process them
   names = if attrNames != null then attrNames else builtins.attrNames pkgs;
-  results = builtins.filter (x: x != null) (map processAttr names);
+  # Wrap entire lambda body in tryEval, returning list directly to avoid field access issues
+  results = builtins.concatMap (name:
+    let
+      # Do all computation inside a single tryEval that returns a list
+      safeResult = builtins.tryEval (
+        let
+          pkg = processAttr name;
+          forced = builtins.deepSeq pkg pkg;
+        in if forced != null then [forced] else []
+      );
+      # Safely extract value with another tryEval
+      extracted = builtins.tryEval (
+        builtins.seq safeResult.success (
+          if safeResult.success then safeResult.value else []
+        )
+      );
+    in if extracted.success then extracted.value else []
+  ) names;
 in
   results
 "#;
@@ -208,7 +240,22 @@ let
         else { success = false; };
     in if forced.success then forced.value else null;
 in
-  builtins.filter (x: x != null) (map getPos attrNames)
+  # Wrap entire lambda body in tryEval, returning list directly to avoid field access issues
+  builtins.concatMap (name:
+    let
+      safeResult = builtins.tryEval (
+        let
+          pos = getPos name;
+          forced = builtins.deepSeq pos pos;
+        in if forced != null then [forced] else []
+      );
+      extracted = builtins.tryEval (
+        builtins.seq safeResult.success (
+          if safeResult.success then safeResult.value else []
+        )
+      );
+    in if extracted.success then extracted.value else []
+  ) attrNames
 "#;
 
 

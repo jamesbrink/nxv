@@ -12,7 +12,13 @@
   };
 
   outputs = { self, nixpkgs, flake-utils, rust-overlay, crane }:
-    flake-utils.lib.eachDefaultSystem (system:
+    {
+      # Overlay for use in NixOS/home-manager configs
+      overlays.default = final: prev: {
+        nxv = self.packages.${prev.system}.nxv;
+        nxv-indexer = self.packages.${prev.system}.nxv-indexer;
+      };
+    } // flake-utils.lib.eachDefaultSystem (system:
       let
         overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs { inherit system overlays; };
@@ -46,15 +52,26 @@
 
           nativeBuildInputs = [
             pkgs.pkg-config
+            pkgs.installShellFiles
           ];
         };
 
         # Build dependencies only (for caching)
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
+        # Shell completions install script
+        installCompletions = ''
+          installShellCompletion --cmd nxv \
+            --bash <($out/bin/nxv completions bash) \
+            --zsh <($out/bin/nxv completions zsh) \
+            --fish <($out/bin/nxv completions fish)
+        '';
+
         # Build the main nxv package
         nxv = craneLib.buildPackage (commonArgs // {
           inherit cargoArtifacts;
+
+          postInstall = installCompletions;
 
           meta = {
             description = "CLI tool for finding specific versions of Nix packages";
@@ -77,8 +94,10 @@
 
           nativeBuildInputs = commonArgs.nativeBuildInputs ++ [
             pkgs.cmake
-            pkgs.git  # Required for tests that create git repos
+            pkgs.git
           ];
+
+          postInstall = installCompletions;
 
           meta = {
             description = "CLI tool for finding specific versions of Nix packages (with indexer)";
@@ -99,10 +118,8 @@
 
         # Development shell
         devShells.default = craneLib.devShell {
-          # Include dependencies from the main package
           inputsFrom = [ nxv ];
 
-          # Extra development tools
           packages = [
             pkgs.rust-analyzer
             pkgs.cargo-watch
@@ -116,18 +133,15 @@
         checks = {
           inherit nxv;
 
-          # Run clippy
           nxv-clippy = craneLib.cargoClippy (commonArgs // {
             inherit cargoArtifacts;
             cargoClippyExtraArgs = "--all-targets -- --deny warnings";
           });
 
-          # Run tests
           nxv-test = craneLib.cargoTest (commonArgs // {
             inherit cargoArtifacts;
           });
 
-          # Check formatting
           nxv-fmt = craneLib.cargoFmt {
             inherit src;
           };

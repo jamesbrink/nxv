@@ -7,10 +7,29 @@ CLI tool to find specific versions of Nix packages across nixpkgs history.
 ## Installation
 
 ```bash
-nix build github:jamesbrink/nxv
-# or
-cargo build --release
+# Run directly
+nix run github:jamesbrink/nxv -- search python
+
+# Install to profile
+nix profile install github:jamesbrink/nxv
+
+# Or use the overlay in your flake
+{
+  inputs.nxv.url = "github:jamesbrink/nxv";
+
+  outputs = { nixpkgs, nxv, ... }: {
+    # NixOS
+    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+      modules = [{
+        nixpkgs.overlays = [ nxv.overlays.default ];
+        environment.systemPackages = [ pkgs.nxv ];
+      }];
+    };
+  };
+}
 ```
+
+Shell completions for bash, zsh, and fish are included.
 
 ## Usage
 

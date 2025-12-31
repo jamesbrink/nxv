@@ -7,9 +7,13 @@ mod error;
 mod output;
 mod paths;
 mod remote;
+mod search;
 
 #[cfg(feature = "indexer")]
 mod index;
+
+#[cfg(feature = "server")]
+mod server;
 
 use anyhow::Result;
 use clap::Parser;
@@ -38,6 +42,8 @@ fn main() {
         }
         #[cfg(feature = "indexer")]
         Commands::Index(args) => cmd_index(&cli, args),
+        #[cfg(feature = "server")]
+        Commands::Serve(args) => cmd_serve(&cli, args),
     };
 
     if let Err(e) = result {
@@ -64,8 +70,8 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
     use crate::bloom::PackageBloomFilter;
     use crate::cli::Verbosity;
     use crate::db::Database;
-    use crate::db::queries;
     use crate::output::{OutputFormat, TableOptions, print_results};
+    use crate::search::{SearchOptions, execute_search};
     use std::io::{IsTerminal, Write};
 
     let verbosity = cli.verbosity();
@@ -132,7 +138,21 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
         // If bloom filter says maybe present or couldn't load, continue with DB query
     }
 
-    // Perform search
+    // Build search options from CLI args
+    let opts = SearchOptions {
+        query: args.package.clone(),
+        version: args.version.clone(),
+        exact: args.exact,
+        desc: args.desc,
+        license: args.license.clone(),
+        sort: args.sort,
+        reverse: args.reverse,
+        full: args.full,
+        limit: args.limit,
+        offset: 0, // CLI doesn't support offset yet
+    };
+
+    // Determine query type for logging
     let query_type = if args.desc {
         "FTS description search"
     } else if args.version.is_some() {
@@ -149,93 +169,14 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
         eprintln!("Searching for '{}'...", args.package);
     }
 
-    let results = if args.desc {
-        // FTS search on description
-        queries::search_by_description(db.connection(), &args.package)?
-    } else if let Some(ref version) = args.version {
-        // Search by name and version
-        queries::search_by_name_version(db.connection(), &args.package, version)?
-    } else if args.exact {
-        // Exact match on attribute_path (the "Package" column)
-        queries::search_by_attr(db.connection(), &args.package)?
-            .into_iter()
-            .filter(|p| p.attribute_path == args.package)
-            .collect()
-    } else {
-        // Prefix search on attribute_path
-        queries::search_by_attr(db.connection(), &args.package)?
-    };
+    // Execute search using shared logic
+    let result = execute_search(db.connection(), &opts)?;
 
     if verbosity >= Verbosity::Debug {
-        eprintln!("[debug] Raw results: {} rows", results.len());
+        eprintln!("[debug] Total results: {}", result.total);
     }
 
-    // Filter by license if specified
-    let results = if let Some(ref license) = args.license {
-        results
-            .into_iter()
-            .filter(|p| {
-                p.license
-                    .as_ref()
-                    .is_some_and(|l| l.to_lowercase().contains(&license.to_lowercase()))
-            })
-            .collect()
-    } else {
-        results
-    };
-
-    // Sort results
-    let mut results = results;
-    match args.sort {
-        cli::SortOrder::Date => {
-            results.sort_by(|a, b| b.last_commit_date.cmp(&a.last_commit_date));
-        }
-        cli::SortOrder::Version => {
-            results.sort_by(|a, b| {
-                // Semver-aware version comparison
-                // Try to parse as semver, fall back to string comparison
-                match (
-                    semver::Version::parse(&a.version),
-                    semver::Version::parse(&b.version),
-                ) {
-                    (Ok(va), Ok(vb)) => va.cmp(&vb),
-                    (Ok(_), Err(_)) => std::cmp::Ordering::Less, // Valid semver sorts before invalid
-                    (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
-                    (Err(_), Err(_)) => a.version.cmp(&b.version), // Fall back to string comparison
-                }
-            });
-        }
-        cli::SortOrder::Name => {
-            results.sort_by(|a, b| a.name.cmp(&b.name));
-        }
-    }
-
-    if args.reverse {
-        results.reverse();
-    }
-
-    // Deduplicate by (attribute_path, version) - keep most recent by default
-    // When --full is passed, skip deduplication to show all commits
-    let results = if args.full {
-        results
-    } else {
-        use std::collections::HashSet;
-        let mut seen: HashSet<(String, String)> = HashSet::new();
-        results
-            .into_iter()
-            .filter(|p| seen.insert((p.attribute_path.clone(), p.version.clone())))
-            .collect()
-    };
-
-    // Apply limit
-    let total_before_limit = results.len();
-    let results: Vec<_> = if args.limit > 0 {
-        results.into_iter().take(args.limit).collect()
-    } else {
-        results
-    };
-
-    if results.is_empty() {
+    if result.data.is_empty() {
         if !cli.quiet {
             eprintln!("No packages found matching '{}'", args.package);
         }
@@ -248,13 +189,13 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
         show_platforms: args.show_platforms,
         ascii: args.ascii,
     };
-    print_results(&results, format, options);
+    print_results(&result.data, format, options);
 
     // Show "more results" message after the table
-    if args.limit > 0 && total_before_limit > args.limit && !cli.quiet {
+    if result.has_more && !cli.quiet {
         eprintln!(
             "{} more results. Use --limit 0 for all.",
-            total_before_limit - args.limit
+            result.total - result.data.len()
         );
     }
 
@@ -910,6 +851,26 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
         eprintln!();
         eprintln!("Note: Indexing was interrupted. Run again to continue from checkpoint.");
     }
+
+    Ok(())
+}
+
+#[cfg(feature = "server")]
+fn cmd_serve(cli: &Cli, args: &cli::ServeArgs) -> Result<()> {
+    use crate::server::{ServerConfig, run_server};
+
+    let config = ServerConfig {
+        host: args.host.clone(),
+        port: args.port,
+        db_path: cli.db_path.clone(),
+        cors: args.cors || args.cors_origins.is_some(),
+        cors_origins: args.cors_origins.clone(),
+    };
+
+    // Create tokio runtime and run the server
+    let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
+
+    rt.block_on(run_server(config))?;
 
     Ok(())
 }

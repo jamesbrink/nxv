@@ -2,6 +2,7 @@
 
 use crate::output::OutputFormat;
 use crate::paths;
+use crate::search::SortOrder;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use std::path::PathBuf;
@@ -52,6 +53,10 @@ pub enum Commands {
     /// Build the index from a local nixpkgs repository.
     #[cfg(feature = "indexer")]
     Index(IndexArgs),
+
+    /// Start the API server.
+    #[cfg(feature = "server")]
+    Serve(ServeArgs),
 
     /// Generate shell completions.
     Completions(CompletionsArgs),
@@ -188,6 +193,27 @@ impl InfoArgs {
     }
 }
 
+/// Arguments for the serve command (feature-gated).
+#[cfg(feature = "server")]
+#[derive(Parser, Debug)]
+pub struct ServeArgs {
+    /// Host address to bind to.
+    #[arg(short = 'H', long, default_value = "127.0.0.1", env = "NXV_HOST")]
+    pub host: String,
+
+    /// Port to listen on.
+    #[arg(short, long, default_value_t = 8080, env = "NXV_PORT")]
+    pub port: u16,
+
+    /// Enable CORS for all origins.
+    #[arg(long)]
+    pub cors: bool,
+
+    /// Specific CORS origins (comma-separated). Implies --cors.
+    #[arg(long, value_delimiter = ',')]
+    pub cors_origins: Option<Vec<String>>,
+}
+
 /// Arguments for the index command (feature-gated).
 #[cfg(feature = "indexer")]
 #[derive(Parser, Debug)]
@@ -243,17 +269,7 @@ impl From<OutputFormatArg> for OutputFormat {
     }
 }
 
-/// Sort order for search results.
-#[derive(ValueEnum, Clone, Copy, Debug, Default)]
-pub enum SortOrder {
-    /// Sort by date (newest first).
-    #[default]
-    Date,
-    /// Sort by version (semver-aware).
-    Version,
-    /// Sort by name (alphabetical).
-    Name,
-}
+// SortOrder is imported from crate::search
 
 /// Verbosity level for output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

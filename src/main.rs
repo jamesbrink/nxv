@@ -29,7 +29,8 @@ fn main() {
     let result = match &cli.command {
         Commands::Search(args) => cmd_search(&cli, args),
         Commands::Update(args) => cmd_update(&cli, args),
-        Commands::Info => cmd_info(&cli),
+        Commands::Info(args) => cmd_pkg_info(&cli, args),
+        Commands::Stats => cmd_stats(&cli),
         Commands::History(args) => cmd_history(&cli, args),
         Commands::Completions(args) => {
             args.generate();
@@ -303,7 +304,222 @@ fn cmd_update(cli: &Cli, args: &cli::UpdateArgs) -> Result<()> {
     Ok(())
 }
 
-fn cmd_info(cli: &Cli) -> Result<()> {
+fn cmd_pkg_info(cli: &Cli, args: &cli::InfoArgs) -> Result<()> {
+    use crate::db::Database;
+    use crate::db::queries;
+    use owo_colors::OwoColorize;
+    use std::io::{IsTerminal, Write};
+
+    // Open database - handle first-run experience
+    let db = match Database::open_readonly(&cli.db_path) {
+        Ok(db) => db,
+        Err(error::NxvError::NoIndex) => {
+            if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() && !cli.quiet {
+                eprintln!("No package index found.");
+                eprint!("Would you like to download it now? [Y/n] ");
+                std::io::stderr().flush()?;
+
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                let input = input.trim().to_lowercase();
+
+                if input.is_empty() || input == "y" || input == "yes" {
+                    let update_args = cli::UpdateArgs {
+                        force: false,
+                        manifest_url: None,
+                    };
+                    cmd_update(cli, &update_args)?;
+                    Database::open_readonly(&cli.db_path)?
+                } else {
+                    return Err(error::NxvError::NoIndex.into());
+                }
+            } else {
+                return Err(error::NxvError::NoIndex.into());
+            }
+        }
+        Err(e) => return Err(e.into()),
+    };
+
+    // Get package info
+    let packages = if let Some(ref version) = args.version {
+        queries::search_by_name_version(db.connection(), &args.package, version)?
+    } else {
+        queries::search_by_name(db.connection(), &args.package, true)?
+    };
+
+    if packages.is_empty() {
+        println!(
+            "Package '{}' not found{}.",
+            args.package,
+            args.version
+                .as_ref()
+                .map(|v| format!(" version {}", v))
+                .unwrap_or_default()
+        );
+        return Ok(());
+    }
+
+    match args.format {
+        cli::OutputFormatArg::Json => {
+            println!("{}", serde_json::to_string_pretty(&packages)?);
+        }
+        cli::OutputFormatArg::Plain => {
+            for pkg in &packages {
+                println!("name\t{}", pkg.name);
+                println!("version\t{}", pkg.version);
+                println!("attribute_path\t{}", pkg.attribute_path);
+                println!("first_commit\t{}", pkg.first_commit_hash);
+                println!("first_date\t{}", pkg.first_commit_date.format("%Y-%m-%d"));
+                println!("last_commit\t{}", pkg.last_commit_hash);
+                println!("last_date\t{}", pkg.last_commit_date.format("%Y-%m-%d"));
+                println!("description\t{}", pkg.description.as_deref().unwrap_or("-"));
+                println!("license\t{}", pkg.license.as_deref().unwrap_or("-"));
+                println!("homepage\t{}", pkg.homepage.as_deref().unwrap_or("-"));
+                println!("maintainers\t{}", pkg.maintainers.as_deref().unwrap_or("-"));
+                println!("platforms\t{}", pkg.platforms.as_deref().unwrap_or("-"));
+                println!();
+            }
+        }
+        cli::OutputFormatArg::Table => {
+            // For table format, show a detailed view for the first/most relevant result
+            // and summarize if there are multiple attribute paths
+            let pkg = &packages[0];
+
+            println!(
+                "{}: {} {}",
+                "Package".bold(),
+                pkg.name.cyan(),
+                pkg.version.green()
+            );
+            println!();
+
+            println!("{}", "Details".bold().underline());
+            println!(
+                "  {:<16} {}",
+                "Attribute:".yellow(),
+                pkg.attribute_path.cyan()
+            );
+            println!(
+                "  {:<16} {}",
+                "Description:",
+                pkg.description.as_deref().unwrap_or("-")
+            );
+            println!(
+                "  {:<16} {}",
+                "Homepage:",
+                pkg.homepage.as_deref().unwrap_or("-")
+            );
+            println!(
+                "  {:<16} {}",
+                "License:",
+                pkg.license.as_deref().unwrap_or("-")
+            );
+            println!();
+
+            println!("{}", "Availability".bold().underline());
+            println!(
+                "  {:<16} {} ({})",
+                "First seen:".yellow(),
+                pkg.first_commit_short(),
+                pkg.first_commit_date.format("%Y-%m-%d")
+            );
+            println!(
+                "  {:<16} {} ({})",
+                "Last seen:".yellow(),
+                pkg.last_commit_short(),
+                pkg.last_commit_date.format("%Y-%m-%d")
+            );
+            println!();
+
+            if let Some(ref maintainers) = pkg.maintainers {
+                println!("{}", "Maintainers".bold().underline());
+                // Parse JSON array and display
+                if let Ok(list) = serde_json::from_str::<Vec<String>>(maintainers) {
+                    for m in list {
+                        println!("  • {}", m);
+                    }
+                } else {
+                    println!("  {}", maintainers);
+                }
+                println!();
+            }
+
+            if let Some(ref platforms) = pkg.platforms {
+                println!("{}", "Platforms".bold().underline());
+                if let Ok(list) = serde_json::from_str::<Vec<String>>(platforms) {
+                    // Group by arch
+                    let mut linux: Vec<&str> = Vec::new();
+                    let mut darwin: Vec<&str> = Vec::new();
+                    let mut other: Vec<&str> = Vec::new();
+
+                    for p in &list {
+                        if p.contains("linux") {
+                            linux.push(p);
+                        } else if p.contains("darwin") {
+                            darwin.push(p);
+                        } else {
+                            other.push(p);
+                        }
+                    }
+
+                    if !linux.is_empty() {
+                        println!("  Linux:  {}", linux.join(", "));
+                    }
+                    if !darwin.is_empty() {
+                        println!("  Darwin: {}", darwin.join(", "));
+                    }
+                    if !other.is_empty() {
+                        println!("  Other:  {}", other.join(", "));
+                    }
+                } else {
+                    println!("  {}", platforms);
+                }
+                println!();
+            }
+
+            println!("{}", "Usage".bold().underline());
+            println!(
+                "  nix shell nixpkgs/{}#{}",
+                pkg.last_commit_short(),
+                pkg.attribute_path
+            );
+            println!(
+                "  nix run nixpkgs/{}#{}",
+                pkg.last_commit_short(),
+                pkg.attribute_path
+            );
+
+            // Show other attribute paths if there are multiple (deduplicated)
+            if packages.len() > 1 {
+                use std::collections::HashSet;
+                let mut seen: HashSet<(&str, &str)> = HashSet::new();
+                seen.insert((&pkg.attribute_path, &pkg.version));
+
+                let others: Vec<_> = packages
+                    .iter()
+                    .skip(1)
+                    .filter(|p| seen.insert((&p.attribute_path, &p.version)))
+                    .collect();
+
+                if !others.is_empty() {
+                    println!();
+                    println!("{}", "Other Attribute Paths".bold().underline());
+                    for other_pkg in others {
+                        println!(
+                            "  • {} ({})",
+                            other_pkg.attribute_path.cyan(),
+                            other_pkg.version.green()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_stats(cli: &Cli) -> Result<()> {
     use crate::db::Database;
     use crate::db::queries::get_stats;
 

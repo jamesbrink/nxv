@@ -40,8 +40,11 @@ pub enum Commands {
     /// Download or update the package index.
     Update(UpdateArgs),
 
+    /// Show detailed information about a package.
+    Info(InfoArgs),
+
     /// Show index statistics.
-    Info,
+    Stats,
 
     /// Show version history for a package.
     History(HistoryArgs),
@@ -153,6 +156,20 @@ pub struct HistoryArgs {
     /// Use ASCII table borders instead of Unicode.
     #[arg(long)]
     pub ascii: bool,
+}
+
+/// Arguments for the info command.
+#[derive(Parser, Debug)]
+pub struct InfoArgs {
+    /// Package name to show info for.
+    pub package: String,
+
+    /// Specific version to show info for.
+    pub version: Option<String>,
+
+    /// Output format.
+    #[arg(short, long, value_enum, default_value_t = OutputFormatArg::Table)]
+    pub format: OutputFormatArg,
 }
 
 /// Arguments for the index command (feature-gated).
@@ -312,8 +329,32 @@ mod tests {
 
     #[test]
     fn test_info_command() {
-        let args = Cli::try_parse_from(["nxv", "info"]).unwrap();
-        assert!(matches!(args.command, Commands::Info));
+        let args = Cli::try_parse_from(["nxv", "info", "python"]).unwrap();
+        match args.command {
+            Commands::Info(info) => {
+                assert_eq!(info.package, "python");
+                assert!(info.version.is_none());
+            }
+            _ => panic!("Expected Info command"),
+        }
+    }
+
+    #[test]
+    fn test_info_with_version() {
+        let args = Cli::try_parse_from(["nxv", "info", "python", "3.11"]).unwrap();
+        match args.command {
+            Commands::Info(info) => {
+                assert_eq!(info.package, "python");
+                assert_eq!(info.version, Some("3.11".to_string()));
+            }
+            _ => panic!("Expected Info command"),
+        }
+    }
+
+    #[test]
+    fn test_stats_command() {
+        let args = Cli::try_parse_from(["nxv", "stats"]).unwrap();
+        assert!(matches!(args.command, Commands::Stats));
     }
 
     #[test]
@@ -342,14 +383,14 @@ mod tests {
 
     #[test]
     fn test_global_options() {
-        let args = Cli::try_parse_from(["nxv", "-vv", "--no-color", "info"]).unwrap();
+        let args = Cli::try_parse_from(["nxv", "-vv", "--no-color", "stats"]).unwrap();
         assert_eq!(args.verbose, 2);
         assert!(args.no_color);
     }
 
     #[test]
     fn test_quiet_conflicts_with_verbose() {
-        let result = Cli::try_parse_from(["nxv", "-v", "-q", "info"]);
+        let result = Cli::try_parse_from(["nxv", "-v", "-q", "stats"]);
         assert!(result.is_err());
     }
 

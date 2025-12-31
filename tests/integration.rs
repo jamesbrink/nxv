@@ -103,6 +103,7 @@ fn test_help_displays() {
         .stdout(predicate::str::contains("search"))
         .stdout(predicate::str::contains("update"))
         .stdout(predicate::str::contains("info"))
+        .stdout(predicate::str::contains("stats"))
         .stdout(predicate::str::contains("history"))
         .stdout(predicate::str::contains("completions"));
 }
@@ -332,17 +333,17 @@ fn test_search_sort_options() {
 }
 
 // ============================================================================
-// Info Command Tests
+// Stats Command Tests
 // ============================================================================
 
 #[test]
-fn test_info_with_database() {
+fn test_stats_with_database() {
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("test.db");
     create_test_db(&db_path);
 
     nxv()
-        .args(["--db-path", db_path.to_str().unwrap(), "info"])
+        .args(["--db-path", db_path.to_str().unwrap(), "stats"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Index Information"))
@@ -351,12 +352,12 @@ fn test_info_with_database() {
 }
 
 #[test]
-fn test_info_no_database() {
+fn test_stats_no_database() {
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("nonexistent.db");
 
     nxv()
-        .args(["--db-path", db_path.to_str().unwrap(), "info"])
+        .args(["--db-path", db_path.to_str().unwrap(), "stats"])
         .assert()
         .success()
         .stdout(predicate::str::contains("No index found"));
@@ -519,7 +520,7 @@ fn test_no_color_option() {
 #[test]
 fn test_verbose_conflicts_with_quiet() {
     nxv()
-        .args(["-v", "-q", "info"])
+        .args(["-v", "-q", "stats"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("cannot be used with"));
@@ -645,7 +646,7 @@ fn test_custom_db_path() {
     create_test_db(&db_path);
 
     nxv()
-        .args(["--db-path", db_path.to_str().unwrap(), "info"])
+        .args(["--db-path", db_path.to_str().unwrap(), "stats"])
         .assert()
         .success()
         .stdout(predicate::str::contains(db_path.to_str().unwrap()));
@@ -1586,9 +1587,9 @@ fn test_works_offline_after_index_download() {
         .success()
         .stdout(predicate::str::contains("python"));
 
-    // Info should work offline
+    // Stats should work offline
     nxv()
-        .args(["--db-path", db_path.to_str().unwrap(), "info"])
+        .args(["--db-path", db_path.to_str().unwrap(), "stats"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Index Information"));
@@ -2418,12 +2419,12 @@ fn test_index_then_search_workflow() {
                 .assert()
                 .success();
 
-            // Test info command
+            // Test stats command
             nxv()
-                .args(["--db-path", db_path.to_str().unwrap(), "info"])
+                .args(["--db-path", db_path.to_str().unwrap(), "stats"])
                 .assert()
                 .success()
-                .stdout(predicate::str::contains("Package entries"));
+                .stdout(predicate::str::contains("Total version ranges"));
         }
     }
 }

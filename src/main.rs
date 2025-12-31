@@ -228,16 +228,9 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
     };
 
     // Apply limit
+    let total_before_limit = results.len();
     let results: Vec<_> = if args.limit > 0 {
-        let total = results.len();
-        let limited: Vec<_> = results.into_iter().take(args.limit).collect();
-        if total > args.limit && !cli.quiet {
-            eprintln!(
-                "{} more results. Use --limit 0 for all.",
-                total - args.limit
-            );
-        }
-        limited
+        results.into_iter().take(args.limit).collect()
     } else {
         results
     };
@@ -256,6 +249,14 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
         ascii: args.ascii,
     };
     print_results(&results, format, options);
+
+    // Show "more results" message after the table
+    if args.limit > 0 && total_before_limit > args.limit && !cli.quiet {
+        eprintln!(
+            "{} more results. Use --limit 0 for all.",
+            total_before_limit - args.limit
+        );
+    }
 
     Ok(())
 }

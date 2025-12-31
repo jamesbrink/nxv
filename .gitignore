@@ -22,3 +22,8 @@ Thumbs.db
 # Environment
 .env
 .env.local
+
+
+# Added by cargo
+
+/target

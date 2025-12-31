@@ -1,0 +1,249 @@
+//! Manifest parsing for remote index.
+
+use crate::error::{NxvError, Result};
+use serde::{Deserialize, Serialize};
+use std::io::Cursor;
+
+/// Embedded public key for verifying manifest signatures.
+/// This is the minisign public key used to sign official nxv manifests.
+///
+/// To generate a new keypair:
+/// ```sh
+/// minisign -G -p nxv.pub -s nxv.key -c "nxv manifest signing key"
+/// ```
+///
+/// To sign a manifest:
+/// ```sh
+/// minisign -S -s nxv.key -m manifest.json
+/// ```
+#[allow(dead_code)]
+pub const MANIFEST_PUBLIC_KEY: &str =
+    "untrusted comment: nxv manifest signing key\nRWTHy8Hb+LSqSJNRMBXPzXl8J5F5WTWmYu5J0CxmZWQ3z8rLnVJk9ABC";
+
+/// Remote index manifest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Manifest {
+    pub version: u32,
+    pub latest_commit: String,
+    pub latest_commit_date: String,
+    pub full_index: IndexFile,
+    pub bloom_filter: IndexFile,
+    #[serde(default)]
+    pub deltas: Vec<DeltaFile>,
+}
+
+/// A downloadable file with metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexFile {
+    pub url: String,
+    pub size_bytes: u64,
+    pub sha256: String,
+}
+
+/// A delta pack file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeltaFile {
+    pub from_commit: String,
+    pub to_commit: String,
+    pub url: String,
+    pub size_bytes: u64,
+    pub sha256: String,
+}
+
+impl Manifest {
+    /// Parse a manifest from JSON content.
+    #[allow(dead_code)]
+    pub fn parse(json: &str) -> Result<Self> {
+        let manifest: Manifest = serde_json::from_str(json)?;
+        Ok(manifest)
+    }
+
+    /// Parse and verify a manifest from JSON content and its signature.
+    ///
+    /// The signature should be in minisign format.
+    #[allow(dead_code)]
+    pub fn parse_and_verify(json: &str, signature: &str) -> Result<Self> {
+        // Verify signature first
+        verify_manifest_signature(json.as_bytes(), signature)?;
+
+        // Then parse the manifest
+        Self::parse(json)
+    }
+
+    /// Fetch and parse a manifest from a URL.
+    #[allow(dead_code)]
+    pub fn fetch(_url: &str) -> Result<Self> {
+        // TODO: Implement in Phase 7
+        // This will:
+        // 1. Download the manifest JSON
+        // 2. Download the signature file
+        // 3. Verify the signature
+        // 4. Parse and validate
+        unimplemented!("Manifest fetch not yet implemented")
+    }
+
+    /// Find a delta that can update from the given commit.
+    pub fn find_delta(&self, from_commit: &str) -> Option<&DeltaFile> {
+        self.deltas.iter().find(|d| d.from_commit == from_commit)
+    }
+}
+
+/// Verify a manifest signature using the embedded public key.
+#[allow(dead_code)]
+pub fn verify_manifest_signature(manifest_data: &[u8], signature_str: &str) -> Result<()> {
+    // Parse the public key
+    let pk = minisign::PublicKey::from_base64(MANIFEST_PUBLIC_KEY)
+        .map_err(|_| NxvError::InvalidManifestSignature)?;
+
+    // Parse the signature
+    let sig_box = minisign::SignatureBox::from_string(signature_str)
+        .map_err(|_| NxvError::InvalidManifestSignature)?;
+
+    // Verify
+    let mut cursor = Cursor::new(manifest_data);
+    minisign::verify(&pk, &sig_box, &mut cursor, true, false, true)
+        .map_err(|_| NxvError::InvalidManifestSignature)?;
+
+    Ok(())
+}
+
+/// Verify a manifest signature with a custom public key (for testing).
+#[allow(dead_code)]
+pub fn verify_manifest_signature_with_key(
+    manifest_data: &[u8],
+    signature_str: &str,
+    public_key_str: &str,
+) -> Result<()> {
+    // Parse the public key
+    let pk = minisign::PublicKey::from_base64(public_key_str)
+        .map_err(|_| NxvError::InvalidManifestSignature)?;
+
+    // Parse the signature
+    let sig_box = minisign::SignatureBox::from_string(signature_str)
+        .map_err(|_| NxvError::InvalidManifestSignature)?;
+
+    // Verify
+    let mut cursor = Cursor::new(manifest_data);
+    minisign::verify(&pk, &sig_box, &mut cursor, true, false, true)
+        .map_err(|_| NxvError::InvalidManifestSignature)?;
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_manifest_parse() {
+        let json = r#"{
+            "version": 2,
+            "latest_commit": "abc123def456",
+            "latest_commit_date": "2024-01-15T12:00:00Z",
+            "full_index": {
+                "url": "https://example.com/index.db.zst",
+                "size_bytes": 150000000,
+                "sha256": "abc123"
+            },
+            "bloom_filter": {
+                "url": "https://example.com/index.bloom",
+                "size_bytes": 1200000,
+                "sha256": "def456"
+            },
+            "deltas": []
+        }"#;
+
+        let manifest = Manifest::parse(json).unwrap();
+        assert_eq!(manifest.version, 2);
+        assert_eq!(manifest.latest_commit, "abc123def456");
+    }
+
+    #[test]
+    fn test_manifest_find_delta() {
+        let json = r#"{
+            "version": 1,
+            "latest_commit": "def456",
+            "latest_commit_date": "2024-01-15T12:00:00Z",
+            "full_index": {
+                "url": "https://example.com/index.db.zst",
+                "size_bytes": 150000000,
+                "sha256": "abc123"
+            },
+            "bloom_filter": {
+                "url": "https://example.com/index.bloom",
+                "size_bytes": 1200000,
+                "sha256": "def456"
+            },
+            "deltas": [
+                {
+                    "from_commit": "abc123",
+                    "to_commit": "def456",
+                    "url": "https://example.com/delta.sql.zst",
+                    "size_bytes": 1000,
+                    "sha256": "delta123"
+                }
+            ]
+        }"#;
+
+        let manifest = Manifest::parse(json).unwrap();
+        let delta = manifest.find_delta("abc123");
+        assert!(delta.is_some());
+        assert_eq!(delta.unwrap().to_commit, "def456");
+
+        let no_delta = manifest.find_delta("unknown");
+        assert!(no_delta.is_none());
+    }
+
+    #[test]
+    fn test_signature_verification_fails_on_tampered_manifest() {
+        // This tests that verification fails with an invalid signature
+        let manifest = r#"{"version":1,"latest_commit":"abc123"}"#;
+
+        // A fake/invalid signature
+        let fake_signature = "untrusted comment: fake signature\nRUTHy8Hb+LSqSJNRMBXPzXl8J5F5WTWmYu5J0CxmZWQ3z8rLnVJk9ABCAAAA\ntrusted comment: fake\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+        let result = verify_manifest_signature(manifest.as_bytes(), fake_signature);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            NxvError::InvalidManifestSignature
+        ));
+    }
+
+    #[test]
+    fn test_signature_verification_fails_on_invalid_format() {
+        let manifest = r#"{"version":1}"#;
+        let invalid_sig = "not a valid signature format";
+
+        let result = verify_manifest_signature(manifest.as_bytes(), invalid_sig);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            NxvError::InvalidManifestSignature
+        ));
+    }
+
+    #[test]
+    fn test_parse_and_verify_fails_on_bad_signature() {
+        let json = r#"{
+            "version": 1,
+            "latest_commit": "abc123",
+            "latest_commit_date": "2024-01-15T12:00:00Z",
+            "full_index": {
+                "url": "https://example.com/index.db.zst",
+                "size_bytes": 100,
+                "sha256": "abc"
+            },
+            "bloom_filter": {
+                "url": "https://example.com/index.bloom",
+                "size_bytes": 100,
+                "sha256": "def"
+            },
+            "deltas": []
+        }"#;
+
+        let bad_sig = "invalid signature";
+        let result = Manifest::parse_and_verify(json, bad_sig);
+        assert!(result.is_err());
+    }
+}

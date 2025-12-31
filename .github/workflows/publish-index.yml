@@ -1,0 +1,158 @@
+name: Publish Index
+
+# This workflow updates the nxv package index from nixpkgs
+# It can be run on a schedule or triggered manually
+
+on:
+  # Run weekly on Sunday at 00:00 UTC
+  schedule:
+    - cron: '0 0 * * 0'
+
+  # Allow manual triggering
+  workflow_dispatch:
+    inputs:
+      full_rebuild:
+        description: 'Force full index rebuild'
+        required: false
+        default: 'false'
+        type: boolean
+
+env:
+  CARGO_TERM_COLOR: always
+  # Configure the index storage location
+  INDEX_BUCKET: ${{ secrets.INDEX_BUCKET }}
+  INDEX_URL_PREFIX: ${{ secrets.INDEX_URL_PREFIX }}
+
+jobs:
+  update-index:
+    name: Update Package Index
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout nxv
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v27
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-indexer-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-indexer-
+
+      - name: Build nxv with indexer
+        run: cargo build --release --features indexer
+
+      - name: Clone nixpkgs (shallow)
+        run: |
+          git clone --depth 1000 --single-branch --branch nixos-unstable \
+            https://github.com/NixOS/nixpkgs.git nixpkgs
+
+      - name: Download existing index (for incremental update)
+        if: ${{ github.event.inputs.full_rebuild != 'true' }}
+        continue-on-error: true
+        run: |
+          mkdir -p ~/.local/share/nxv
+          # Download existing index if available
+          if [ -n "$INDEX_URL_PREFIX" ]; then
+            curl -sSfL "$INDEX_URL_PREFIX/nxv-index-full.db.zst" -o ~/.local/share/nxv/index.db.zst || true
+            if [ -f ~/.local/share/nxv/index.db.zst ]; then
+              zstd -d ~/.local/share/nxv/index.db.zst -o ~/.local/share/nxv/index.db
+              rm ~/.local/share/nxv/index.db.zst
+            fi
+          fi
+
+      - name: Run indexer
+        run: |
+          if [ "${{ github.event.inputs.full_rebuild }}" = "true" ]; then
+            ./target/release/nxv index --nixpkgs-path ./nixpkgs --full
+          else
+            ./target/release/nxv index --nixpkgs-path ./nixpkgs
+          fi
+
+      - name: Generate publishable artifacts
+        run: |
+          mkdir -p publish
+
+          # Get the index database path
+          INDEX_DB="$HOME/.local/share/nxv/index.db"
+
+          # Generate compressed index and manifest using the publisher
+          # This would use `nxv publish` if implemented, for now manual steps:
+
+          # Compress the database
+          zstd -19 "$INDEX_DB" -o publish/nxv-index-full.db.zst
+
+          # Generate bloom filter
+          cp "$HOME/.local/share/nxv/index.bloom" publish/nxv-bloom.bin || true
+
+          # Calculate checksums
+          sha256sum publish/nxv-index-full.db.zst | cut -d' ' -f1 > publish/nxv-index-full.db.zst.sha256
+          sha256sum publish/nxv-bloom.bin | cut -d' ' -f1 > publish/nxv-bloom.bin.sha256 || true
+
+          # Get last indexed commit from database
+          LAST_COMMIT=$(sqlite3 "$INDEX_DB" "SELECT value FROM meta WHERE key='last_indexed_commit'")
+
+          # Generate manifest
+          cat > publish/manifest.json << EOF
+          {
+            "version": 1,
+            "latest_commit": "$LAST_COMMIT",
+            "latest_commit_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "full_index": {
+              "url": "${INDEX_URL_PREFIX}/nxv-index-full.db.zst",
+              "size_bytes": $(stat -c%s publish/nxv-index-full.db.zst),
+              "sha256": "$(cat publish/nxv-index-full.db.zst.sha256)"
+            },
+            "bloom_filter": {
+              "url": "${INDEX_URL_PREFIX}/nxv-bloom.bin",
+              "size_bytes": $(stat -c%s publish/nxv-bloom.bin 2>/dev/null || echo 0),
+              "sha256": "$(cat publish/nxv-bloom.bin.sha256 2>/dev/null || echo '')"
+            },
+            "deltas": []
+          }
+          EOF
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nxv-index
+          path: publish/
+          retention-days: 30
+
+      # Optional: Deploy to cloud storage
+      # Uncomment and configure for your storage provider
+      #
+      # - name: Deploy to S3
+      #   if: env.INDEX_BUCKET != ''
+      #   run: |
+      #     aws s3 sync publish/ s3://${{ env.INDEX_BUCKET }}/ --acl public-read
+      #
+      # - name: Deploy to GitHub Releases
+      #   uses: softprops/action-gh-release@v1
+      #   if: startsWith(github.ref, 'refs/tags/')
+      #   with:
+      #     files: publish/*
+
+      - name: Summary
+        run: |
+          echo "## Index Update Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Index size:** $(du -h publish/nxv-index-full.db.zst | cut -f1)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Bloom filter size:** $(du -h publish/nxv-bloom.bin 2>/dev/null | cut -f1 || echo 'N/A')" >> $GITHUB_STEP_SUMMARY
+          echo "- **Manifest:** Generated" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          cat publish/manifest.json >> $GITHUB_STEP_SUMMARY

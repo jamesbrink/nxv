@@ -1,0 +1,102 @@
+[package]
+name = "nxv"
+version = "0.1.0"
+edition = "2024"
+description = "CLI tool for finding specific versions of Nix packages"
+license = "MIT"
+repository = "https://github.com/jamesbrink/nxv"
+keywords = ["nix", "nixpkgs", "package", "version"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+# CLI
+clap = { version = "4.5", features = ["derive", "env"] }
+clap_complete = "4.5"
+
+# Database
+rusqlite = { version = "0.38", features = ["bundled", "backup"] }
+
+# Git (dev/indexer only, feature-gated)
+git2 = { version = "0.20", optional = true }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# HTTP client for index downloads
+reqwest = { version = "0.13", features = ["blocking", "rustls", "json"], default-features = false }
+
+# Compression
+zstd = "0.13"
+
+# Hashing
+sha2 = "0.10"
+
+# Bloom filter
+bloomfilter = "3.0"
+
+# Manifest signature verification
+minisign = "0.8"
+
+# Output formatting
+owo-colors = { version = "4.2", features = ["supports-colors"] }
+comfy-table = "7.2"
+
+# Progress indication
+indicatif = "0.18"
+
+# Signal handling
+ctrlc = { version = "3.5", optional = true }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Paths
+dirs = "6.0"
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Version parsing/comparison
+semver = "1.0"
+
+# Temporary files
+tempfile = "3.24"
+
+[dev-dependencies]
+assert_cmd = "2.1"
+predicates = "3.1"
+mockito = "1.7"
+criterion = "0.5"
+
+[[bench]]
+name = "search_benchmark"
+harness = false
+
+[[bench]]
+name = "bloom_benchmark"
+harness = false
+
+[[bench]]
+name = "indexer_benchmark"
+harness = false
+
+[features]
+default = []
+indexer = ["git2", "ctrlc"]  # Enable indexer functionality (dev only)
+
+# Release profile optimizations
+[profile.release]
+lto = true           # Link-time optimization for smaller binaries
+codegen-units = 1    # Better optimization at cost of compile time
+strip = true         # Strip symbols for smaller binaries
+panic = "abort"      # Smaller binary, no unwinding
+
+# Profile for maximum portability (use with RUSTFLAGS="-C target-feature=+crt-static" on Linux)
+[profile.release-static]
+inherits = "release"
+# Additional notes for static linking:
+# - Linux (musl): rustup target add x86_64-unknown-linux-musl && cargo build --release --target x86_64-unknown-linux-musl
+# - macOS: Already mostly static due to rustls and bundled SQLite
+# - Windows: Use MSVC target with /MT flag

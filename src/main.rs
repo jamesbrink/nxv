@@ -442,8 +442,88 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
                 println!("Version {} of {} not found.", version, args.package);
             }
         }
+    } else if args.full {
+        // Show full details for all versions
+        let packages = queries::search_by_name(db.connection(), &args.package, true)?;
+
+        if packages.is_empty() {
+            println!("No history found for package '{}'", args.package);
+            return Ok(());
+        }
+
+        println!("Version history for: {}", args.package);
+        println!();
+
+        match args.format {
+            cli::OutputFormatArg::Json => {
+                println!("{}", serde_json::to_string_pretty(&packages)?);
+            }
+            cli::OutputFormatArg::Plain => {
+                println!(
+                    "VERSION\tATTR_PATH\tFIRST_COMMIT\tFIRST_DATE\tLAST_COMMIT\tLAST_DATE\tDESCRIPTION\tLICENSE\tHOMEPAGE"
+                );
+                for pkg in packages {
+                    println!(
+                        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                        pkg.version,
+                        pkg.attribute_path,
+                        pkg.first_commit_short(),
+                        pkg.first_commit_date.format("%Y-%m-%d"),
+                        pkg.last_commit_short(),
+                        pkg.last_commit_date.format("%Y-%m-%d"),
+                        pkg.description.as_deref().unwrap_or("-"),
+                        pkg.license.as_deref().unwrap_or("-"),
+                        pkg.homepage.as_deref().unwrap_or("-"),
+                    );
+                }
+            }
+            cli::OutputFormatArg::Table => {
+                use comfy_table::{
+                    Cell, Color, ContentArrangement, Table, presets::ASCII_FULL, presets::UTF8_FULL,
+                };
+
+                let mut table = Table::new();
+                table
+                    .load_preset(if args.ascii { ASCII_FULL } else { UTF8_FULL })
+                    .set_content_arrangement(ContentArrangement::Dynamic)
+                    .set_header(vec![
+                        "Version",
+                        "Attr Path",
+                        "First Commit",
+                        "Last Commit",
+                        "Description",
+                    ]);
+
+                for pkg in packages {
+                    let desc = pkg
+                        .description
+                        .as_deref()
+                        .unwrap_or("-")
+                        .chars()
+                        .take(50)
+                        .collect::<String>();
+                    table.add_row(vec![
+                        Cell::new(&pkg.version).fg(Color::Green),
+                        Cell::new(&pkg.attribute_path).fg(Color::Cyan),
+                        Cell::new(format!(
+                            "{} ({})",
+                            pkg.first_commit_short(),
+                            pkg.first_commit_date.format("%Y-%m-%d")
+                        )),
+                        Cell::new(format!(
+                            "{} ({})",
+                            pkg.last_commit_short(),
+                            pkg.last_commit_date.format("%Y-%m-%d")
+                        )),
+                        Cell::new(desc),
+                    ]);
+                }
+
+                println!("{table}");
+            }
+        }
     } else {
-        // Show all versions
+        // Show summary (versions only)
         let history = queries::get_version_history(db.connection(), &args.package)?;
 
         if history.is_empty() {
@@ -480,11 +560,13 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
                 }
             }
             cli::OutputFormatArg::Table => {
-                use comfy_table::{Cell, Color, ContentArrangement, Table, presets::UTF8_FULL};
+                use comfy_table::{
+                    Cell, Color, ContentArrangement, Table, presets::ASCII_FULL, presets::UTF8_FULL,
+                };
 
                 let mut table = Table::new();
                 table
-                    .load_preset(UTF8_FULL)
+                    .load_preset(if args.ascii { ASCII_FULL } else { UTF8_FULL })
                     .set_content_arrangement(ContentArrangement::Dynamic)
                     .set_header(vec!["Version", "First Seen", "Last Seen"]);
 

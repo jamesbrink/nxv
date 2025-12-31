@@ -145,6 +145,14 @@ pub struct HistoryArgs {
     /// Output format.
     #[arg(short, long, value_enum, default_value_t = OutputFormatArg::Table)]
     pub format: OutputFormatArg,
+
+    /// Show full details (commits, description, license, homepage, etc.).
+    #[arg(long)]
+    pub full: bool,
+
+    /// Use ASCII table borders instead of Unicode.
+    #[arg(long)]
+    pub ascii: bool,
 }
 
 /// Arguments for the index command (feature-gated).

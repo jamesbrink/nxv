@@ -28,9 +28,13 @@
         # Common source filtering
         src = craneLib.cleanCargoSource ./.;
 
+        # Read crate metadata from Cargo.toml
+        crateInfo = craneLib.crateNameFromCargoToml { cargoToml = ./Cargo.toml; };
+
         # Common build arguments
         commonArgs = {
           inherit src;
+          inherit (crateInfo) pname version;
           strictDeps = true;
 
           buildInputs = [
@@ -131,15 +135,20 @@
 
         # Apps (run with `nix run`)
         apps = {
-          default = flake-utils.lib.mkApp {
-            drv = nxv;
+          default = {
+            type = "app";
+            program = "${nxv}/bin/nxv";
+            meta = nxv.meta;
           };
-          nxv = flake-utils.lib.mkApp {
-            drv = nxv;
+          nxv = {
+            type = "app";
+            program = "${nxv}/bin/nxv";
+            meta = nxv.meta;
           };
-          nxv-indexer = flake-utils.lib.mkApp {
-            drv = nxv-indexer;
-            name = "nxv";
+          nxv-indexer = {
+            type = "app";
+            program = "${nxv-indexer}/bin/nxv";
+            meta = nxv-indexer.meta;
           };
         };
       }

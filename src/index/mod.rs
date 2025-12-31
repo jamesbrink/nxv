@@ -493,16 +493,15 @@ impl Indexer {
                 } else if path.starts_with("pkgs/") && path.ends_with(".nix") {
                     let parts: Vec<&str> = path.split('/').collect();
                     if parts.len() >= 2 {
-                        let potential_name = if parts.last() == Some(&"default.nix")
-                            && parts.len() >= 2
-                        {
-                            parts[parts.len() - 2]
-                        } else {
-                            parts
-                                .last()
-                                .map(|f| f.trim_end_matches(".nix"))
-                                .unwrap_or("")
-                        };
+                        let potential_name =
+                            if parts.last() == Some(&"default.nix") && parts.len() >= 2 {
+                                parts[parts.len() - 2]
+                            } else {
+                                parts
+                                    .last()
+                                    .map(|f| f.trim_end_matches(".nix"))
+                                    .unwrap_or("")
+                            };
 
                         if let Some(all_attrs_list) = all_attrs
                             && all_attrs_list.contains(&potential_name.to_string())
@@ -527,23 +526,21 @@ impl Indexer {
             let mut aggregates: HashMap<String, PackageAggregate> = HashMap::new();
 
             for system in systems {
-                let packages = match extractor::extract_packages_for_attrs(
-                    nixpkgs_path,
-                    system,
-                    &target_list,
-                ) {
-                    Ok(pkgs) => pkgs,
-                    Err(e) => {
-                        warn(
-                            &progress_bar,
-                            format!(
-                                "Extraction failed at {} ({}): {}",
-                                &commit.short_hash, system, e
-                            ),
-                        );
-                        continue;
-                    }
-                };
+                let packages =
+                    match extractor::extract_packages_for_attrs(nixpkgs_path, system, &target_list)
+                    {
+                        Ok(pkgs) => pkgs,
+                        Err(e) => {
+                            warn(
+                                &progress_bar,
+                                format!(
+                                    "Extraction failed at {} ({}): {}",
+                                    &commit.short_hash, system, e
+                                ),
+                            );
+                            continue;
+                        }
+                    };
 
                 for pkg in packages {
                     let key = format!("{}::{}", pkg.attribute_path, pkg.version);

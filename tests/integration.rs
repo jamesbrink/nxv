@@ -70,17 +70,19 @@ fn create_test_db(path: &std::path::Path) {
             (name, version, first_commit_hash, first_commit_date, last_commit_hash, last_commit_date,
              attribute_path, description, license, homepage)
         VALUES
-            ('python', '3.11.0', 'abc1234567890', 1700000000, 'def1234567890', 1700100000,
+            ('python-3.11.0', '3.11.0', 'abc1234567890', 1700000000, 'def1234567890', 1700100000,
+             'python', 'Python programming language', '["MIT"]', 'https://python.org'),
+            ('python-3.11.0', '3.11.0', 'abc1234567890', 1700000000, 'def1234567890', 1700100000,
              'python311', 'Python programming language', '["MIT"]', 'https://python.org'),
-            ('python', '3.12.0', 'ghi1234567890', 1701000000, 'jkl1234567890', 1701100000,
+            ('python-3.12.0', '3.12.0', 'ghi1234567890', 1701000000, 'jkl1234567890', 1701100000,
              'python312', 'Python programming language', '["MIT"]', 'https://python.org'),
-            ('python2', '2.7.18', 'mno1234567890', 1600000000, 'pqr1234567890', 1600100000,
-             'python27', 'Python 2 interpreter', '["PSF"]', 'https://python.org'),
-            ('nodejs', '20.0.0', 'stu1234567890', 1702000000, 'vwx1234567890', 1702100000,
-             'nodejs_20', 'Node.js JavaScript runtime', '["MIT"]', 'https://nodejs.org'),
-            ('firefox', '120.0', 'aaa1234567890', 1703000000, 'bbb1234567890', 1703100000,
+            ('python2-2.7.18', '2.7.18', 'mno1234567890', 1600000000, 'pqr1234567890', 1600100000,
+             'python2', 'Python 2 interpreter', '["PSF"]', 'https://python.org'),
+            ('nodejs-20.0.0', '20.0.0', 'stu1234567890', 1702000000, 'vwx1234567890', 1702100000,
+             'nodejs', 'Node.js JavaScript runtime', '["MIT"]', 'https://nodejs.org'),
+            ('firefox-120.0', '120.0', 'aaa1234567890', 1703000000, 'bbb1234567890', 1703100000,
              'firefox', 'Mozilla Firefox web browser', '["MPL-2.0"]', 'https://firefox.com'),
-            ('rustc', '1.75.0', 'ccc1234567890', 1704000000, 'ddd1234567890', 1704100000,
+            ('rustc-1.75.0', '1.75.0', 'ccc1234567890', 1704000000, 'ddd1234567890', 1704100000,
              'rustc', 'The Rust compiler', '["MIT", "Apache-2.0"]', 'https://rust-lang.org');
         "#,
     )
@@ -695,9 +697,9 @@ fn test_search_version_sort_order() {
         -- Insert versions in random order to test sorting
         INSERT INTO package_versions (name, version, first_commit_hash, first_commit_date, last_commit_hash, last_commit_date, attribute_path, description)
         VALUES
-            ('python', '3.9.0', 'aaa', 1600000000, 'aaa', 1600000000, 'python39', 'Python 3.9'),
-            ('python', '3.11.0', 'ccc', 1602000000, 'ccc', 1602000000, 'python311', 'Python 3.11'),
-            ('python', '3.10.0', 'bbb', 1601000000, 'bbb', 1601000000, 'python310', 'Python 3.10');
+            ('python-3.9.0', '3.9.0', 'aaa', 1600000000, 'aaa', 1600000000, 'python', 'Python 3.9'),
+            ('python-3.11.0', '3.11.0', 'ccc', 1602000000, 'ccc', 1602000000, 'python', 'Python 3.11'),
+            ('python-3.10.0', '3.10.0', 'bbb', 1601000000, 'bbb', 1601000000, 'python', 'Python 3.10');
         "#,
     )
     .unwrap();

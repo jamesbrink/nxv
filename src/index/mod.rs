@@ -878,23 +878,20 @@ pub struct IndexResult {
     pub was_interrupted: bool,
 }
 
-/// Build a bloom filter from all unique package names in the database.
+/// Build a bloom filter from all unique package attribute paths in the database.
 ///
 /// This should be called after indexing is complete.
 pub fn build_bloom_filter(db: &Database) -> Result<PackageBloomFilter> {
     use crate::db::queries;
 
-    let stats = queries::get_stats(db.connection())?;
-    let unique_names = stats.unique_names as usize;
+    // Get all unique attribute paths from the database
+    let attrs = queries::get_all_unique_attrs(db.connection())?;
 
     // Create bloom filter with 1% false positive rate
-    let mut filter = PackageBloomFilter::new(unique_names.max(1000), 0.01);
+    let mut filter = PackageBloomFilter::new(attrs.len().max(1000), 0.01);
 
-    // Get all unique package names from the database
-    let names = queries::get_all_unique_names(db.connection())?;
-
-    for name in &names {
-        filter.insert(name);
+    for attr in &attrs {
+        filter.insert(attr);
     }
 
     Ok(filter)

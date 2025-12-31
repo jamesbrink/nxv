@@ -112,14 +112,19 @@ pub fn search_by_attr(conn: &rusqlite::Connection, attr_path: &str) -> Result<Ve
 /// Search for packages by name and version.
 pub fn search_by_name_version(
     conn: &rusqlite::Connection,
-    name: &str,
+    package: &str,
     version: &str,
 ) -> Result<Vec<PackageVersion>> {
+    // Search by attribute_path (package) and version prefix
     let mut stmt = conn.prepare(
-        "SELECT * FROM package_versions WHERE name = ? AND version LIKE ? ORDER BY first_commit_date DESC",
+        "SELECT * FROM package_versions WHERE attribute_path LIKE ? AND version LIKE ? ORDER BY first_commit_date DESC",
     )?;
+    let package_pattern = format!("{}%", package);
     let version_pattern = format!("{}%", version);
-    let rows = stmt.query_map([name, &version_pattern], PackageVersion::from_row)?;
+    let rows = stmt.query_map(
+        [&package_pattern, &version_pattern],
+        PackageVersion::from_row,
+    )?;
 
     let mut results = Vec::new();
     for row in rows {
@@ -131,14 +136,14 @@ pub fn search_by_name_version(
 /// Get the first occurrence of a package version.
 pub fn get_first_occurrence(
     conn: &rusqlite::Connection,
-    name: &str,
+    package: &str,
     version: &str,
 ) -> Result<Option<PackageVersion>> {
     let mut stmt = conn.prepare(
-        "SELECT * FROM package_versions WHERE name = ? AND version = ? ORDER BY first_commit_date ASC LIMIT 1",
+        "SELECT * FROM package_versions WHERE attribute_path = ? AND version = ? ORDER BY first_commit_date ASC LIMIT 1",
     )?;
 
-    let result = stmt.query_row([name, version], PackageVersion::from_row);
+    let result = stmt.query_row([package, version], PackageVersion::from_row);
     match result {
         Ok(pkg) => Ok(Some(pkg)),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -149,14 +154,14 @@ pub fn get_first_occurrence(
 /// Get the last occurrence of a package version.
 pub fn get_last_occurrence(
     conn: &rusqlite::Connection,
-    name: &str,
+    package: &str,
     version: &str,
 ) -> Result<Option<PackageVersion>> {
     let mut stmt = conn.prepare(
-        "SELECT * FROM package_versions WHERE name = ? AND version = ? ORDER BY last_commit_date DESC LIMIT 1",
+        "SELECT * FROM package_versions WHERE attribute_path = ? AND version = ? ORDER BY last_commit_date DESC LIMIT 1",
     )?;
 
-    let result = stmt.query_row([name, version], PackageVersion::from_row);
+    let result = stmt.query_row([package, version], PackageVersion::from_row);
     match result {
         Ok(pkg) => Ok(Some(pkg)),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -170,19 +175,19 @@ pub type VersionHistoryEntry = (String, DateTime<Utc>, DateTime<Utc>);
 /// Get version history for a package.
 pub fn get_version_history(
     conn: &rusqlite::Connection,
-    name: &str,
+    package: &str,
 ) -> Result<Vec<VersionHistoryEntry>> {
     let mut stmt = conn.prepare(
         r#"
         SELECT version, MIN(first_commit_date) as first_seen, MAX(last_commit_date) as last_seen
         FROM package_versions
-        WHERE name = ?
+        WHERE attribute_path = ?
         GROUP BY version
         ORDER BY first_seen DESC
         "#,
     )?;
 
-    let rows = stmt.query_map([name], |row| {
+    let rows = stmt.query_map([package], |row| {
         let version: String = row.get(0)?;
         let first_ts: i64 = row.get(1)?;
         let last_ts: i64 = row.get(2)?;
@@ -266,12 +271,13 @@ pub fn search_by_description(
     Ok(results)
 }
 
-/// Get all unique package names in the database.
+/// Get all unique package attribute paths in the database.
 ///
-/// This is used to build the bloom filter.
+/// This is used to build the bloom filter for fast "not found" lookups.
 #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
-pub fn get_all_unique_names(conn: &rusqlite::Connection) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare("SELECT DISTINCT name FROM package_versions ORDER BY name")?;
+pub fn get_all_unique_attrs(conn: &rusqlite::Connection) -> Result<Vec<String>> {
+    let mut stmt = conn
+        .prepare("SELECT DISTINCT attribute_path FROM package_versions ORDER BY attribute_path")?;
     let rows = stmt.query_map([], |row| row.get(0))?;
 
     let mut results = Vec::new();
@@ -292,17 +298,17 @@ mod tests {
         let db_path = dir.path().join("test.db");
         let db = Database::open(&db_path).unwrap();
 
-        // Insert test data
+        // Insert test data - attribute_path is the "Package" that users install with
         db.connection()
             .execute(
                 r#"
             INSERT INTO package_versions (name, version, first_commit_hash, first_commit_date,
                 last_commit_hash, last_commit_date, attribute_path, description)
             VALUES
-                ('python', '3.11.0', 'abc1234567890', 1700000000, 'def1234567890', 1700100000, 'python311', 'Python interpreter'),
-                ('python', '3.12.0', 'ghi1234567890', 1701000000, 'jkl1234567890', 1701100000, 'python312', 'Python interpreter'),
-                ('python2', '2.7.18', 'mno1234567890', 1600000000, 'pqr1234567890', 1600100000, 'python27', 'Python 2 interpreter'),
-                ('nodejs', '20.0.0', 'stu1234567890', 1702000000, 'vwx1234567890', 1702100000, 'nodejs_20', 'Node.js runtime')
+                ('python-3.11.0', '3.11.0', 'abc1234567890', 1700000000, 'def1234567890', 1700100000, 'python', 'Python interpreter'),
+                ('python-3.12.0', '3.12.0', 'ghi1234567890', 1701000000, 'jkl1234567890', 1701100000, 'python', 'Python interpreter'),
+                ('python2-2.7.18', '2.7.18', 'mno1234567890', 1600000000, 'pqr1234567890', 1600100000, 'python2', 'Python 2 interpreter'),
+                ('nodejs-20.0.0', '20.0.0', 'stu1234567890', 1702000000, 'vwx1234567890', 1702100000, 'nodejs', 'Node.js runtime')
             "#,
                 [],
             )
@@ -314,21 +320,22 @@ mod tests {
     #[test]
     fn test_search_by_name_exact() {
         let (_dir, db) = create_test_db();
-        let results = search_by_name(db.connection(), "python", true).unwrap();
-        assert_eq!(results.len(), 2);
-        assert!(results.iter().all(|p| p.name == "python"));
+        // search_by_name still searches the name field
+        let results = search_by_name(db.connection(), "python-3.11.0", true).unwrap();
+        assert_eq!(results.len(), 1);
     }
 
     #[test]
     fn test_search_by_name_prefix() {
         let (_dir, db) = create_test_db();
         let results = search_by_name(db.connection(), "python", false).unwrap();
-        assert_eq!(results.len(), 3); // python, python, python2
+        assert_eq!(results.len(), 3); // python-3.11.0, python-3.12.0, python2-2.7.18
     }
 
     #[test]
     fn test_search_by_name_version() {
         let (_dir, db) = create_test_db();
+        // Now searches by attribute_path (package) and version
         let results = search_by_name_version(db.connection(), "python", "3.11").unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].version, "3.11.0");
@@ -337,6 +344,7 @@ mod tests {
     #[test]
     fn test_get_version_history() {
         let (_dir, db) = create_test_db();
+        // Now uses attribute_path
         let history = get_version_history(db.connection(), "python").unwrap();
         assert_eq!(history.len(), 2);
         // Should be ordered by first_seen DESC, so 3.12.0 first
@@ -349,6 +357,6 @@ mod tests {
         let (_dir, db) = create_test_db();
         let stats = get_stats(db.connection()).unwrap();
         assert_eq!(stats.total_ranges, 4);
-        assert_eq!(stats.unique_names, 3); // python, python2, nodejs
+        assert_eq!(stats.unique_names, 4); // python-3.11.0, python-3.12.0, python2-2.7.18, nodejs-20.0.0
     }
 }

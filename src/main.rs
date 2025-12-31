@@ -115,9 +115,9 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
         Err(e) => return Err(e.into()),
     };
 
-    // For exact name searches, check bloom filter first for instant "not found"
-    // This only applies to exact name searches (not prefix, attribute path, or description)
-    if args.exact && !args.desc && !args.package.contains('.') {
+    // For exact package searches, check bloom filter first for instant "not found"
+    // This only applies to exact searches (not prefix or description searches)
+    if args.exact && !args.desc {
         let bloom_path = paths::get_bloom_path();
         if bloom_path.exists()
             && let Ok(filter) = PackageBloomFilter::load(&bloom_path)
@@ -135,14 +135,12 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
     // Perform search
     let query_type = if args.desc {
         "FTS description search"
-    } else if args.package.contains('.') {
-        "attribute path search"
     } else if args.version.is_some() {
-        "name+version search"
+        "package+version search"
     } else if args.exact {
-        "exact name search"
+        "exact package search"
     } else {
-        "prefix name search"
+        "prefix package search"
     };
 
     if verbosity >= Verbosity::Debug {
@@ -154,15 +152,18 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
     let results = if args.desc {
         // FTS search on description
         queries::search_by_description(db.connection(), &args.package)?
-    } else if args.package.contains('.') {
-        // Looks like an attribute path
-        queries::search_by_attr(db.connection(), &args.package)?
     } else if let Some(ref version) = args.version {
         // Search by name and version
         queries::search_by_name_version(db.connection(), &args.package, version)?
+    } else if args.exact {
+        // Exact match on attribute_path (the "Package" column)
+        queries::search_by_attr(db.connection(), &args.package)?
+            .into_iter()
+            .filter(|p| p.attribute_path == args.package)
+            .collect()
     } else {
-        // Search by name
-        queries::search_by_name(db.connection(), &args.package, args.exact)?
+        // Prefix search on attribute_path
+        queries::search_by_attr(db.connection(), &args.package)?
     };
 
     if verbosity >= Verbosity::Debug {

@@ -26,7 +26,7 @@ pub fn print_table(results: &[PackageVersion], options: TableOptions) {
     table.set_content_arrangement(ContentArrangement::Dynamic);
 
     // Set headers - Package (attr path) is what users install with
-    let mut headers = vec!["Package", "Version", "Commit", "Date"];
+    let mut headers = vec!["Package", "Version", "Commit", "Date", "Description"];
     if options.show_platforms {
         headers.push("Platforms");
     }
@@ -34,12 +34,14 @@ pub fn print_table(results: &[PackageVersion], options: TableOptions) {
 
     for pkg in results {
         let date = pkg.last_commit_date.format("%Y-%m-%d").to_string();
+        let description = pkg.description.as_deref().unwrap_or("-");
 
         let mut row = vec![
             Cell::new(&pkg.attribute_path).fg(Color::Cyan),
             Cell::new(&pkg.version).fg(Color::Green),
             Cell::new(&pkg.last_commit_hash).fg(Color::Yellow),
             Cell::new(&date).fg(Color::White),
+            Cell::new(description).fg(Color::White),
         ];
 
         if options.show_platforms {

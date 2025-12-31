@@ -119,6 +119,10 @@ pub struct SearchArgs {
     #[arg(short, long)]
     pub exact: bool,
 
+    /// Show all commits (by default, only most recent per package+version is shown).
+    #[arg(long)]
+    pub full: bool,
+
     /// Use ASCII table borders instead of Unicode.
     #[arg(long)]
     pub ascii: bool,

@@ -214,6 +214,19 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
         results.reverse();
     }
 
+    // Deduplicate by (attribute_path, version) - keep most recent by default
+    // When --full is passed, skip deduplication to show all commits
+    let results = if args.full {
+        results
+    } else {
+        use std::collections::HashSet;
+        let mut seen: HashSet<(String, String)> = HashSet::new();
+        results
+            .into_iter()
+            .filter(|p| seen.insert((p.attribute_path.clone(), p.version.clone())))
+            .collect()
+    };
+
     // Apply limit
     let results: Vec<_> = if args.limit > 0 {
         let total = results.len();

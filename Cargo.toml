@@ -48,12 +48,12 @@ indicatif = "0.18"
 # Signal handling
 ctrlc = { version = "3.5", optional = true }
 
-# API server (feature-gated)
-axum = { version = "0.8", optional = true }
-tokio = { version = "1.48", features = ["rt-multi-thread", "macros", "signal"], optional = true }
-tower-http = { version = "0.6", features = ["cors", "trace"], optional = true }
-utoipa = { version = "5.4", features = ["axum_extras", "chrono"], optional = true }
-utoipa-scalar = { version = "0.3", features = ["axum"], optional = true }
+# API server
+axum = "0.8"
+tokio = { version = "1.48", features = ["rt-multi-thread", "macros", "signal"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+utoipa = { version = "5.4", features = ["axum_extras", "chrono"] }
+utoipa-scalar = { version = "0.3", features = ["axum"] }
 
 # Error handling
 anyhow = "1.0"
@@ -91,8 +91,7 @@ harness = false
 
 [features]
 default = []
-indexer = ["git2", "ctrlc"]  # Enable indexer functionality (dev only)
-server = ["axum", "tokio", "tower-http", "utoipa", "utoipa-scalar"]  # Enable API server
+indexer = ["git2", "ctrlc"]  # Enable indexer functionality
 
 # Release profile optimizations
 [profile.release]

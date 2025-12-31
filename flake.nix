@@ -89,26 +89,11 @@
           };
         });
 
-        # Build nxv with server feature enabled (API server)
-        nxv-server = craneLib.buildPackage (commonArgs // {
-          inherit cargoArtifacts;
-          cargoExtraArgs = "--features server";
-          pname = "nxv-server";
-
-          meta = {
-            description = "CLI tool for finding specific versions of Nix packages (with API server)";
-            homepage = "https://github.com/jamesbrink/nxv";
-            license = pkgs.lib.licenses.mit;
-            maintainers = [ ];
-            mainProgram = "nxv";
-          };
-        });
-
       in
       {
         # Packages
         packages = {
-          inherit nxv nxv-indexer nxv-server;
+          inherit nxv nxv-indexer;
           default = nxv;
         };
 
@@ -164,11 +149,6 @@
             type = "app";
             program = "${nxv-indexer}/bin/nxv";
             meta = nxv-indexer.meta;
-          };
-          nxv-server = {
-            type = "app";
-            program = "${nxv-server}/bin/nxv";
-            meta = nxv-server.meta;
           };
         };
       }

@@ -55,7 +55,6 @@ pub enum Commands {
     Index(IndexArgs),
 
     /// Start the API server.
-    #[cfg(feature = "server")]
     Serve(ServeArgs),
 
     /// Generate shell completions.
@@ -193,8 +192,7 @@ impl InfoArgs {
     }
 }
 
-/// Arguments for the serve command (feature-gated).
-#[cfg(feature = "server")]
+/// Arguments for the serve command.
 #[derive(Parser, Debug)]
 pub struct ServeArgs {
     /// Host address to bind to.

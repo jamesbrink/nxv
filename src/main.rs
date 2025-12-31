@@ -14,7 +14,6 @@ mod search;
 #[cfg(feature = "indexer")]
 mod index;
 
-#[cfg(feature = "server")]
 mod server;
 
 use anyhow::Result;
@@ -44,7 +43,6 @@ fn main() {
         }
         #[cfg(feature = "indexer")]
         Commands::Index(args) => cmd_index(&cli, args),
-        #[cfg(feature = "server")]
         Commands::Serve(args) => cmd_serve(&cli, args),
     };
 
@@ -826,7 +824,6 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
     Ok(())
 }
 
-#[cfg(feature = "server")]
 fn cmd_serve(cli: &Cli, args: &cli::ServeArgs) -> Result<()> {
     use crate::server::{ServerConfig, run_server};
 

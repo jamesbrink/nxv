@@ -7,13 +7,15 @@ nxv is a CLI tool for discovering specific versions of Nix packages across nixpk
 ## Goals
 
 - Index all packages from nixpkgs-unstable git history
-- Store: package name, version, commit hash, commit date, attribute path, and metadata (description, license, homepage, maintainers)
+- Store: package name, version, first/last commit refs, attribute path, and metadata (description, license, homepage, maintainers)
+- Capture supported platforms for each package version
 - Enable queries like `nxv search python` → list of all python versions with commit refs
 - Support reverse queries: "when was version X introduced?"
 - Users download pre-built index; no local nixpkgs clone required
 - Incremental delta updates to minimize bandwidth
 - Fast negative lookups via bloom filter
 - Output format suitable for `nix run nixpkgs/<commit>#<package>`
+- Searches must be lightning fast; avoid full table scans via indexed prefix queries and FTS5
 
 ## Architecture
 
@@ -77,11 +79,11 @@ nxv is a CLI tool for discovering specific versions of Nix packages across nixpk
 ### Index Distribution
 - **Primary:** GitHub Releases (free, reliable, global CDN via GitHub)
 - **Format:** zstd-compressed SQLite database + bloom filter
-- **Updates:** Delta packs (append-only rows since last indexed commit)
+- **Updates:** Delta packs (new ranges + range updates since last indexed commit)
+- **Integrity:** manifest is signed; client verifies using an embedded public key
 
 ### Delta Update Strategy
-- Index is naturally append-only (new commits = new package rows)
-- Delta packs contain only rows added since a specific commit
+- Index stores version ranges; deltas contain new ranges and range updates since a specific commit
 - Format: `delta-<from_commit_short>-<to_commit_short>.pack.zst`
 - Client downloads applicable delta and imports into local database
 - Manifest file tracks available deltas and full index versions
@@ -92,6 +94,15 @@ nxv is a CLI tool for discovering specific versions of Nix packages across nixpk
 - Loaded into memory on startup
 - Provides instant "package not found" for typos/non-existent packages
 - Rebuilt with each index update
+- Only used for exact-name searches; prefix/description searches bypass the filter
+
+### Storage Model
+- Store contiguous ranges where an attribute path has the same version
+- When a package's version does not change, keep the range open without updating `last_commit_*`
+- When a version changes or a package disappears, close the prior range by setting `last_commit_*` to the previous commit
+- Open a new range only when the version changes or the package appears
+- Metadata changes for the same version update the existing range in place
+- This avoids per-commit rows while preserving first/last commit refs for each version
 
 ## Database Schema
 
@@ -101,32 +112,36 @@ CREATE TABLE meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
--- Keys: 'last_indexed_commit', 'index_version', 'created_at', 'package_count'
+-- Keys: 'last_indexed_commit', 'index_version', 'created_at', 'package_count' (count of version ranges)
 
 -- Main package version table
-CREATE TABLE packages (
+CREATE TABLE package_versions (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,              -- e.g. "python"
     version TEXT NOT NULL,           -- e.g. "3.11.5"
-    commit_hash TEXT NOT NULL,       -- full 40-char hash
-    commit_date INTEGER NOT NULL,    -- unix timestamp
+    first_commit_hash TEXT NOT NULL, -- full 40-char hash
+    first_commit_date INTEGER NOT NULL, -- unix timestamp
+    last_commit_hash TEXT NOT NULL,  -- full 40-char hash
+    last_commit_date INTEGER NOT NULL,  -- unix timestamp
     attribute_path TEXT NOT NULL,    -- e.g. "python311Packages.requests"
     description TEXT,                -- package description from meta
     license TEXT,                    -- JSON: string or array of license names
     homepage TEXT,                   -- URL
     maintainers TEXT,                -- JSON array of github handles
-    UNIQUE(attribute_path, commit_hash)
+    platforms TEXT,                  -- JSON array of supported platforms
+    UNIQUE(attribute_path, version, first_commit_hash)
 );
 
 -- Indexes for common query patterns
-CREATE INDEX idx_packages_name ON packages(name);
-CREATE INDEX idx_packages_name_version ON packages(name, version, commit_date);
-CREATE INDEX idx_packages_attr ON packages(attribute_path);
-CREATE INDEX idx_packages_date ON packages(commit_date DESC);
-CREATE INDEX idx_packages_description ON packages(description) WHERE description IS NOT NULL;
+CREATE INDEX idx_packages_name ON package_versions(name);
+CREATE INDEX idx_packages_name_version ON package_versions(name, version, first_commit_date);
+CREATE INDEX idx_packages_attr ON package_versions(attribute_path);
+CREATE INDEX idx_packages_first_date ON package_versions(first_commit_date DESC);
+CREATE INDEX idx_packages_last_date ON package_versions(last_commit_date DESC);
 
--- FTS5 virtual table for full-text search on description (optional, Phase 8)
--- CREATE VIRTUAL TABLE packages_fts USING fts5(name, description, content=packages, content_rowid=id);
+-- FTS5 virtual table for fast name/description search
+CREATE VIRTUAL TABLE package_versions_fts
+USING fts5(name, description, content=package_versions, content_rowid=id);
 ```
 
 ## Remote Index Manifest
@@ -158,6 +173,10 @@ CREATE INDEX idx_packages_description ON packages(description) WHERE description
 }
 ```
 
+Manifest integrity:
+- `manifest.json` is signed as `manifest.json.sig` (minisign or cosign)
+- Client verifies signature using an embedded public key before trusting URLs/hashes
+
 ## Crate Dependencies
 
 ```toml
@@ -183,6 +202,9 @@ zstd = "0.13"
 
 # Bloom filter
 bloomfilter = "1"
+
+# Manifest signature verification
+minisign = "0.7"
 
 # Output formatting
 owo-colors = "4"
@@ -297,6 +319,7 @@ src/
 - [ ] Implement schema initialization:
   - [ ] `init_schema()` - create tables and indexes
   - [ ] Schema versioning in meta table for migrations
+  - [ ] Create FTS5 table and triggers to keep it in sync
 - [ ] Implement meta operations in `db/mod.rs`:
   - [ ] `get_meta(key) -> Option<String>`
   - [ ] `set_meta(key, value)`
@@ -307,39 +330,42 @@ src/
       pub id: i64,
       pub name: String,
       pub version: String,
-      pub commit_hash: String,
-      pub commit_date: chrono::DateTime<Utc>,
+      pub first_commit_hash: String,
+      pub first_commit_date: chrono::DateTime<Utc>,
+      pub last_commit_hash: String,
+      pub last_commit_date: chrono::DateTime<Utc>,
       pub attribute_path: String,
       pub description: Option<String>,
       pub license: Option<String>,      // JSON
       pub homepage: Option<String>,
       pub maintainers: Option<String>,  // JSON
+      pub platforms: Option<String>,    // JSON
   }
   ```
 - [ ] Implement package queries in `db/queries.rs`:
   - [ ] `search_by_name(name, exact: bool) -> Vec<PackageVersion>`
   - [ ] `search_by_attr(attr_path) -> Vec<PackageVersion>`
   - [ ] `search_by_name_version(name, version) -> Vec<PackageVersion>` (for reverse queries)
-  - [ ] `get_first_occurrence(name, version) -> Option<PackageVersion>`
-  - [ ] `get_last_occurrence(name, version) -> Option<PackageVersion>`
+  - [ ] `get_first_occurrence(name, version) -> Option<PackageVersion>` (uses `first_commit_*`)
+  - [ ] `get_last_occurrence(name, version) -> Option<PackageVersion>` (uses `last_commit_*`)
   - [ ] `get_version_history(name) -> Vec<(String, DateTime, DateTime)>` (version, first_seen, last_seen)
 - [ ] Implement stats in `db/queries.rs`:
-  - [ ] `get_stats() -> IndexStats` (total rows, unique names, unique versions, date range)
+  - [ ] `get_stats() -> IndexStats` (total ranges, unique names, unique versions, date range)
 - [ ] Implement batch insert for indexer:
-  - [ ] `insert_packages_batch(packages: &[PackageVersion])` - bulk insert with transaction
+  - [ ] `insert_package_ranges_batch(packages: &[PackageVersion])` - bulk insert with transaction
 - [ ] Implement delta import in `db/import.rs`:
-  - [ ] `import_delta_pack(path)` - import rows from delta pack file
+  - [ ] `import_delta_pack(path)` - import rows and apply range updates from delta pack file
 
 ### Success Criteria
 
 - [ ] Unit tests for all database operations pass
 - [ ] Test: create db, insert package, query returns correct result
-- [ ] Test: duplicate insert (same attr_path+commit) is handled gracefully (UPSERT or ignore)
+- [ ] Test: duplicate insert (same attr_path+version+first_commit) is handled gracefully (UPSERT or ignore)
 - [ ] Test: batch insert of 10k records completes in < 5 seconds
 - [ ] Test: `search_by_name("python", exact=false)` returns python, python2, python3, etc.
 - [ ] Test: `search_by_name("python", exact=true)` returns only "python"
-- [ ] Test: `get_first_occurrence("python", "3.11.0")` returns earliest commit
-- [ ] Test: `get_last_occurrence("python", "3.11.0")` returns latest commit with that version
+- [ ] Test: `get_first_occurrence("python", "3.11.0")` returns earliest commit range
+- [ ] Test: `get_last_occurrence("python", "3.11.0")` returns latest commit range
 - [ ] Test: `get_version_history("python")` returns chronological version list
 - [ ] Test: meta key/value storage and retrieval works
 - [ ] Test: `get_stats()` returns accurate counts
@@ -394,7 +420,7 @@ src/
 
 - [ ] Implement extraction strategy in `index/extractor.rs`:
   - [ ] Use `nix eval` with custom expression to extract package info
-  - [ ] Expression outputs JSON: `[{name, version, attrPath, description, license, homepage, maintainers}, ...]`
+  - [ ] Expression outputs JSON: `[{name, version, attrPath, description, license, homepage, maintainers, platforms}, ...]`
 - [ ] Implement `PackageExtractor`:
   - [ ] `extract_at_commit(repo_path, commit_hash) -> Result<Vec<PackageInfo>>`
   - [ ] Handle `nix eval` failures gracefully (some commits won't eval)
@@ -409,11 +435,12 @@ src/
       pub license: Option<Vec<String>>,
       pub homepage: Option<String>,
       pub maintainers: Option<Vec<String>>,
+      pub platforms: Option<Vec<String>>,
   }
   ```
 - [ ] Write nix expression for extraction:
   - [ ] Iterate over all packages in `legacyPackages.${system}` or equivalent
-  - [ ] Extract `pname`, `version`, `meta.description`, `meta.license`, `meta.homepage`, `meta.maintainers`
+  - [ ] Extract `pname`, `version`, `meta.description`, `meta.license`, `meta.homepage`, `meta.maintainers`, `meta.platforms`
   - [ ] Handle packages with null/missing attributes
   - [ ] Handle `throw` and `assert` failures gracefully
 - [ ] Implement parallel extraction:
@@ -423,13 +450,14 @@ src/
 - [ ] Handle nixpkgs quirks:
   - [ ] Broken packages (meta.broken = true) - still index them
   - [ ] Unfree packages - still index them
-  - [ ] Platform-specific packages - index all platforms
+  - [ ] Platform-specific packages - capture `meta.platforms` into `platforms`
   - [ ] Aliases - resolve to real package
 
 ### Success Criteria
 
 - [ ] Test: extraction expression evaluates successfully on current nixpkgs
 - [ ] Test: extracted data includes expected fields (name, version, description, etc.)
+- [ ] Test: extracted data includes platforms when present
 - [ ] Test: packages with missing version are handled (use "unknown" or skip)
 - [ ] Test: packages with complex licenses (list of licenses) are serialized correctly
 - [ ] Test: extraction handles commits that fail to evaluate
@@ -451,6 +479,9 @@ src/
   - [ ] Process in chronological order (oldest first)
   - [ ] Checkpoint every N commits (save progress to meta table)
   - [ ] On restart, resume from last checkpoint
+  - [ ] When version changes, close prior range at previous commit and insert a new range
+  - [ ] When a package disappears, close the prior range at previous commit
+  - [ ] When metadata changes for the same version, update metadata fields in place
 - [ ] Implement incremental indexing:
   - [ ] `index_incremental(repo_path, db_path)` - only new commits
   - [ ] Read `last_indexed_commit` from database
@@ -503,8 +534,8 @@ src/
 - [ ] Integrate bloom filter into search:
   - [ ] Load on startup (lazy, on first search)
   - [ ] Check bloom filter before database query
-  - [ ] If bloom filter says "no", return "package not found" immediately
-  - [ ] If bloom filter says "maybe", proceed with database query
+- [ ] If bloom filter says "no", return "package not found" immediately (exact-name search only)
+- [ ] If bloom filter says "maybe", proceed with database query
 - [ ] Handle bloom filter updates:
   - [ ] Rebuild on index update
   - [ ] Or use growable bloom filter for incremental adds
@@ -517,7 +548,7 @@ src/
 - [ ] Test: save and load produces identical filter
 - [ ] Test: filter size is reasonable (~1.2MB for 1M items)
 - [ ] Benchmark: bloom filter lookup is < 1ms
-- [ ] Test: search with bloom filter miss returns "not found" without DB query
+- [ ] Test: exact-name search with bloom filter miss returns "not found" without DB query
 
 ---
 
@@ -529,6 +560,7 @@ src/
   - [ ] `Manifest` struct matching JSON schema
   - [ ] `Manifest::fetch(url) -> Result<Self>`
   - [ ] Validate manifest version compatibility
+  - [ ] Verify manifest signature with embedded public key before parsing URLs
 - [ ] Implement download in `remote/download.rs`:
   - [ ] `download_file(url, dest, expected_sha256) -> Result<()>`
   - [ ] Progress bar with indicatif
@@ -559,11 +591,13 @@ src/
   - [ ] `generate_delta_pack(db_path, from_commit, to_commit, output_dir)`
   - [ ] `generate_manifest(output_dir)` - create manifest.json
   - [ ] `generate_bloom_filter(db_path, output_dir)`
+  - [ ] `sign_manifest(output_dir)` - create manifest.json.sig
 
 ### Success Criteria
 
 - [ ] Test: manifest parsing handles valid manifest
 - [ ] Test: manifest parsing rejects invalid/future version manifest
+- [ ] Test: manifest signature verification fails on tampered manifest
 - [ ] Test: download with correct SHA256 succeeds
 - [ ] Test: download with incorrect SHA256 fails and cleans up
 - [ ] Test: zstd decompression works correctly
@@ -584,11 +618,13 @@ src/
 
 - [ ] Implement search in `db/queries.rs` (enhance from Phase 2):
   - [ ] Exact name match: `nxv search python`
-  - [ ] Partial/fuzzy match: `nxv search pyth` → python, python2, python3
+  - [ ] Prefix match: `nxv search pyth` → python, python2, python3
+  - [ ] Prefix queries use `name LIKE 'prefix%'` to stay on the name index
   - [ ] Attribute path search: `nxv search python311Packages.requests`
   - [ ] Version filter: `nxv search python --version 3.11` (prefix match)
-  - [ ] Description search: `nxv search --desc "json parser"`
+  - [ ] Description search (FTS5): `nxv search --desc "json parser"`
   - [ ] License filter: `nxv search python --license MIT`
+  - [ ] Default commit reference for `nxv search` output is `last_commit_hash`
 - [ ] Implement reverse queries:
   - [ ] `nxv history python` - show all versions with first/last seen dates
   - [ ] `nxv history python 3.11.0` - show when 3.11.0 was available
@@ -597,11 +633,13 @@ src/
   - [ ] `output/table.rs` - colored table with comfy-table
   - [ ] `output/json.rs` - JSON array output
   - [ ] `output/plain.rs` - tab-separated, no colors
+- [ ] Include `platforms` in JSON/plain output; add `--show-platforms` to include a table column
+- [ ] Table output includes first/last commit hashes (short) and last_commit_date by default
 - [ ] Implement colored output with owo-colors:
   - [ ] Package name: bold cyan
   - [ ] Version: green
-  - [ ] Commit hash: yellow (short 7-char)
-  - [ ] Date: dim white
+  - [ ] First/last commit hash: yellow (short 7-char)
+  - [ ] Date: dim white (last_commit_date by default)
   - [ ] Description: normal (truncated to terminal width)
 - [ ] Implement table formatting:
   - [ ] Responsive column widths based on terminal size
@@ -610,7 +648,7 @@ src/
   - [ ] ASCII fallback with `--ascii`
   - [ ] Truncate long descriptions with "..."
 - [ ] Implement sorting:
-  - [ ] `--sort date` (default, newest first)
+  - [ ] `--sort date` (default, newest first, based on `last_commit_date`)
   - [ ] `--sort version` (semver-aware where possible)
   - [ ] `--sort name` (alphabetical)
   - [ ] `--reverse` / `-r` flag
@@ -628,13 +666,15 @@ src/
 ### Success Criteria
 
 - [ ] Test: exact search `python` returns only packages named "python"
-- [ ] Test: partial search `pyth` returns python, python2, python3, etc.
+- [ ] Test: prefix search `pyth` returns python, python2, python3, etc.
 - [ ] Test: `--version 3.11` returns only 3.11.x versions
 - [ ] Test: `--desc "json"` finds packages with "json" in description
+- [ ] Test: description search uses FTS5 (no full table scan)
 - [ ] Test: `--license MIT` filters correctly
 - [ ] Test: `nxv history python` shows version timeline
 - [ ] Test: `nxv history python 3.11.0` shows specific version availability
 - [ ] Test: JSON output is valid JSON and parseable
+- [ ] Test: JSON output includes `platforms` when present
 - [ ] Test: plain output has no ANSI escape codes
 - [ ] Test: `--limit 10` returns exactly 10 results
 - [ ] Test: `--sort version` sorts semver correctly (3.9 < 3.10 < 3.11)
@@ -686,7 +726,8 @@ src/
   - [ ] Index exists but bloom filter missing → regenerate or warn
   - [ ] Network timeout → retry with exponential backoff, then fail gracefully
   - [ ] Disk full during download → clean up partial files, clear error
-  - [ ] Invalid manifest version → "Please update nxv to the latest version"
+- [ ] Invalid manifest version → "Please update nxv to the latest version"
+- [ ] Invalid manifest signature → "Index manifest signature verification failed"
   - [ ] Partial delta application failure → rollback transaction
 - [ ] Implement verbosity levels:
   - [ ] Default: errors and results only
@@ -823,6 +864,7 @@ let
       maintainers = if meta ? maintainers
         then map (m: m.github or m.name or "unknown") meta.maintainers
         else null;
+      platforms = if meta ? platforms then map toString meta.platforms else null;
     };
 
   # Recursively collect packages, handling nested sets
@@ -846,16 +888,24 @@ in
 
 ## Appendix: Delta Pack Format
 
-Delta packs are zstd-compressed SQLite dump files containing only new rows:
+Delta packs are zstd-compressed SQLite dump files containing new ranges and range updates:
 
 ```sql
 -- delta-abc123-def456.sql (before compression)
-INSERT OR IGNORE INTO packages (name, version, commit_hash, commit_date, attribute_path, description, license, homepage, maintainers)
+INSERT OR IGNORE INTO package_versions
+  (name, version, first_commit_hash, first_commit_date, last_commit_hash, last_commit_date,
+   attribute_path, description, license, homepage, maintainers, platforms)
 VALUES
-  ('python', '3.12.0', 'def456...', 1705123456, 'python312', 'Python interpreter', '["Python-2.0"]', 'https://python.org', '["fridh"]'),
-  ('nodejs', '21.0.0', 'def456...', 1705123456, 'nodejs_21', 'Node.js runtime', '["MIT"]', 'https://nodejs.org', '["maintainer"]'),
+  ('python', '3.12.0', 'def456...', 1705123456, 'def456...', 1705123456,
+   'python312', 'Python interpreter', '["Python-2.0"]', 'https://python.org', '["fridh"]', '["x86_64-linux"]'),
+  ('nodejs', '21.0.0', 'def456...', 1705123456, 'def456...', 1705123456,
+   'nodejs_21', 'Node.js runtime', '["MIT"]', 'https://nodejs.org', '["maintainer"]', '["x86_64-linux"]'),
   -- ... more rows
 ;
+
+UPDATE package_versions
+SET last_commit_hash = 'def456...', last_commit_date = 1705123456, description = 'Python interpreter'
+WHERE attribute_path = 'python311' AND version = '3.11.9' AND first_commit_hash = 'abc123...';
 
 UPDATE meta SET value = 'def456...' WHERE key = 'last_indexed_commit';
 ```

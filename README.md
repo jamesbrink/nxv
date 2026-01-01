@@ -81,9 +81,10 @@ Run the API server as a systemd service:
             enable = true;
             host = "0.0.0.0";
             port = 8080;
+            dataDir = "/var/lib/nxv";   # database location (index.db)
             cors.enable = true;
             openFirewall = true;
-            autoUpdate.enable = true;  # daily index updates
+            autoUpdate.enable = true;   # daily index updates
           };
         }
       ];
@@ -91,6 +92,18 @@ Run the API server as a systemd service:
   };
 }
 ```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `enable` | `false` | Enable the nxv API service |
+| `host` | `127.0.0.1` | Address to bind to |
+| `port` | `8080` | Port to listen on |
+| `dataDir` | `/var/lib/nxv` | Directory for `index.db` |
+| `cors.enable` | `false` | Enable CORS for all origins |
+| `cors.origins` | `null` | Specific allowed origins |
+| `openFirewall` | `false` | Open firewall port |
+| `autoUpdate.enable` | `false` | Enable automatic index updates |
+| `autoUpdate.interval` | `daily` | Update frequency (systemd calendar syntax) |
 
 The module creates a dedicated user, applies systemd hardening, and optionally manages automatic index updates.
 

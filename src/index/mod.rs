@@ -530,6 +530,9 @@ impl Indexer {
             .first()
             .ok_or_else(|| NxvError::Git(git2::Error::from_str("No commits to process")))?;
 
+        // Save original HEAD ref so we can restore it after indexing
+        let original_ref = repo.head_ref()?;
+
         repo.checkout_commit(&first_commit.hash)?;
         let mut file_attr_map = build_file_attr_map(nixpkgs_path, systems)?;
         let mut mapping_commit = first_commit.hash.clone();
@@ -815,6 +818,14 @@ impl Indexer {
                 "done | {} commits | {} pkgs | {} ranges",
                 result.commits_processed, result.packages_found, result.ranges_created
             ));
+        }
+
+        // Restore original HEAD ref
+        if let Err(e) = repo.restore_ref(&original_ref) {
+            eprintln!(
+                "Warning: Failed to restore original git state ({}): {}",
+                original_ref, e
+            );
         }
 
         Ok(result)

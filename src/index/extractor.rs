@@ -153,14 +153,27 @@ let
     else if builtins.isString x then x
     else builtins.toString x;
 
-  # Get the source file path for an attribute
-  getSourcePath = attrPath:
+  # Get the source file path for a package from meta.position
+  # meta.position format is "/nix/store/.../pkgs/path/file.nix:42" or "/path/to/nixpkgs/pkgs/path/file.nix:42"
+  # We extract the relative path starting from "pkgs/"
+  getSourcePath = meta:
     let
       result = builtins.tryEval (
         let
-          pos = builtins.unsafeGetAttrPos attrPath pkgs;
-          file = if pos == null then null else pos.file or null;
-        in file
+          pos = meta.position or null;
+          # Extract file path (remove line number after colon)
+          file = if pos == null then null
+                 else let parts = builtins.split ":" pos;
+                      in if builtins.length parts > 0 then builtins.elemAt parts 0 else null;
+          # Find "pkgs/" in the path and extract from there
+          extractRelative = path:
+            let
+              # Match "pkgs/" and everything after it
+              matches = builtins.match ".*(pkgs/.*)" path;
+            in if matches != null && builtins.length matches > 0
+               then builtins.elemAt matches 0
+               else null;
+        in if file != null then extractRelative file else null
       );
     in if result.success then result.value else null;
 
@@ -170,7 +183,7 @@ let
       meta = pkg.meta or {};
       name = tryDeep (toString' (pkg.pname or pkg.name or attrPath));
       version = tryDeep (toString' (pkg.version or "unknown"));
-      sourcePath = getSourcePath attrPath;
+      sourcePath = getSourcePath meta;
     in {
       name = if name != null then name else attrPath;
       version = if version != null then version else "unknown";

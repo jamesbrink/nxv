@@ -404,6 +404,49 @@ impl NixpkgsRepo {
         Ok(commit.id().to_string())
     }
 
+    /// Get the current HEAD reference name (branch name or commit hash if detached).
+    ///
+    /// Returns the branch name (e.g., "refs/heads/master") or commit hash if detached.
+    pub fn head_ref(&self) -> Result<String> {
+        let head = self.repo.head()?;
+        if head.is_branch() {
+            // Return the full reference name
+            Ok(head
+                .name()
+                .ok_or_else(|| NxvError::Git(git2::Error::from_str("HEAD has no name")))?
+                .to_string())
+        } else {
+            // Detached HEAD - return commit hash
+            let commit = head.peel_to_commit()?;
+            Ok(commit.id().to_string())
+        }
+    }
+
+    /// Restore the repository to a specific ref (branch or commit).
+    ///
+    /// If ref_name is a branch reference (starts with "refs/"), checkout that branch.
+    /// Otherwise, treat it as a commit hash and checkout detached.
+    pub fn restore_ref(&self, ref_name: &str) -> Result<()> {
+        if ref_name.starts_with("refs/") {
+            // It's a branch reference - checkout the branch
+            let reference = self.repo.find_reference(ref_name)?;
+            let commit = reference.peel_to_commit()?;
+            let tree = commit.tree()?;
+
+            let mut checkout_opts = git2::build::CheckoutBuilder::new();
+            checkout_opts.force();
+
+            self.repo
+                .checkout_tree(tree.as_object(), Some(&mut checkout_opts))?;
+            self.repo.set_head(ref_name)?;
+        } else {
+            // It's a commit hash - checkout detached
+            self.checkout_commit(ref_name)?;
+        }
+
+        Ok(())
+    }
+
     /// Count the total number of commits (for progress reporting).
     #[allow(dead_code)]
     pub fn count_commits(&self) -> Result<usize> {

@@ -194,7 +194,41 @@ pub struct InfoArgs {
 }
 
 impl InfoArgs {
-    /// Get the version from either positional or flag argument.
+    /// Selects the version string provided by the positional argument or the version flag.
+    ///
+    /// Prefers the positional `version` field and falls back to `version_flag` if the positional is `None`.
+    ///
+    /// # Returns
+    ///
+    /// `Some(&str)` with the chosen version, or `None` if neither field is set.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let args = InfoArgs {
+    ///     package: "pkg".to_string(),
+    ///     version: Some("1.2.3".to_string()),
+    ///     version_flag: None,
+    ///     format: OutputFormatArg::Table,
+    /// };
+    /// assert_eq!(args.get_version(), Some("1.2.3"));
+    ///
+    /// let args2 = InfoArgs {
+    ///     package: "pkg".to_string(),
+    ///     version: None,
+    ///     version_flag: Some("2.0.0".to_string()),
+    ///     format: OutputFormatArg::Table,
+    /// };
+    /// assert_eq!(args2.get_version(), Some("2.0.0"));
+    ///
+    /// let args3 = InfoArgs {
+    ///     package: "pkg".to_string(),
+    ///     version: None,
+    ///     version_flag: None,
+    ///     format: OutputFormatArg::Table,
+    /// };
+    /// assert_eq!(args3.get_version(), None);
+    /// ```
     pub fn get_version(&self) -> Option<&str> {
         self.version.as_deref().or(self.version_flag.as_deref())
     }
@@ -309,6 +343,22 @@ pub enum OutputFormatArg {
 }
 
 impl From<OutputFormatArg> for OutputFormat {
+    /// Convert a CLI-level `OutputFormatArg` into the corresponding internal `OutputFormat`.
+    ///
+    /// # Returns
+    ///
+    /// The matching `OutputFormat` variant for the provided `OutputFormatArg`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use crate::cli::OutputFormatArg;
+    /// use crate::output::OutputFormat;
+    ///
+    /// let arg = OutputFormatArg::Json;
+    /// let fmt: OutputFormat = arg.into();
+    /// assert_eq!(fmt, OutputFormat::Json);
+    /// ```
     fn from(arg: OutputFormatArg) -> Self {
         match arg {
             OutputFormatArg::Table => OutputFormat::Table,

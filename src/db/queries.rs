@@ -25,7 +25,20 @@ pub struct PackageVersion {
 }
 
 impl PackageVersion {
-    /// Parse a row from the database.
+    /// Constructs a PackageVersion from a database row.
+    ///
+    /// The row must contain the columns:
+    /// `id`, `name`, `version`, `first_commit_hash`, `first_commit_date` (i64 seconds since epoch),
+    /// `last_commit_hash`, `last_commit_date` (i64 seconds since epoch), `attribute_path`,
+    /// `description`, `license`, `homepage`, `maintainers`, `platforms`, and optionally `source_path`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // `row` is a rusqlite::Row obtained from a query that selects the required columns.
+    /// let pv = PackageVersion::from_row(&row).unwrap();
+    /// assert_eq!(pv.name, row.get::<_, String>("name").unwrap());
+    /// ```
     pub fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
         let first_commit_ts: i64 = row.get("first_commit_date")?;
         let last_commit_ts: i64 = row.get("last_commit_date")?;
@@ -112,7 +125,26 @@ pub fn search_by_attr(conn: &rusqlite::Connection, attr_path: &str) -> Result<Ve
     Ok(results)
 }
 
-/// Search for packages by name and version.
+/// Finds package versions whose attribute path and version start with the given prefixes.
+///
+/// The `package` argument is matched as a prefix against the `attribute_path` column
+/// (i.e., `attribute_path LIKE 'package%'`) and the `version` argument is matched as a
+/// prefix against the `version` column. Results are ordered by `first_commit_date` descending.
+///
+/// # Returns
+///
+/// A vector of `PackageVersion` entries that match the provided package and version prefixes.
+///
+/// # Examples
+///
+/// ```
+/// // Assuming `conn` is a valid rusqlite::Connection populated with package_versions...
+/// let matches = search_by_name_version(&conn, "python", "3.11").unwrap();
+/// for pv in matches {
+///     assert!(pv.attribute_path.starts_with("python"));
+///     assert!(pv.version.starts_with("3.11"));
+/// }
+/// ```
 pub fn search_by_name_version(
     conn: &rusqlite::Connection,
     package: &str,
@@ -136,7 +168,23 @@ pub fn search_by_name_version(
     Ok(results)
 }
 
-/// Get the first occurrence of a package version.
+/// Locate the earliest recorded entry for a package version.
+///
+/// `package` is the package's attribute path to match; `version` is the version string to match exactly.
+///
+/// # Returns
+///
+/// `Some(PackageVersion)` containing the earliest (by first_commit_date) matching record, `None` if no match.
+///
+/// # Examples
+///
+/// ```
+/// // Given a connection `conn` and a package attribute path and version:
+/// let first = get_first_occurrence(&conn, "python", "3.11.0")?;
+/// if let Some(pkg) = first {
+///     println!("{}", pkg.version);
+/// }
+/// ```
 pub fn get_first_occurrence(
     conn: &rusqlite::Connection,
     package: &str,
@@ -154,7 +202,28 @@ pub fn get_first_occurrence(
     }
 }
 
-/// Get the last occurrence of a package version.
+/// Retrieve the most recent package version entry that matches the given attribute path and version.
+///
+/// # Parameters
+///
+/// - `package`: Package attribute path to match (the `attribute_path` column).
+/// - `version`: Version string to match (the `version` column).
+///
+/// # Returns
+///
+/// `Some(PackageVersion)` containing the entry with the latest `last_commit_date` if a matching row exists, `None` if no match is found.
+///
+/// # Examples
+///
+/// ```
+/// // Assume `conn` is a valid rusqlite::Connection with the `package_versions` table populated.
+/// let conn = rusqlite::Connection::open_in_memory().unwrap();
+/// let result = get_last_occurrence(&conn, "python", "3.11.0").unwrap();
+/// match result {
+///     Some(pkg) => println!("Found package: {} {}", pkg.name, pkg.version),
+///     None => println!("No matching package found"),
+/// }
+/// ```
 pub fn get_last_occurrence(
     conn: &rusqlite::Connection,
     package: &str,
@@ -175,7 +244,30 @@ pub fn get_last_occurrence(
 /// Version history entry: (version, first_seen, last_seen).
 pub type VersionHistoryEntry = (String, DateTime<Utc>, DateTime<Utc>);
 
-/// Get version history for a package.
+/// Retrieves the version history for a package attribute path.
+///
+/// Returns each distinct version for the given `package` (matched against `attribute_path`)
+/// along with the earliest `first_commit_date` and the latest `last_commit_date` for that version.
+/// Results are ordered by `first_seen` (earliest first_commit_date) descending.
+///
+/// # Arguments
+///
+/// * `package` - The package attribute path to filter versions by.
+///
+/// # Returns
+///
+/// A `Vec<VersionHistoryEntry>` where each entry is `(version, first_seen, last_seen)`,
+/// and `first_seen` / `last_seen` are `DateTime<Utc>` values.
+///
+/// # Examples
+///
+/// ```
+/// // assumes `conn` is an open rusqlite::Connection
+/// let history = get_version_history(&conn, "python").unwrap();
+/// for (version, first_seen, last_seen) in history {
+///     println!("{}: {} - {}", version, first_seen, last_seen);
+/// }
+/// ```
 pub fn get_version_history(
     conn: &rusqlite::Connection,
     package: &str,
@@ -251,7 +343,24 @@ pub fn get_stats(conn: &rusqlite::Connection) -> Result<IndexStats> {
     })
 }
 
-/// Search using FTS5 for description text.
+/// Search package versions by description text using SQLite FTS5.
+///
+/// Performs a full-text search of package descriptions and returns matching
+/// package version records ordered by `last_commit_date` descending.
+/// The `query` parameter is interpreted using FTS5 `MATCH` syntax.
+///
+/// # Returns
+///
+/// A `Vec<PackageVersion>` containing matching entries ordered by last commit date.
+///
+/// # Examples
+///
+/// ```
+/// // `conn` is a valid rusqlite::Connection
+/// let matches = search_by_description(&conn, "python");
+/// assert!(matches.is_ok());
+/// let results = matches.unwrap();
+/// ```
 pub fn search_by_description(
     conn: &rusqlite::Connection,
     query: &str,
@@ -274,9 +383,23 @@ pub fn search_by_description(
     Ok(results)
 }
 
-/// Get all unique package attribute paths in the database.
+/// Return all distinct package attribute paths from the database, ordered by attribute_path.
 ///
-/// This is used to build the bloom filter for fast "not found" lookups.
+/// The results are suitable for building membership structures (e.g., a bloom filter) used to
+/// quickly determine absent entries.
+///
+/// # Examples
+///
+/// ```
+/// use rusqlite::Connection;
+/// // create an in-memory DB and a minimal table for demonstration
+/// let conn = Connection::open_in_memory().unwrap();
+/// conn.execute_batch("CREATE TABLE package_versions (attribute_path TEXT);
+///                    INSERT INTO package_versions (attribute_path) VALUES ('pkg::a'), ('pkg::b'), ('pkg::a');").unwrap();
+///
+/// let attrs = crate::db::queries::get_all_unique_attrs(&conn).unwrap();
+/// assert_eq!(attrs, vec!["pkg::a".to_string(), "pkg::b".to_string()]);
+/// ```
 #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
 pub fn get_all_unique_attrs(conn: &rusqlite::Connection) -> Result<Vec<String>> {
     let mut stmt = conn
@@ -296,6 +419,17 @@ mod tests {
     use crate::db::Database;
     use tempfile::tempdir;
 
+    /// Creates a temporary SQLite database pre-populated with sample package_versions rows for use in tests.
+    ///
+    /// The returned TempDir owns the temporary file location and should be kept alive while the Database is used.
+    /// The database is populated with four sample entries (two python versions, one python2, one nodejs).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let (_tmp_dir, db) = create_test_db();
+    /// // use `db` to run queries against the sample data
+    /// ```
     fn create_test_db() -> (tempfile::TempDir, Database) {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("test.db");

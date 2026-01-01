@@ -44,7 +44,19 @@ pub struct ApiClient {
 }
 
 impl ApiClient {
-    /// Create a new API client.
+    /// Creates a new ApiClient with a normalized base URL and a configured HTTP client.
+    ///
+    /// The `base_url` is normalized by removing a trailing slash if present. The internal
+    /// blocking HTTP client is built with a 30 second timeout.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let client = crate::client::ApiClient::new("https://example.com").unwrap();
+    /// assert_eq!(client.base_url, "https://example.com");
+    /// ```
+    ///
+    /// Returns `Ok(ApiClient)` on success, or `Err(NxvError::Network)` if building the HTTP client fails.
     pub fn new(base_url: impl Into<String>) -> Result<Self> {
         let base_url = base_url.into().trim_end_matches('/').to_string();
         let client = Client::builder()
@@ -55,7 +67,24 @@ impl ApiClient {
         Ok(Self { base_url, client })
     }
 
-    /// Search packages using the shared search options.
+    /// Search for packages using the provided `SearchOptions`.
+    ///
+    /// The returned `SearchResult` contains matching `PackageVersion` entries and pagination
+    /// metadata derived from the API response.
+    ///
+    /// # Returns
+    ///
+    /// `SearchResult` with matching package versions in `data`, the total number of matches in
+    /// `total`, and whether more results are available in `has_more`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let client = ApiClient::new("https://nxv.example.com").unwrap();
+    /// let opts = SearchOptions { query: "serde".into(), ..Default::default() };
+    /// let result = client.search(&opts).unwrap();
+    /// assert!(result.data.iter().any(|p| p.name.contains("serde")));
+    /// ```
     pub fn search(&self, opts: &SearchOptions) -> Result<SearchResult> {
         let mut url = format!(
             "{}/api/v1/search?q={}",
@@ -104,7 +133,28 @@ impl ApiClient {
         })
     }
 
-    /// Get package by attribute path (exact match).
+    /// Retrieve packages that exactly match an attribute path.
+    ///
+    /// If the server returns 404 (package not found), this returns an empty vector.
+    /// On other failures (network, service unavailable, unexpected HTTP status, or JSON deserialization),
+    /// the error is propagated as an `NxvError`.
+    ///
+    /// # Parameters
+    ///
+    /// - `attr`: The exact attribute path of the package to fetch (e.g., "category/name").
+    ///
+    /// # Returns
+    ///
+    /// A `Vec<PackageVersion>` containing matching package versions; an empty vector if no package is found.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let client = ApiClient::new("https://nxv.example.com").unwrap();
+    /// let versions = client.get_package("some/package").unwrap();
+    /// // `versions` will be empty if the package does not exist
+    /// assert!(versions.is_empty() || !versions.is_empty());
+    /// ```
     pub fn get_package(&self, attr: &str) -> Result<Vec<PackageVersion>> {
         let url = format!(
             "{}/api/v1/packages/{}",
@@ -119,7 +169,18 @@ impl ApiClient {
         }
     }
 
-    /// Search by name with optional version filter (for info command).
+    /// Search packages by name and optionally filter results to a specific version.
+    ///
+    /// The `package` argument is matched against package names; when `version` is
+    /// provided only entries for that exact version are returned.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let client = ApiClient::new("https://nxv.example.com").unwrap();
+    /// let results = client.search_by_name_version("serde", Some("1.0.0")).unwrap();
+    /// assert!(results.iter().all(|p| p.name.contains("serde")));
+    /// ```
     pub fn search_by_name_version(
         &self,
         package: &str,
@@ -142,7 +203,24 @@ impl ApiClient {
         Ok(response.data)
     }
 
-    /// Get first occurrence of a specific version.
+    /// Retrieves the first observed package version for the given package attribute and version.
+    ///
+    /// # Parameters
+    /// - `attr`: package attribute path (for example `"namespace/name"`).
+    /// - `version`: version string to query (for example `"1.2.3"`).
+    ///
+    /// # Returns
+    /// `Some(PackageVersion)` if a first occurrence exists for the specified package and version, `None` if the package/version is not found.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let client = ApiClient::new("https://nxv.example.com").unwrap();
+    /// let first = client.get_first_occurrence("pkg/name", "1.2.3").unwrap();
+    /// if let Some(pv) = first {
+    ///     assert_eq!(pv.version, "1.2.3");
+    /// }
+    /// ```
     pub fn get_first_occurrence(
         &self,
         attr: &str,
@@ -162,7 +240,19 @@ impl ApiClient {
         }
     }
 
-    /// Get last occurrence of a specific version.
+    /// Fetches the last observed occurrence of a package version from the remote API.
+    ///
+    /// Returns `Ok(Some(PackageVersion))` when the version was found, `Ok(None)` when the package or version is not present (404), and `Err(NxvError)` for other errors.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// let client = ApiClient::new("https://example.com").unwrap();
+    /// let last = client.get_last_occurrence("pkg/name", "1.2.3").unwrap();
+    /// if let Some(ver) = last {
+    ///     println!("Last seen at: {}", ver.first_seen);
+    /// }
+    /// ```
     pub fn get_last_occurrence(&self, attr: &str, version: &str) -> Result<Option<PackageVersion>> {
         let url = format!(
             "{}/api/v1/packages/{}/versions/{}/last",
@@ -178,7 +268,23 @@ impl ApiClient {
         }
     }
 
-    /// Get version history for a package.
+    /// Retrieves the version history for a package attribute.
+    ///
+    /// If the package does not exist, returns an empty vector.
+    ///
+    /// # Returns
+    ///
+    /// A vector of `VersionHistoryEntry` tuples in the form `(version, first_seen, last_seen)`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let client = ApiClient::new("https://nxv.example.com").unwrap();
+    /// let history = client.get_version_history("org/package").unwrap();
+    /// for (version, first_seen, last_seen) in history {
+    ///     println!("{}: {} - {}", version, first_seen, last_seen);
+    /// }
+    /// ```
     pub fn get_version_history(&self, attr: &str) -> Result<Vec<VersionHistoryEntry>> {
         let url = format!(
             "{}/api/v1/packages/{}/history",
@@ -197,20 +303,64 @@ impl ApiClient {
         }
     }
 
-    /// Get index statistics.
+    /// Fetches index statistics from the remote API.
+    ///
+    /// # Returns
+    ///
+    /// `IndexStats` containing the current index metrics returned by the server.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let client = ApiClient::new("https://nxv.example.com").unwrap();
+    /// let stats = client.get_stats().unwrap();
+    /// // inspect some field on IndexStats, e.g. stats.total_packages (field names may vary)
+    /// println!("{:?}", stats);
+    /// ```
     pub fn get_stats(&self) -> Result<IndexStats> {
         let url = format!("{}/api/v1/stats", self.base_url);
         let response: ApiResponse<IndexStats> = self.get(&url)?;
         Ok(response.data)
     }
 
-    /// Get health info including index commit.
+    /// Fetches the server health information, including the index commit when present.
+    ///
+    /// # Returns
+    /// `HealthInfo` containing `status`, `version`, and an optional `index_commit`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// let client = ApiClient::new("http://example.com").unwrap();
+    /// let info = client.get_health().unwrap();
+    /// println!("{}", info.status);
+    /// ```
     pub fn get_health(&self) -> Result<HealthInfo> {
         let url = format!("{}/api/v1/health", self.base_url);
         self.get(&url)
     }
 
-    /// Search packages by name (prefix search, for info command fallback).
+    /// Search packages by name with optional exact matching.
+    ///
+    /// When `exact` is `false`, performs a prefix search; when `exact` is `true`, requires an exact name match.
+    /// The request forces a limit of 1000 results.
+    ///
+    /// # Parameters
+    ///
+    /// - `name`: Package name or prefix to search for.
+    /// - `exact`: If `true`, only packages whose name exactly matches `name` are returned.
+    ///
+    /// # Returns
+    ///
+    /// `Vec<PackageVersion>` containing the matching package versions.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let client = ApiClient::new("https://api.example.com").unwrap();
+    /// let results = client.search_by_name("serde", false).unwrap();
+    /// assert!(results.len() <= 1000);
+    /// ```
     pub fn search_by_name(&self, name: &str, exact: bool) -> Result<Vec<PackageVersion>> {
         let mut url = format!(
             "{}/api/v1/search?q={}",
@@ -227,7 +377,20 @@ impl ApiClient {
         Ok(response.data)
     }
 
-    /// Perform a GET request and parse JSON response.
+    /// Send an HTTP GET request to `url` and deserialize the JSON response into `T`.
+    ///
+    /// If the response has a non-success HTTP status, an appropriate `NxvError` is returned.
+    /// Network or JSON deserialization failures are returned as `NxvError::Network`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use serde_json::Value;
+    ///
+    /// // `client` is an instance of `ApiClient`
+    /// // let client = ApiClient::new("https://api.example.com").unwrap();
+    /// // let value: Value = client.get("https://api.example.com/api/v1/health").unwrap();
+    /// ```
     fn get<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T> {
         let response = self.client.get(url).send().map_err(NxvError::Network)?;
 
@@ -239,7 +402,22 @@ impl ApiClient {
         response.json().map_err(NxvError::Network)
     }
 
-    /// Map HTTP status codes to NxvError.
+    /// Convert an HTTP status code into the corresponding `NxvError` variant.
+    ///
+    /// Maps `404 Not Found` to `NxvError::PackageNotFound`, `503 Service Unavailable`
+    /// to `NxvError::NoIndex`, and all other status codes to `NxvError::ApiError` with
+    /// the status string included.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// let client = ApiClient::new("http://example.com").unwrap();
+    /// let err = client.map_status_error(reqwest::StatusCode::NOT_FOUND, "/pkg");
+    /// match err {
+    ///     NxvError::PackageNotFound(_) => {},
+    ///     _ => panic!("unexpected error variant"),
+    /// }
+    /// ```
     fn map_status_error(&self, status: StatusCode, _url: &str) -> NxvError {
         match status {
             StatusCode::NOT_FOUND => NxvError::PackageNotFound("Resource not found".to_string()),
@@ -261,6 +439,18 @@ pub struct HealthInfo {
 
 // URL encoding helper
 mod urlencoding {
+    /// Percent-encodes a string for use in URLs.
+    ///
+    /// Leaves unreserved characters (ASCII letters, digits, '-', '_', '.', '~') unchanged and
+    /// percent-encodes every other character by UTF-8 byte, using uppercase hex digits.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// assert_eq!(urlencoding::encode("a b"), "a%20b");
+    /// assert_eq!(urlencoding::encode("é"), "%C3%A9");
+    /// assert_eq!(urlencoding::encode("~safe~"), "~safe~");
+    /// ```
     pub fn encode(s: &str) -> String {
         let mut result = String::with_capacity(s.len() * 3);
         for c in s.chars() {

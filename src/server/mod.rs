@@ -52,15 +52,34 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Create a new AppState.
+    /// Construct application state holding the database file path.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::path::PathBuf;
+    /// let state = AppState::new(PathBuf::from("index.sqlite"));
+    /// assert_eq!(state.db_path, PathBuf::from("index.sqlite"));
+    /// ```
     pub fn new(db_path: PathBuf) -> Self {
         Self { db_path }
     }
 
-    /// Get a read-only database connection.
+    /// Returns a read-only database connection opened from this state's path.
     ///
-    /// Since rusqlite connections are not Send, we create a new connection
-    /// for each request. This is efficient for read-only operations.
+    /// This creates a new connection each time it is called; callers should obtain
+    /// a connection per request for read-only operations.
+    ///
+    /// # Returns
+    ///
+    /// A `Database` opened in read-only mode on success.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let state = crate::server::AppState::new(std::path::PathBuf::from("test.db"));
+    /// let db = state.get_db().expect("open readonly database");
+    /// ```
     pub fn get_db(&self) -> Result<Database> {
         Database::open_readonly(&self.db_path)
     }
@@ -80,7 +99,35 @@ pub struct ServerConfig {
     pub cors_origins: Option<Vec<String>>,
 }
 
-/// Build the API router.
+/// Constructs the HTTP router with API endpoints, frontend routes, OpenAPI documentation, tracing,
+/// and the provided shared state.
+///
+/// The returned router includes:
+/// - API routes mounted under `/api/v1` (search, package lookups, version history, stats, health),
+/// - Frontend at `/` and favicon endpoints,
+/// - OpenAPI UI at `/docs` and raw spec at `/openapi.json`,
+/// - Request tracing middleware, and
+/// - The provided application state.
+///
+/// # Parameters
+///
+/// - `state`: shared application state to attach to the router.
+/// - `cors`: optional CORS layer to apply to the router; if `None`, no CORS layer is applied.
+///
+/// # Returns
+///
+/// An `axum::Router` configured with routes, middleware, OpenAPI endpoints, and the supplied state.
+///
+/// # Examples
+///
+/// ```
+/// use std::sync::Arc;
+/// use std::path::PathBuf;
+/// // Construct minimal AppState for example purposes.
+/// let state = Arc::new(crate::server::AppState::new(PathBuf::from("/tmp/db.sqlite")));
+/// let router = crate::server::build_router(state, None);
+/// // router can now be served with Axum.
+/// ```
 fn build_router(state: Arc<AppState>, cors: Option<CorsLayer>) -> Router {
     let api_routes = Router::new()
         .route("/search", get(handlers::search_packages))
@@ -135,7 +182,36 @@ fn build_router(state: Arc<AppState>, cors: Option<CorsLayer>) -> Router {
     app
 }
 
-/// Start the API server.
+/// Start and run the HTTP API server using the provided server configuration.
+///
+/// Validates that the configured database path exists, configures optional CORS according
+/// to the configuration, binds to the configured host and port, serves the application
+/// router, and performs a graceful shutdown when an interrupt (Ctrl+C) is received.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::path::PathBuf;
+/// use tokio;
+///
+/// #[tokio::main]
+/// async fn main() {
+///     let config = ServerConfig {
+///         host: "127.0.0.1".into(),
+///         port: 8080,
+///         db_path: PathBuf::from("/path/to/index.db"),
+///         cors: false,
+///         cors_origins: None,
+///     };
+///     // Run the server (will block until shutdown)
+///     let _ = run_server(config).await;
+/// }
+/// ```
+///
+/// # Returns
+///
+/// `Ok(())` on clean shutdown; an `NxvError` if the database path is missing, socket
+/// binding fails, or the server runtime encounters an I/O error.
 pub async fn run_server(config: ServerConfig) -> Result<()> {
     // Verify database exists before starting
     if !config.db_path.exists() {
@@ -195,7 +271,18 @@ pub async fn run_server(config: ServerConfig) -> Result<()> {
     Ok(())
 }
 
-/// Wait for shutdown signal (Ctrl+C).
+/// Await a CTRL+C (SIGINT) to trigger graceful shutdown.
+///
+/// Completes when the process receives a CTRL+C; panics if the signal handler cannot be installed.
+///
+/// # Examples
+///
+/// ```
+/// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+/// shutdown_signal().await;
+/// // proceed with shutdown
+/// # });
+/// ```
 async fn shutdown_signal() {
     tokio::signal::ctrl_c()
         .await

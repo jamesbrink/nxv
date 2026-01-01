@@ -216,11 +216,22 @@ pub fn generate_manifest<P: AsRef<Path>>(
     Ok(())
 }
 
-/// Generate a bloom filter for the index.
+/// Generate a bloom filter file containing all unique attribute paths from the database.
 ///
-/// Creates:
-/// - `nxv-bloom.bin` - Bloom filter file
-/// - Returns the IndexFile with SHA256 hash
+/// The function writes `nxv-bloom.bin` into `output_dir`, populated with every unique
+/// attribute path extracted from `db_path`. It returns an `IndexFile` describing the
+/// bloom file (URL, size in bytes, and SHA-256 hash).
+///
+/// # Examples
+///
+/// ```no_run
+/// use tempfile::tempdir;
+///
+/// let db_path = "path/to/index.db";
+/// let out = tempdir().unwrap();
+/// let index_file = generate_bloom_filter(db_path, out.path()).unwrap();
+/// assert_eq!(index_file.url, "nxv-bloom.bin");
+/// ```
 pub fn generate_bloom_filter<P: AsRef<Path>, Q: AsRef<Path>>(
     db_path: P,
     output_dir: Q,

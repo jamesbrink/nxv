@@ -17,12 +17,40 @@ pub struct ApiResponse<T: Serialize> {
 }
 
 impl<T: Serialize> ApiResponse<T> {
-    /// Create a response without pagination.
+    /// Creates an ApiResponse containing the provided data and no pagination metadata.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let resp = ApiResponse::new("payload");
+    /// assert_eq!(resp.data, "payload");
+    /// assert!(resp.meta.is_none());
+    /// ```
     pub fn new(data: T) -> Self {
         Self { data, meta: None }
     }
 
-    /// Create a response with pagination metadata.
+    /// Wraps `data` in an `ApiResponse` and attaches pagination metadata.
+    ///
+    /// The attached `PaginationMeta` records `total`, `limit`, `offset`, and computes
+    /// `has_more` as `limit > 0 && total > offset + limit`.
+    ///
+    /// # Returns
+    ///
+    /// An `ApiResponse` containing the provided `data` and a `meta` value with the
+    /// specified pagination fields.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let resp = ApiResponse::with_pagination(vec![1, 2, 3], 100, 10, 0);
+    /// assert_eq!(resp.data.len(), 3);
+    /// let meta = resp.meta.unwrap();
+    /// assert_eq!(meta.total, 100);
+    /// assert_eq!(meta.limit, 10);
+    /// assert_eq!(meta.offset, 0);
+    /// assert!(meta.has_more);
+    /// ```
     pub fn with_pagination(data: T, total: usize, limit: usize, offset: usize) -> Self {
         Self {
             data,
@@ -77,6 +105,13 @@ pub struct SearchParams {
     pub offset: usize,
 }
 
+/// Default number of results per page.
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!(crate::default_limit(), 50);
+/// ```
 fn default_limit() -> usize {
     50
 }
@@ -141,6 +176,19 @@ pub struct PackageVersionSchema {
 }
 
 impl From<PackageVersion> for PackageVersionSchema {
+    /// Convert a `PackageVersion` into a `PackageVersionSchema` for API responses.
+    ///
+    /// The resulting schema preserves all public metadata fields (ids, version and
+    /// commit timestamps, paths, description, license, homepage, maintainers,
+    /// platforms, and optional `source_path`).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // given a PackageVersion value `pv`:
+    /// // let pv: PackageVersion = ...;
+    /// let schema = PackageVersionSchema::from(pv);
+    /// ```
     fn from(p: PackageVersion) -> Self {
         Self {
             id: p.id,
@@ -173,6 +221,25 @@ pub struct IndexStatsSchema {
 }
 
 impl From<IndexStats> for IndexStatsSchema {
+    /// Converts an `IndexStats` into an `IndexStatsSchema` by copying all fields.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use chrono::Utc;
+    /// // construct a minimal IndexStats (types shown for clarity)
+    /// let stats = IndexStats {
+    ///     total_ranges: 10,
+    ///     unique_names: 5,
+    ///     unique_versions: 8,
+    ///     oldest_commit_date: None,
+    ///     newest_commit_date: None,
+    /// };
+    /// let schema: IndexStatsSchema = stats.into();
+    /// assert_eq!(schema.total_ranges, 10);
+    /// assert_eq!(schema.unique_names, 5);
+    /// assert_eq!(schema.unique_versions, 8);
+    /// ```
     fn from(s: IndexStats) -> Self {
         Self {
             total_ranges: s.total_ranges,

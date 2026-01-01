@@ -57,7 +57,25 @@ impl Database {
         Ok(Self { conn })
     }
 
-    /// Initialize the database schema.
+    /// Initializes the database schema and related search index.
+    ///
+    /// Creates the `meta` and `package_versions` tables (including the `source_path` column),
+    /// common indexes, and a persistent FTS5 virtual table `package_versions_fts` with triggers
+    /// to keep it synchronized with `package_versions`. If the `schema_version` metadata entry
+    /// is missing, sets it to the current SCHEMA_VERSION.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the schema is present or was created successfully, `Err(_)` if a database
+    /// operation fails.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use crate::db::Database;
+    /// let db = Database::open(":memory:").unwrap();
+    /// db.init_schema().unwrap();
+    /// ```
     #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
     fn init_schema(&self) -> Result<()> {
         self.conn.execute_batch(
@@ -139,7 +157,20 @@ impl Database {
         Ok(())
     }
 
-    /// Migrate the database schema if needed.
+    /// Apply any pending schema migrations to the database.
+    ///
+    /// This updates the on-disk schema to the module's current `SCHEMA_VERSION`.
+    /// Specifically, when upgrading from versions earlier than 2 it adds the
+    /// `source_path` TEXT column to the `package_versions` table if that column is
+    /// not already present, and then writes the new `schema_version` into the
+    /// `meta` table.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let db = Database::open(std::path::Path::new(":memory:")).unwrap();
+    /// db.migrate_if_needed().unwrap();
+    /// ```
     #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
     fn migrate_if_needed(&self) -> Result<()> {
         let version_str = self.get_meta("schema_version")?;
@@ -201,10 +232,25 @@ impl Database {
         &self.conn
     }
 
-    /// Batch insert package version ranges.
+    /// Inserts multiple package version records in a single transaction.
     ///
-    /// Uses a transaction for performance and atomicity.
-    /// Duplicate entries (same attr_path+version+first_commit_hash) are ignored.
+    /// Uses a transaction for performance and atomicity. Duplicate entries (same
+    /// `attribute_path`, `version`, and `first_commit_hash`) are ignored.
+    ///
+    /// # Returns
+    ///
+    /// The number of rows that were actually inserted.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use crate::db::Database;
+    /// # use crate::db::queries::PackageVersion;
+    /// # fn example(mut db: Database, packages: Vec<PackageVersion>) {
+    /// let inserted = db.insert_package_ranges_batch(&packages).unwrap();
+    /// assert!(inserted <= packages.len());
+    /// # }
+    /// ```
     #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
     pub fn insert_package_ranges_batch(&mut self, packages: &[PackageVersion]) -> Result<usize> {
         let tx = self.conn.transaction()?;

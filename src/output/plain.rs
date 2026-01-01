@@ -62,6 +62,7 @@ mod tests {
             homepage: None,
             maintainers: None,
             platforms: None,
+            source_path: None,
         }];
 
         // Should not panic

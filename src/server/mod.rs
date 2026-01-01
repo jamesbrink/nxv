@@ -25,11 +25,22 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::{Router, routing::get};
+use axum::{
+    Router,
+    http::header,
+    response::{Html, IntoResponse},
+    routing::get,
+};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use utoipa::OpenApi;
 use utoipa_scalar::{Scalar, Servable};
+
+/// Embedded frontend HTML.
+const FRONTEND_HTML: &str = include_str!("../../frontend/index.html");
+
+/// Embedded favicon SVG.
+const FAVICON_SVG: &str = include_str!("../../frontend/favicon.svg");
 
 use crate::db::Database;
 use crate::error::{NxvError, Result};
@@ -95,6 +106,19 @@ fn build_router(state: Arc<AppState>, cors: Option<CorsLayer>) -> Router {
         .route("/health", get(handlers::health_check));
 
     let mut app = Router::new()
+        .route("/", get(|| async { Html(FRONTEND_HTML) }))
+        .route(
+            "/favicon.svg",
+            get(|| async {
+                ([(header::CONTENT_TYPE, "image/svg+xml")], FAVICON_SVG).into_response()
+            }),
+        )
+        .route(
+            "/favicon.ico",
+            get(|| async {
+                ([(header::CONTENT_TYPE, "image/svg+xml")], FAVICON_SVG).into_response()
+            }),
+        )
         .nest("/api/v1", api_routes)
         .merge(Scalar::with_url("/docs", openapi::ApiDoc::openapi()))
         .route(
@@ -155,6 +179,7 @@ pub async fn run_server(config: ServerConfig) -> Result<()> {
         .map_err(NxvError::Io)?;
 
     eprintln!("Starting nxv API server on http://{}", addr);
+    eprintln!("Web UI: http://{}/", addr);
     eprintln!("API documentation: http://{}/docs", addr);
     eprintln!("OpenAPI spec: http://{}/openapi.json", addr);
     eprintln!();

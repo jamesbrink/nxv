@@ -18,6 +18,9 @@ pub struct PackageInfo {
     pub homepage: Option<String>,
     pub maintainers: Option<Vec<String>>,
     pub platforms: Option<Vec<String>>,
+    /// Source file path relative to nixpkgs root (e.g., "pkgs/development/interpreters/python/default.nix")
+    #[serde(rename = "sourcePath")]
+    pub source_path: Option<String>,
 }
 
 /// Attribute position information for mapping attribute names to files.
@@ -150,12 +153,24 @@ let
     else if builtins.isString x then x
     else builtins.toString x;
 
+  # Get the source file path for an attribute
+  getSourcePath = attrPath:
+    let
+      result = builtins.tryEval (
+        let
+          pos = builtins.unsafeGetAttrPos attrPath pkgs;
+          file = if pos == null then null else pos.file or null;
+        in file
+      );
+    in if result.success then result.value else null;
+
   # Safely extract package info - each field is independently evaluated
   getPackageInfo = attrPath: pkg:
     let
       meta = pkg.meta or {};
       name = tryDeep (toString' (pkg.pname or pkg.name or attrPath));
       version = tryDeep (toString' (pkg.version or "unknown"));
+      sourcePath = getSourcePath attrPath;
     in {
       name = if name != null then name else attrPath;
       version = if version != null then version else "unknown";
@@ -165,6 +180,7 @@ let
       license = if meta ? license then getLicenses meta.license else null;
       maintainers = if meta ? maintainers then getMaintainers meta.maintainers else null;
       platforms = if meta ? platforms then getPlatforms meta.platforms else null;
+      sourcePath = safeString sourcePath;
     };
 
   # Process each package name with full error isolation
@@ -454,6 +470,7 @@ mod tests {
             homepage: Some("https://example.com".to_string()),
             maintainers: Some(vec!["user1".to_string(), "user2".to_string()]),
             platforms: Some(vec!["x86_64-linux".to_string()]),
+            source_path: Some("pkgs/test/default.nix".to_string()),
         };
 
         let license_json = pkg.license_json().unwrap();

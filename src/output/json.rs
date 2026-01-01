@@ -35,6 +35,7 @@ mod tests {
             homepage: None,
             maintainers: None,
             platforms: Some("[\"x86_64-linux\"]".to_string()),
+            source_path: None,
         }];
 
         // Should not panic

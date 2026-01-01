@@ -135,6 +135,9 @@ pub struct PackageVersionSchema {
     pub homepage: Option<String>,
     pub maintainers: Option<String>,
     pub platforms: Option<String>,
+    /// Source file path relative to nixpkgs root (may be null for older packages).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
 }
 
 impl From<PackageVersion> for PackageVersionSchema {
@@ -153,6 +156,7 @@ impl From<PackageVersion> for PackageVersionSchema {
             homepage: p.homepage,
             maintainers: p.maintainers,
             platforms: p.platforms,
+            source_path: p.source_path,
         }
     }
 }

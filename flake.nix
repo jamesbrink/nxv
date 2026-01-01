@@ -204,6 +204,8 @@
             pkgs.rust-analyzer
             pkgs.cargo-watch
             pkgs.cargo-edit
+            pkgs.miniserve  # Simple HTTP server for frontend dev
+            pkgs.nodePackages.prettier  # HTML/JS/CSS formatter
           ];
 
           RUST_BACKTRACE = "1";

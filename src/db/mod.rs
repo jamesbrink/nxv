@@ -10,7 +10,7 @@ use std::path::Path;
 
 /// Current schema version.
 #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 /// Database connection wrapper.
 pub struct Database {
@@ -83,6 +83,7 @@ impl Database {
                 homepage TEXT,
                 maintainers TEXT,
                 platforms TEXT,
+                source_path TEXT,
                 UNIQUE(attribute_path, version, first_commit_hash)
             );
 
@@ -144,9 +145,26 @@ impl Database {
         let version_str = self.get_meta("schema_version")?;
         let current_version: u32 = version_str.as_deref().unwrap_or("0").parse().unwrap_or(0);
 
+        if current_version < 2 {
+            // Migration v1 -> v2: Add source_path column
+            let has_source_path: bool = self
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM pragma_table_info('package_versions') WHERE name='source_path'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+
+            if !has_source_path {
+                self.conn.execute(
+                    "ALTER TABLE package_versions ADD COLUMN source_path TEXT",
+                    [],
+                )?;
+            }
+        }
+
         if current_version < SCHEMA_VERSION {
-            // Future migrations would go here
-            // For now, just update the version
             self.set_meta("schema_version", &SCHEMA_VERSION.to_string())?;
         }
 
@@ -198,8 +216,8 @@ impl Database {
                 INSERT OR IGNORE INTO package_versions
                     (name, version, first_commit_hash, first_commit_date,
                      last_commit_hash, last_commit_date, attribute_path,
-                     description, license, homepage, maintainers, platforms)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     description, license, homepage, maintainers, platforms, source_path)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
             )?;
 
@@ -217,6 +235,7 @@ impl Database {
                     pkg.homepage,
                     pkg.maintainers,
                     pkg.platforms,
+                    pkg.source_path,
                 ])?;
                 inserted += changes;
             }
@@ -324,7 +343,7 @@ mod tests {
         let db = Database::open(&db_path).unwrap();
 
         let version = db.get_meta("schema_version").unwrap();
-        assert_eq!(version, Some("1".to_string()));
+        assert_eq!(version, Some("2".to_string()));
     }
 
     #[test]
@@ -351,6 +370,7 @@ mod tests {
                 homepage: None,
                 maintainers: None,
                 platforms: None,
+                source_path: None,
             },
             PackageVersion {
                 id: 0,
@@ -366,6 +386,7 @@ mod tests {
                 homepage: None,
                 maintainers: None,
                 platforms: None,
+                source_path: None,
             },
         ];
 
@@ -405,6 +426,7 @@ mod tests {
             homepage: None,
             maintainers: None,
             platforms: None,
+            source_path: None,
         };
 
         // First insert should succeed
@@ -452,6 +474,7 @@ mod tests {
             homepage: None,
             maintainers: None,
             platforms: None,
+            source_path: None,
         };
 
         db.insert_package_ranges_batch(&[pkg]).unwrap();
@@ -493,6 +516,7 @@ mod tests {
                 homepage: None,
                 maintainers: None,
                 platforms: None,
+                source_path: None,
             })
             .collect();
 

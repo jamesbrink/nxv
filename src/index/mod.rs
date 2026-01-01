@@ -68,6 +68,7 @@ struct OpenRange {
     homepage: Option<String>,
     maintainers: Option<String>,
     platforms: Option<String>,
+    source_path: Option<String>,
 }
 
 impl OpenRange {
@@ -90,6 +91,7 @@ impl OpenRange {
             homepage: self.homepage.clone(),
             maintainers: self.maintainers.clone(),
             platforms: self.platforms.clone(),
+            source_path: self.source_path.clone(),
         }
     }
 
@@ -102,6 +104,7 @@ impl OpenRange {
         homepage: Option<String>,
         maintainers: Option<String>,
         platforms: Option<String>,
+        source_path: Option<String>,
     ) -> bool {
         let mut updated = false;
 
@@ -125,6 +128,10 @@ impl OpenRange {
             self.platforms = platforms;
             updated = true;
         }
+        if self.source_path.is_none() && source_path.is_some() {
+            self.source_path = source_path;
+            updated = true;
+        }
 
         updated
     }
@@ -140,6 +147,7 @@ struct PackageAggregate {
     license: HashSet<String>,
     maintainers: HashSet<String>,
     platforms: HashSet<String>,
+    source_path: Option<String>,
 }
 
 impl PackageAggregate {
@@ -167,6 +175,7 @@ impl PackageAggregate {
             license,
             maintainers,
             platforms,
+            source_path: pkg.source_path,
         }
     }
 
@@ -176,6 +185,9 @@ impl PackageAggregate {
         }
         if self.homepage.is_none() {
             self.homepage = pkg.homepage;
+        }
+        if self.source_path.is_none() {
+            self.source_path = pkg.source_path;
         }
         if let Some(licenses) = pkg.license {
             self.license.extend(licenses);
@@ -711,6 +723,7 @@ impl Indexer {
                         aggregate.homepage.clone(),
                         maintainers_json,
                         platforms_json,
+                        aggregate.source_path.clone(),
                     );
                 } else {
                     open_ranges.insert(
@@ -726,6 +739,7 @@ impl Indexer {
                             homepage: aggregate.homepage.clone(),
                             maintainers: maintainers_json,
                             platforms: platforms_json,
+                            source_path: aggregate.source_path.clone(),
                         },
                     );
                 }
@@ -1066,6 +1080,7 @@ mod tests {
             homepage: None,
             maintainers: None,
             platforms: None,
+            source_path: Some("pkgs/hello/default.nix".to_string()),
         };
 
         let last_date = Utc::now();

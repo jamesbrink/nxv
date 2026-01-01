@@ -20,6 +20,8 @@ pub struct PackageVersion {
     pub homepage: Option<String>,
     pub maintainers: Option<String>,
     pub platforms: Option<String>,
+    /// Source file path relative to nixpkgs root
+    pub source_path: Option<String>,
 }
 
 impl PackageVersion {
@@ -42,6 +44,7 @@ impl PackageVersion {
             homepage: row.get("homepage")?,
             maintainers: row.get("maintainers")?,
             platforms: row.get("platforms")?,
+            source_path: row.get("source_path").ok().flatten(),
         })
     }
 

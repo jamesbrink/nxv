@@ -400,7 +400,6 @@ pub fn search_by_description(
 /// let attrs = crate::db::queries::get_all_unique_attrs(&conn).unwrap();
 /// assert_eq!(attrs, vec!["pkg::a".to_string(), "pkg::b".to_string()]);
 /// ```
-#[cfg_attr(not(feature = "indexer"), allow(dead_code))]
 pub fn get_all_unique_attrs(conn: &rusqlite::Connection) -> Result<Vec<String>> {
     let mut stmt = conn
         .prepare("SELECT DISTINCT attribute_path FROM package_versions ORDER BY attribute_path")?;

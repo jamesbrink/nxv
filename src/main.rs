@@ -237,6 +237,23 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
     // This only applies to exact searches (not prefix or description searches)
     if args.exact && !args.desc && !backend.is_remote() {
         let bloom_path = paths::get_bloom_path();
+
+        // Regenerate bloom filter if missing but database exists
+        if !bloom_path.exists()
+            && cli.db_path.exists()
+            && let Ok(db) = crate::db::Database::open_readonly(&cli.db_path)
+        {
+            if !cli.quiet {
+                eprintln!("Generating bloom filter...");
+            }
+            if let Err(e) = PackageBloomFilter::regenerate_from_db(&db) {
+                // Non-fatal: just log and continue without bloom filter
+                if verbosity >= Verbosity::Debug {
+                    eprintln!("[debug] Failed to generate bloom filter: {}", e);
+                }
+            }
+        }
+
         if bloom_path.exists()
             && let Ok(filter) = PackageBloomFilter::load(&bloom_path)
             && !filter.contains(&args.package)

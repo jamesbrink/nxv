@@ -99,13 +99,14 @@ Run the API server as a systemd service:
 | `host` | `127.0.0.1` | Address to bind to |
 | `port` | `8080` | Port to listen on |
 | `dataDir` | `/var/lib/nxv` | Directory for `index.db` |
+| `manifestUrl` | `null` | Custom manifest URL for self-hosted index |
 | `cors.enable` | `false` | Enable CORS for all origins |
 | `cors.origins` | `null` | Specific allowed origins |
 | `openFirewall` | `false` | Open firewall port |
 | `autoUpdate.enable` | `false` | Enable automatic index updates |
 | `autoUpdate.interval` | `daily` | Update frequency (systemd calendar syntax) |
 
-The module creates a dedicated user, applies systemd hardening, and optionally manages automatic index updates.
+The module creates a dedicated user, applies systemd hardening, downloads the index on first start, and optionally manages automatic updates.
 
 ## Remote API
 
@@ -153,6 +154,58 @@ nxv reset --nixpkgs-path ./nixpkgs --fetch
 
 # Reset to a specific commit
 nxv reset --nixpkgs-path ./nixpkgs --to abc1234
+```
+
+### Hosting Your Own Index
+
+To host your own index, create a `manifest.json` with the following format:
+
+```json
+{
+  "version": 2,
+  "latest_commit": "abc123def456789...",
+  "latest_commit_date": "2024-01-15T12:00:00Z",
+  "full_index": {
+    "url": "https://your-server.com/index.db.zst",
+    "size_bytes": 150000000,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "bloom_filter": {
+    "url": "https://your-server.com/bloom.bin",
+    "size_bytes": 150000,
+    "sha256": "d7a8fbb307d7809469ca9abcb0082e4f8d5651e46d3cdb762d02d0bf37c9e592"
+  },
+  "deltas": [
+    {
+      "from_commit": "previouscommit123...",
+      "to_commit": "abc123def456789...",
+      "url": "https://your-server.com/delta-prev-to-current.sql.zst",
+      "size_bytes": 50000,
+      "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+    }
+  ]
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `version` | Manifest format version (currently `2`) |
+| `latest_commit` | Full nixpkgs commit hash of the index |
+| `latest_commit_date` | ISO 8601 timestamp of the commit |
+| `full_index.url` | URL to zstd-compressed SQLite database |
+| `full_index.size_bytes` | Compressed file size |
+| `full_index.sha256` | SHA-256 hash of compressed file |
+| `bloom_filter.*` | Same structure for the bloom filter file |
+| `deltas` | Optional array of incremental updates |
+
+Point CLI or module at your manifest:
+
+```bash
+nxv update --manifest-url https://your-server.com/manifest.json
+```
+
+```nix
+services.nxv.manifestUrl = "https://your-server.com/manifest.json";
 ```
 
 ## Development

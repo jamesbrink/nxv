@@ -91,6 +91,16 @@ in
       description = "Group under which nxv runs.";
     };
 
+    manifestUrl = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = "https://example.com/nxv/manifest.json";
+      description = ''
+        Custom manifest URL for index downloads. If null, uses the default
+        GitHub releases URL. Useful for self-hosted index mirrors.
+      '';
+    };
+
     autoUpdate = {
       enable = mkEnableOption "automatic index updates via systemd timer";
 
@@ -125,22 +135,31 @@ in
     # Main API server service
     systemd.services.nxv = {
       description = "nxv API Server - Nix Package Version Search";
-      after = [ "network.target" ];
+      after = [ "network-online.target" ];
+      wants = [ "network-online.target" ];
       wantedBy = [ "multi-user.target" ];
 
-      serviceConfig = {
+      serviceConfig = let
+        manifestArgs = lib.optionalString (cfg.manifestUrl != null)
+          "--manifest-url ${cfg.manifestUrl}";
+        corsArgs =
+          if cfg.cors.origins != null then
+            "--cors-origins ${lib.concatStringsSep "," cfg.cors.origins}"
+          else if cfg.cors.enable then
+            "--cors"
+          else
+            "";
+      in {
         Type = "simple";
         User = cfg.user;
         Group = cfg.group;
-        ExecStart = let
-          corsArgs =
-            if cfg.cors.origins != null then
-              "--cors-origins ${lib.concatStringsSep "," cfg.cors.origins}"
-            else if cfg.cors.enable then
-              "--cors"
-            else
-              "";
-        in ''
+        ExecStartPre = pkgs.writeShellScript "nxv-bootstrap" ''
+          if [ ! -f "${cfg.dataDir}/index.db" ]; then
+            echo "Database not found, downloading index..."
+            ${cfg.package}/bin/nxv --db-path ${cfg.dataDir}/index.db update ${manifestArgs}
+          fi
+        '';
+        ExecStart = ''
           ${cfg.package}/bin/nxv \
             --db-path ${cfg.dataDir}/index.db \
             serve \
@@ -170,14 +189,6 @@ in
         SystemCallFilter = [ "@system-service" "~@privileged" ];
         SystemCallArchitectures = "native";
       };
-
-      # Wait for the database to exist before starting
-      preStart = ''
-        if [ ! -f "${cfg.dataDir}/index.db" ]; then
-          echo "Warning: Database not found at ${cfg.dataDir}/index.db"
-          echo "Run 'nxv update' or copy an existing index.db to start the service."
-        fi
-      '';
     };
 
     # Automatic update service and timer
@@ -186,11 +197,14 @@ in
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
 
-      serviceConfig = {
+      serviceConfig = let
+        manifestArgs = lib.optionalString (cfg.manifestUrl != null)
+          "--manifest-url ${cfg.manifestUrl}";
+      in {
         Type = "oneshot";
         User = cfg.user;
         Group = cfg.group;
-        ExecStart = "${cfg.package}/bin/nxv --db-path ${cfg.dataDir}/index.db update";
+        ExecStart = "${cfg.package}/bin/nxv --db-path ${cfg.dataDir}/index.db update ${manifestArgs}";
 
         # Hardening options
         NoNewPrivileges = true;

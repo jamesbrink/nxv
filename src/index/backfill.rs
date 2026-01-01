@@ -101,11 +101,40 @@ pub fn run_backfill<P: AsRef<Path>, Q: AsRef<Path>>(
     config: BackfillConfig,
     shutdown_flag: Arc<AtomicBool>,
 ) -> Result<BackfillResult> {
-    if config.use_history {
+    let db_path = db_path.as_ref();
+
+    // SAFEGUARD: Preserve last_indexed_commit before backfill operations.
+    // Backfill should NEVER modify this value - it only updates package metadata.
+    // This guards against any unexpected database state changes.
+    let preserved_commit = {
+        let db = Database::open(db_path)?;
+        db.get_meta("last_indexed_commit")?
+    };
+
+    let result = if config.use_history {
         run_backfill_historical(nixpkgs_path, db_path, config, shutdown_flag)
     } else {
         run_backfill_head(nixpkgs_path, db_path, config, shutdown_flag)
+    };
+
+    // SAFEGUARD: Restore last_indexed_commit if it was somehow modified.
+    // This should never happen, but we protect against it defensively.
+    if let Some(ref original_commit) = preserved_commit {
+        let db = Database::open(db_path)?;
+        let current_commit = db.get_meta("last_indexed_commit")?;
+        if current_commit.as_ref() != Some(original_commit) {
+            eprintln!("Warning: last_indexed_commit was unexpectedly modified during backfill.");
+            eprintln!(
+                "  Expected: {}, Found: {:?}",
+                &original_commit[..12.min(original_commit.len())],
+                current_commit.as_ref().map(|c| &c[..12.min(c.len())])
+            );
+            eprintln!("  Restoring original value to preserve indexer checkpoint.");
+            db.set_meta("last_indexed_commit", original_commit)?;
+        }
     }
+
+    result
 }
 
 /// Backfills missing package metadata (source_path and/or homepage) by extracting values from the current nixpkgs HEAD.

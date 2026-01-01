@@ -32,8 +32,8 @@ impl<T: Serialize> ApiResponse<T> {
 
     /// Wraps `data` in an `ApiResponse` and attaches pagination metadata.
     ///
-    /// The attached `PaginationMeta` records `total`, `limit`, `offset`, and computes
-    /// `has_more` as `limit > 0 && total > offset + limit`.
+    /// The `has_more` parameter should be pre-computed by the caller using the actual
+    /// number of items returned: `limit > 0 && total > offset + data.len()`.
     ///
     /// # Returns
     ///
@@ -43,7 +43,7 @@ impl<T: Serialize> ApiResponse<T> {
     /// # Examples
     ///
     /// ```
-    /// let resp = ApiResponse::with_pagination(vec![1, 2, 3], 100, 10, 0);
+    /// let resp = ApiResponse::with_pagination(vec![1, 2, 3], 100, 10, 0, true);
     /// assert_eq!(resp.data.len(), 3);
     /// let meta = resp.meta.unwrap();
     /// assert_eq!(meta.total, 100);
@@ -51,14 +51,20 @@ impl<T: Serialize> ApiResponse<T> {
     /// assert_eq!(meta.offset, 0);
     /// assert!(meta.has_more);
     /// ```
-    pub fn with_pagination(data: T, total: usize, limit: usize, offset: usize) -> Self {
+    pub fn with_pagination(
+        data: T,
+        total: usize,
+        limit: usize,
+        offset: usize,
+        has_more: bool,
+    ) -> Self {
         Self {
             data,
             meta: Some(PaginationMeta {
                 total,
                 limit,
                 offset,
-                has_more: limit > 0 && total > offset + limit,
+                has_more,
             }),
         }
     }

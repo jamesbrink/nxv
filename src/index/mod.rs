@@ -505,6 +505,7 @@ impl EtaTracker {
     /// - `"<secs>s"` for durations less than 60 seconds,
     /// - `"<mins>m <secs>s"` for durations less than an hour,
     /// - `"<hours>h <mins>m"` for one hour or more.
+    ///
     /// If no ETA can be computed, returns `"calculating..."`.
     ///
     /// # Examples

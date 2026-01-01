@@ -1029,8 +1029,9 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
 /// - commits processed (only in historical mode),
 /// - records updated,
 /// - number of source_path fields filled,
-/// - number of homepage fields filled,
-/// and a note advising to re-run if it was interrupted.
+/// - number of homepage fields filled.
+///
+/// Also prints a note advising to re-run if it was interrupted.
 ///
 /// # Examples
 ///

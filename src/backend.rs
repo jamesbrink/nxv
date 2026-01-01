@@ -64,7 +64,7 @@ impl Backend {
     ///     assert_eq!(pv.attribute_path, "example/package");
     /// }
     /// ```
-    #[allow(dead_code]
+    #[allow(dead_code)]
     pub fn get_package(&self, attr: &str) -> Result<Vec<PackageVersion>> {
         match self {
             Backend::Local(db) => {

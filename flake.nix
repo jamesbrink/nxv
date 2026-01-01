@@ -31,8 +31,13 @@
         # Create crane lib with our toolchain
         craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
 
-        # Common source filtering
-        src = craneLib.cleanCargoSource ./.;
+        # Common source filtering - include frontend directory for embedded assets
+        src = pkgs.lib.cleanSourceWith {
+          src = ./.;
+          filter = path: type:
+            (craneLib.filterCargoSources path type) ||
+            (builtins.match ".*frontend.*" path != null);
+        };
 
         # Read crate metadata from Cargo.toml
         crateInfo = craneLib.crateNameFromCargoToml { cargoToml = ./Cargo.toml; };

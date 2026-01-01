@@ -84,6 +84,7 @@ pub async fn search_packages(
         result.total,
         opts.limit,
         opts.offset,
+        result.has_more,
     )))
 }
 
@@ -136,11 +137,14 @@ pub async fn search_description(
         results.into_iter().skip(params.offset).collect()
     };
 
+    let has_more = params.limit > 0 && total > params.offset + data.len();
+
     Ok(Json(ApiResponse::with_pagination(
         data,
         total,
         params.limit,
         params.offset,
+        has_more,
     )))
 }
 

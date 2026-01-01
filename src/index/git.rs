@@ -471,12 +471,30 @@ impl NixpkgsRepo {
         let clean_output = Command::new("git")
             .args(["clean", "-fdx"])
             .current_dir(repo_path)
-            .output();
+            .output()
+            .map_err(|e| {
+                NxvError::Git(git2::Error::from_str(&format!(
+                    "Failed to run git clean: {}",
+                    e
+                )))
+            })?;
 
-        if let Err(e) = clean_output {
+        if !clean_output.status.success() {
+            let stderr = String::from_utf8_lossy(&clean_output.stderr);
+            let stdout = String::from_utf8_lossy(&clean_output.stdout);
             return Err(NxvError::Git(git2::Error::from_str(&format!(
-                "Failed to run git clean: {}",
-                e
+                "git clean failed with exit code {}: {}{}",
+                clean_output
+                    .status
+                    .code()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                stderr.trim(),
+                if !stdout.is_empty() {
+                    format!(" (stdout: {})", stdout.trim())
+                } else {
+                    String::new()
+                }
             ))));
         }
 
@@ -780,6 +798,7 @@ impl NixpkgsRepo {
     /// let repo = NixpkgsRepo::open("/path/to/nixpkgs").unwrap();
     /// repo.cleanup_worktrees().unwrap();
     /// ```
+    #[allow(dead_code)]
     pub fn cleanup_worktrees(&self) -> Result<()> {
         // List all worktrees and remove ones starting with "nxv-worktree-"
         let worktrees: Vec<String> = self

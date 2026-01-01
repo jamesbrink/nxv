@@ -108,72 +108,12 @@
           };
         });
 
-        # Static musl build (Linux only) - use cross-compilation with musl target
-        nxv-static = pkgs.lib.optionalAttrs pkgs.stdenv.isLinux (
-          let
-            # Toolchain with musl target
-            rustToolchainMusl = pkgs.rust-bin.stable.latest.default.override {
-              targets = [ "x86_64-unknown-linux-musl" ];
-            };
-            craneLibMusl = (crane.mkLib pkgs).overrideToolchain rustToolchainMusl;
-
-            # musl cross toolchain for linking
-            muslPkgs = pkgs.pkgsCross.musl64;
-
-            staticArgs = {
-              inherit src;
-              inherit (crateInfo) pname version;
-              strictDeps = true;
-
-              CARGO_BUILD_TARGET = "x86_64-unknown-linux-musl";
-              CARGO_BUILD_RUSTFLAGS = "-C target-feature=+crt-static";
-
-              # Use musl linker
-              CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER = "${muslPkgs.stdenv.cc}/bin/x86_64-unknown-linux-musl-cc";
-
-              # For C dependencies that need to be built
-              CC_x86_64_unknown_linux_musl = "${muslPkgs.stdenv.cc}/bin/x86_64-unknown-linux-musl-cc";
-
-              nativeBuildInputs = [
-                pkgs.installShellFiles
-                muslPkgs.stdenv.cc
-              ];
-
-              buildInputs = [ ];
-
-              doCheck = false;
-            };
-
-            cargoArtifactsMusl = craneLibMusl.buildDepsOnly staticArgs;
-          in
-          craneLibMusl.buildPackage (staticArgs // {
-            cargoArtifacts = cargoArtifactsMusl;
-
-            postInstall = ''
-              installShellCompletion --cmd nxv \
-                --bash <($out/bin/nxv completions bash) \
-                --zsh <($out/bin/nxv completions zsh) \
-                --fish <($out/bin/nxv completions fish)
-            '';
-
-            meta = {
-              description = "CLI tool for finding specific versions of Nix packages (static musl build)";
-              homepage = "https://github.com/jamesbrink/nxv";
-              license = pkgs.lib.licenses.mit;
-              maintainers = [ ];
-              mainProgram = "nxv";
-            };
-          })
-        );
-
       in
       {
         # Packages
         packages = {
           inherit nxv nxv-indexer;
           default = nxv;
-        } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
-          nxv-static = nxv-static;
         };
 
         # Development shell

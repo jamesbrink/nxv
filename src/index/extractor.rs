@@ -317,12 +317,24 @@ pub fn extract_packages_for_attrs<P: AsRef<Path>>(
     let nix_file = temp_dir.path().join("extract.nix");
     std::fs::write(&nix_file, EXTRACT_NIX)?;
 
-    // Build the attrNames argument - either null or a list
+    // Build the attrNames argument - write to file if large to avoid "Argument list too long"
+    // OS limit is typically ~2MB for all args + env, so we use a conservative threshold
     let attr_names_arg = if attr_names.is_empty() {
         "null".to_string()
     } else {
-        let items: Vec<String> = attr_names.iter().map(|s| format!("\"{}\"", s)).collect();
-        format!("[ {} ]", items.join(" "))
+        // Estimate the size: each name plus quotes and space
+        let estimated_size: usize = attr_names.iter().map(|s| s.len() + 3).sum();
+
+        if estimated_size > 100_000 {
+            // Write attr names to a JSON file and read in Nix
+            let attr_file = temp_dir.path().join("attrs.json");
+            let json = serde_json::to_string(attr_names)?;
+            std::fs::write(&attr_file, &json)?;
+            format!("builtins.fromJSON (builtins.readFile {})", attr_file.display())
+        } else {
+            let items: Vec<String> = attr_names.iter().map(|s| format!("\"{}\"", s)).collect();
+            format!("[ {} ]", items.join(" "))
+        }
     };
 
     // Build an expression that imports and calls the extract file
@@ -867,5 +879,62 @@ mod tests {
         assert!(positions.iter().any(|p| p.attr_path == "goodPkg"));
         assert!(positions.iter().any(|p| p.attr_path == "anotherGoodPkg"));
         // badPkg may or may not have a position depending on when the error occurs
+    }
+
+    /// Test that large attribute lists are written to file to avoid "Argument list too long".
+    /// This tests the fix for OS error 7 (E2BIG) when extracting many packages.
+    #[test]
+    fn test_extract_large_attr_list_uses_file() {
+        let nix_check = Command::new("nix").arg("--version").output();
+        if nix_check.is_err() || !nix_check.unwrap().status.success() {
+            eprintln!("Skipping: nix not available");
+            return;
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path();
+        std::fs::create_dir_all(path.join("pkgs")).unwrap();
+
+        // Create a nixpkgs-like structure with many packages
+        let mut default_nix = "{ system, config }:\n{\n".to_string();
+        for i in 0..100 {
+            default_nix.push_str(&format!(
+                r#"  pkg{} = {{ pname = "pkg{}"; version = "1.0.0"; type = "derivation"; }};
+"#,
+                i, i
+            ));
+        }
+        default_nix.push_str("}\n");
+        std::fs::write(path.join("default.nix"), default_nix).unwrap();
+
+        // Generate a large list of attribute names that would exceed the threshold
+        // The threshold is 100,000 bytes, so we need ~10,000 attrs of ~10 chars each
+        let mut large_attr_list: Vec<String> = (0..100).map(|i| format!("pkg{}", i)).collect();
+        // Add many fake attrs to push over the size threshold
+        for i in 100..15000 {
+            large_attr_list.push(format!("nonexistent_package_{}", i));
+        }
+
+        // This should NOT fail with "Argument list too long" because
+        // the attr list is written to a file
+        let result = extract_packages_for_attrs(path, "x86_64-linux", &large_attr_list);
+
+        match result {
+            Ok(packages) => {
+                // Should find some of the real packages
+                assert!(packages.iter().any(|p| p.name == "pkg0"));
+                assert!(packages.iter().any(|p| p.name == "pkg99"));
+            }
+            Err(e) => {
+                // Should NOT be "Argument list too long"
+                let err_str = e.to_string();
+                assert!(
+                    !err_str.contains("Argument list too long"),
+                    "Should not get E2BIG error, but got: {}",
+                    err_str
+                );
+                // Other nix eval errors are acceptable (e.g., evaluation errors)
+            }
+        }
     }
 }

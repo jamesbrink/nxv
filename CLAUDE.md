@@ -66,6 +66,16 @@ The `indexer` feature enables building indexes from a local nixpkgs clone:
 cargo search <crate>           # Find latest version
 ```
 
+## Data Paths
+
+The database and bloom filter are stored in platform-specific data directories:
+- **macOS**: `~/Library/Application Support/nxv/`
+- **Linux**: `~/.local/share/nxv/`
+
+Files:
+- `index.db` - SQLite database with package versions
+- `bloom.bin` - Bloom filter for fast negative lookups
+
 ## Testing
 
 - Unit tests are in each module's `mod tests` section

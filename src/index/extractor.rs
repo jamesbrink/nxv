@@ -198,9 +198,11 @@ let
 
   # Process each package name with full error isolation
   # The entire result is forced to catch any remaining lazy errors
+  # Use hasAttr first since tryEval doesn't catch missing attribute errors
   processAttr = name:
     let
-      valueResult = builtins.tryEval pkgs.${name};
+      exists = builtins.hasAttr name pkgs;
+      valueResult = if exists then builtins.tryEval pkgs.${name} else { success = false; };
       value = if valueResult.success then valueResult.value else null;
       isDeriv = if value != null then isDerivation value else false;
       info = if isDeriv then getPackageInfo name value else null;

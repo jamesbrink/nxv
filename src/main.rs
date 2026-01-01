@@ -769,6 +769,9 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
     use crate::index::{Indexer, IndexerConfig, save_bloom_filter};
     use std::sync::atomic::Ordering;
 
+    // Ensure data directory exists before opening database
+    paths::ensure_data_dir()?;
+
     eprintln!("Indexing nixpkgs from {:?}", args.nixpkgs_path);
     eprintln!("Checkpoint interval: {} commits", args.checkpoint_interval);
 

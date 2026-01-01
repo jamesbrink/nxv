@@ -31,7 +31,7 @@ pub fn get_bloom_path() -> PathBuf {
 }
 
 /// Ensure the data directory exists.
-#[allow(dead_code)]
+#[cfg_attr(not(feature = "indexer"), allow(dead_code))]
 pub fn ensure_data_dir() -> std::io::Result<()> {
     let data_dir = get_data_dir();
     if !data_dir.exists() {

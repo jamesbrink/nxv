@@ -51,6 +51,32 @@ pub struct SearchOptions {
 }
 
 impl Default for SearchOptions {
+    /// Creates the default set of search options used by the CLI and API.
+    ///
+    /// Defaults:
+    /// - `query`: empty string
+    /// - `version`: `None`
+    /// - `exact`: `false`
+    /// - `desc`: `false`
+    /// - `license`: `None`
+    /// - `sort`: `SortOrder::Date`
+    /// - `reverse`: `false`
+    /// - `full`: `false`
+    /// - `limit`: `50`
+    /// - `offset`: `0`
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let opts = crate::search::SearchOptions::default();
+    /// assert_eq!(opts.query, "");
+    /// assert!(opts.version.is_none());
+    /// assert!(!opts.exact && !opts.desc && !opts.reverse && !opts.full);
+    /// assert!(opts.license.is_none());
+    /// assert_eq!(opts.sort, crate::search::SortOrder::Date);
+    /// assert_eq!(opts.limit, 50);
+    /// assert_eq!(opts.offset, 0);
+    /// ```
     fn default() -> Self {
         Self {
             query: String::new(),
@@ -78,14 +104,25 @@ pub struct SearchResult {
     pub has_more: bool,
 }
 
-/// Execute a search with the given options.
+/// Performs a package search using the provided options and returns paginated results.
 ///
-/// This function encapsulates the full search pipeline:
-/// 1. Query the database based on search type (name, version, description)
-/// 2. Apply license filter if specified
-/// 3. Sort results
-/// 4. Deduplicate (unless `full` is true)
-/// 5. Apply pagination (offset and limit)
+/// Applies filters, sorting, deduplication (unless disabled), and pagination according to `opts`.
+///
+/// # Returns
+///
+/// `SearchResult` containing the matching `PackageVersion` entries, the total number of matches
+/// before pagination, and a `has_more` flag indicating if additional results exist.
+///
+/// # Examples
+///
+/// ```no_run
+/// use rusqlite::Connection;
+/// let conn = Connection::open_in_memory().unwrap();
+/// let opts = SearchOptions::default();
+/// let res = execute_search(&conn, &opts).unwrap();
+/// // `res.data` holds the matching package versions, `res.total` is the total matches.
+/// assert!(res.total >= 0);
+/// ```
 pub fn execute_search(conn: &Connection, opts: &SearchOptions) -> Result<SearchResult> {
     // Step 1: Query database
     let results = if opts.desc {
@@ -130,7 +167,19 @@ pub fn execute_search(conn: &Connection, opts: &SearchOptions) -> Result<SearchR
     })
 }
 
-/// Filter results by license (case-insensitive contains).
+/// Filter package versions by license using a case-insensitive substring match.
+///
+/// If `license` is `None`, the input `results` are returned unchanged. When `license` is
+/// provided, only entries whose `license` field is present and contains the given string
+/// (case-insensitive) are retained.
+///
+/// # Examples
+///
+/// ```
+/// let empty: Vec<PackageVersion> = Vec::new();
+/// let filtered = filter_by_license(empty, Some("mit"));
+/// assert!(filtered.is_empty());
+/// ```
 pub fn filter_by_license(
     results: Vec<PackageVersion>,
     license: Option<&str>,
@@ -183,7 +232,26 @@ pub fn sort_results(results: &mut [PackageVersion], order: SortOrder, reverse: b
     }
 }
 
-/// Deduplicate results by (attribute_path, version), keeping the most recent.
+/// Remove duplicate package versions identified by (attribute_path, version),
+/// preserving the most recent occurrence according to the input order.
+///
+/// Duplicates are determined by the tuple `(attribute_path, version)`. The first
+/// occurrence of each unique tuple in `results` is kept; subsequent duplicates
+/// are discarded.
+///
+/// # Examples
+///
+/// ```
+/// use crate::search::deduplicate;
+/// use crate::db::PackageVersion;
+///
+/// let a1 = PackageVersion { attribute_path: "pkg::a".into(), version: "1.0".into(), ..Default::default() };
+/// let a2 = PackageVersion { attribute_path: "pkg::a".into(), version: "1.0".into(), ..Default::default() };
+/// let a3 = PackageVersion { attribute_path: "pkg::a".into(), version: "2.0".into(), ..Default::default() };
+///
+/// let out = deduplicate(vec![a1, a2, a3]);
+/// assert_eq!(out.len(), 2);
+/// ```
 pub fn deduplicate(results: Vec<PackageVersion>) -> Vec<PackageVersion> {
     let mut seen: HashSet<(String, String)> = HashSet::new();
     results
@@ -192,9 +260,18 @@ pub fn deduplicate(results: Vec<PackageVersion>) -> Vec<PackageVersion> {
         .collect()
 }
 
-/// Apply pagination (offset and limit) to results.
+/// Paginate a list of `PackageVersion` by applying `offset` and an optional `limit`.
 ///
-/// Returns the paginated results and the total count before pagination.
+/// If `limit` is zero, all items after `offset` are returned. The second element of the
+/// returned tuple is the total number of items before pagination.
+///
+/// # Examples
+///
+/// ```
+/// let (page, total) = paginate(Vec::<_>::new(), 10, 0);
+/// assert!(page.is_empty());
+/// assert_eq!(total, 0);
+/// ```
 pub fn paginate(
     results: Vec<PackageVersion>,
     limit: usize,
@@ -216,6 +293,18 @@ mod tests {
     use super::*;
     use chrono::Utc;
 
+    /// Create a PackageVersion test instance with the given name, version, attribute path, and a last-commit date offset in days.
+    ///
+    /// The `date_offset` is subtracted from the current UTC time to set `last_commit_date` (and `first_commit_date` is set 10 days earlier).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let pkg = make_package("foo", "1.0.0", "foo.attr", 5);
+    /// assert_eq!(pkg.name, "foo");
+    /// assert_eq!(pkg.version, "1.0.0");
+    /// assert_eq!(pkg.attribute_path, "foo.attr");
+    /// ```
     fn make_package(name: &str, version: &str, attr: &str, date_offset: i64) -> PackageVersion {
         let now = Utc::now();
         PackageVersion {

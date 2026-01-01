@@ -12,7 +12,21 @@ fn nxv() -> Command {
     Command::cargo_bin("nxv").unwrap()
 }
 
-/// Create a test database with sample data.
+/// Creates a SQLite test database at the given path populated with a schema and sample package rows.
+///
+/// The database will contain `meta` and `package_versions` tables, relevant indexes,
+/// an FTS5 virtual table for full-text search, and sample package/version entries
+/// (e.g., Python, Node.js, Firefox, rustc) useful for integration tests.
+///
+/// # Examples
+///
+/// ```
+/// use tempfile::tempdir;
+/// let tmp = tempdir().unwrap();
+/// let db_path = tmp.path().join("test.db");
+/// create_test_db(&db_path);
+/// assert!(db_path.exists());
+/// ```
 fn create_test_db(path: &std::path::Path) {
     use rusqlite::Connection;
 

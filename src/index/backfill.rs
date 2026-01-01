@@ -52,6 +52,20 @@ pub struct BackfillConfig {
 }
 
 impl Default for BackfillConfig {
+    /// Creates a BackfillConfig initialized with the module's sensible defaults.
+    ///
+    /// The default configuration backfills the `source_path` and `homepage` fields,
+    /// does not impose a processing limit, and runs in non-dry, non-historical mode.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let cfg = BackfillConfig::default();
+    /// assert_eq!(cfg.fields, vec!["source_path".to_string(), "homepage".to_string()]);
+    /// assert!(cfg.limit.is_none());
+    /// assert!(!cfg.dry_run);
+    /// assert!(!cfg.use_history);
+    /// ```
     fn default() -> Self {
         Self {
             fields: vec!["source_path".to_string(), "homepage".to_string()],
@@ -67,7 +81,20 @@ pub fn create_shutdown_flag() -> Arc<AtomicBool> {
     Arc::new(AtomicBool::new(false))
 }
 
-/// Run backfill to update missing metadata.
+/// Dispatches a backfill run to populate missing package metadata (source_path and/or homepage).
+///
+/// Chooses historical mode when `config.use_history` is true and HEAD mode otherwise. The provided
+/// `shutdown_flag` can be set to request a graceful interruption of the operation.
+///
+/// # Examples
+///
+/// ```
+/// use std::sync::Arc;
+/// let shutdown = crate::index::backfill::create_shutdown_flag();
+/// let cfg = crate::index::backfill::BackfillConfig::default();
+/// // Run backfill (may return an error if paths or DB are unavailable).
+/// let _ = crate::index::backfill::run_backfill("path/to/nixpkgs", "path/to/db.sqlite", cfg, shutdown);
+/// ```
 pub fn run_backfill<P: AsRef<Path>, Q: AsRef<Path>>(
     nixpkgs_path: P,
     db_path: Q,
@@ -81,7 +108,31 @@ pub fn run_backfill<P: AsRef<Path>, Q: AsRef<Path>>(
     }
 }
 
-/// Run backfill from current nixpkgs HEAD (fast mode).
+/// Backfills missing package metadata (source_path and/or homepage) by extracting values from the current nixpkgs HEAD.
+///
+/// Performs extraction in batches, updates matching database records, and returns metrics about the operation.
+/// If `config.dry_run` is true, no changes are written and a preview is printed. Interruption via `shutdown_flag` stops processing and is reflected in the returned result.
+///
+/// # Returns
+///
+/// A `BackfillResult` summarizing the operation: number of packages checked, records updated, source paths filled, homepages filled, whether processing was interrupted, and commits processed (always zero for HEAD mode).
+///
+/// # Examples
+///
+/// ```ignore
+/// use std::sync::Arc;
+/// use std::sync::atomic::AtomicBool;
+/// use crate::index::backfill::{run_backfill_head, BackfillConfig, create_shutdown_flag};
+///
+/// let nixpkgs_path = "/path/to/nixpkgs";
+/// let db_path = "/path/to/database.sqlite";
+/// let config = BackfillConfig::default(); // backfills source_path and homepage by default
+/// let shutdown = create_shutdown_flag();
+///
+/// // Run head-mode backfill (this is a long-running operation)
+/// let result = run_backfill_head(nixpkgs_path, db_path, config, shutdown).unwrap();
+/// println!("Updated {} records", result.records_updated);
+/// ```
 fn run_backfill_head<P: AsRef<Path>, Q: AsRef<Path>>(
     nixpkgs_path: P,
     db_path: Q,
@@ -200,7 +251,25 @@ fn run_backfill_head<P: AsRef<Path>, Q: AsRef<Path>>(
     Ok(result)
 }
 
-/// Run backfill by traversing git history (accurate mode).
+/// Traverses the nixpkgs Git history and backfills missing package metadata in the database.
+///
+/// For each commit that introduced one or more attributes, this checks out that commit,
+/// extracts metadata available at that commit (e.g., `source_path`, `homepage`), and
+/// updates database records whose `first_commit` matches the processed commit. The
+/// operation respects the provided `BackfillConfig` (which controls which fields to
+/// update, limits, and dry-run mode) and can be interrupted by setting the provided
+/// shutdown flag.
+///
+/// # Examples
+///
+/// ```
+/// use crate::index::backfill::{BackfillConfig, create_shutdown_flag, run_backfill_historical};
+///
+/// let shutdown = create_shutdown_flag();
+/// let config = BackfillConfig::default();
+/// // `nixpkgs_path` and `db_path` must point to a local nixpkgs repository and a database file.
+/// let _result = run_backfill_historical("path/to/nixpkgs", "path/to/db.sqlite", config, shutdown).unwrap();
+/// ```
 fn run_backfill_historical<P: AsRef<Path>, Q: AsRef<Path>>(
     nixpkgs_path: P,
     db_path: Q,
@@ -356,8 +425,39 @@ fn run_backfill_historical<P: AsRef<Path>, Q: AsRef<Path>>(
     Ok(result)
 }
 
-/// Get attribute paths that need backfilling, mapped to their first_commit.
-/// Returns HashMap<attribute_path, first_commit>.
+/// Collects attribute paths that are missing requested metadata and returns each attribute's first commit hash.
+///
+/// The query filters packages where `source_path` and/or `homepage` are NULL according to the boolean flags,
+/// and returns a map from attribute path to the package's `first_commit_hash`. If neither flag is set, an
+/// empty map is returned.
+///
+/// # Examples
+///
+/// ```
+/// use rusqlite::Connection;
+/// use std::collections::HashMap;
+///
+/// // setup an in-memory database matching the expected schema
+/// let conn = Connection::open_in_memory().unwrap();
+/// conn.execute_batch(r#"
+/// CREATE TABLE package_versions (
+///     attribute_path TEXT,
+///     first_commit_hash TEXT,
+///     source_path TEXT,
+///     homepage TEXT
+/// );
+/// INSERT INTO package_versions (attribute_path, first_commit_hash, source_path, homepage) VALUES
+/// ('pkgs.foo', 'commit1', NULL, 'https://example.com'),
+/// ('pkgs.bar', 'commit2', NULL, NULL),
+/// ('pkgs.baz', 'commit3', '/some/path', NULL);
+/// "#).unwrap();
+///
+/// // collect attrs needing source_path
+/// let result = get_attrs_needing_backfill(&conn, true, false, None).unwrap();
+/// assert_eq!(result.get("pkgs.foo"), Some(&"commit1".to_string()));
+/// assert_eq!(result.get("pkgs.bar"), Some(&"commit2".to_string()));
+/// assert!(result.get("pkgs.baz").is_none());
+/// ```
 fn get_attrs_needing_backfill(
     conn: &rusqlite::Connection,
     need_source_path: bool,
@@ -399,8 +499,44 @@ fn get_attrs_needing_backfill(
     Ok(attrs)
 }
 
-/// Get packages grouped by their first_commit for historical backfill.
-/// Returns HashMap<commit, Vec<attribute_path>>.
+/// Group package attribute paths by their first commit hash for packages missing specified metadata.
+///
+/// Queries the `package_versions` table for rows where `source_path` and/or `homepage` are NULL
+/// (based on `need_source_path` / `need_homepage`) and returns a map from each `first_commit_hash`
+/// to the list of `attribute_path`s that first appeared in that commit.
+///
+/// # Arguments
+///
+/// * `conn` - SQLite connection to query.
+/// * `need_source_path` - If `true`, include packages whose `source_path` is NULL.
+/// * `need_homepage` - If `true`, include packages whose `homepage` is NULL.
+/// * `limit` - Optional maximum number of rows to consider.
+///
+/// # Returns
+///
+/// A `HashMap` mapping a commit hash (`String`) to a `Vec<String>` of attribute paths found in that commit.
+///
+/// # Examples
+///
+/// ```
+/// use rusqlite::Connection;
+/// use std::collections::HashMap;
+///
+/// // prepare an in-memory database with minimal schema
+/// let conn = Connection::open_in_memory().unwrap();
+/// conn.execute_batch(r#"
+///     CREATE TABLE package_versions (attribute_path TEXT, first_commit_hash TEXT, source_path TEXT, homepage TEXT);
+///     INSERT INTO package_versions VALUES ('pkgA', 'commit1', NULL, 'http://a');
+///     INSERT INTO package_versions VALUES ('pkgB', 'commit1', NULL, NULL);
+///     INSERT INTO package_versions VALUES ('pkgC', 'commit2', '/src', NULL);
+/// "#).unwrap();
+///
+/// // call the function to group packages missing source_path or homepage
+/// let map = get_packages_by_commit(&conn, true, true, None).unwrap();
+///
+/// assert_eq!(map.get("commit1").map(|v| v.len()), Some(2));
+/// assert_eq!(map.get("commit2").map(|v| v.len()), Some(1));
+/// ```
 fn get_packages_by_commit(
     conn: &rusqlite::Connection,
     need_source_path: bool,
@@ -442,9 +578,38 @@ fn get_packages_by_commit(
     Ok(by_commit)
 }
 
-/// Apply backfill updates to the database.
-/// If commit is Some, only update records with that first_commit.
-/// Returns (total_updated, source_paths_filled, homepages_filled).
+/// Apply extracted metadata to package_versions rows in the database.
+///
+/// Updates the `source_path` and/or `homepage` columns for rows whose current
+/// value is NULL using entries from `metadata`. Each key in `metadata` is an
+/// `attribute_path`; the value is a tuple `(source_path, homepage)` where each
+/// element is applied only if `Some`.
+///
+/// If `commit` is `Some`, only rows whose `first_commit_hash` equals that value
+/// are eligible for update; otherwise all matching rows for an `attribute_path`
+/// are considered.
+///
+/// # Returns
+///
+/// A tuple `(total_updated, source_paths_filled, homepages_filled)` where
+/// `total_updated` is the total number of rows changed, and the other two
+/// elements count how many `source_path` and `homepage` fields were set,
+/// respectively.
+///
+/// # Examples
+///
+/// ```
+/// use std::collections::HashMap;
+/// // Prepare a connection and a metadata map (omitted):
+/// // let conn = rusqlite::Connection::open_in_memory().unwrap();
+/// // set up package_versions table...
+/// let mut metadata = HashMap::new();
+/// metadata.insert("mypkg".to_string(), (Some("/path".to_string()), Some("https://hp".to_string())));
+///
+/// // Apply updates for HEAD (no commit filter)
+/// let (total, sp, hp) = crate::index::backfill::apply_backfill_updates(&conn, &metadata, true, true, None).unwrap();
+/// assert!(total >= 0);
+/// ```
 fn apply_backfill_updates(
     conn: &rusqlite::Connection,
     metadata: &HashMap<String, (Option<String>, Option<String>)>,

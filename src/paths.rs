@@ -20,9 +20,22 @@ pub fn get_index_path() -> PathBuf {
     get_data_dir().join("index.db")
 }
 
-/// Get the path to the bloom filter file.
+/// Provides the filesystem path to the nxv bloom filter file.
 ///
-/// Can be overridden with the `NXV_BLOOM_PATH` environment variable.
+/// If the `NXV_BLOOM_PATH` environment variable is set, its value is used as the path.
+/// Otherwise the file is located at `<data_dir>/index.bloom`, where `data_dir` is returned by `get_data_dir()`.
+///
+/// # Examples
+///
+/// ```
+/// std::env::remove_var("NXV_BLOOM_PATH");
+/// let path = crate::paths::get_bloom_path();
+/// assert!(path.ends_with("index.bloom"));
+///
+/// std::env::set_var("NXV_BLOOM_PATH", "/tmp/custom.bloom");
+/// let overridden = crate::paths::get_bloom_path();
+/// assert_eq!(overridden, std::path::PathBuf::from("/tmp/custom.bloom"));
+/// ```
 pub fn get_bloom_path() -> PathBuf {
     std::env::var("NXV_BLOOM_PATH")
         .ok()
@@ -30,7 +43,17 @@ pub fn get_bloom_path() -> PathBuf {
         .unwrap_or_else(|| get_data_dir().join("index.bloom"))
 }
 
-/// Ensure the data directory exists.
+/// Ensures the nxv data directory exists, creating it and any missing parents if necessary.
+///
+/// This creates the directory returned by `get_data_dir()` when it does not already exist.
+/// I/O errors from creating directories are returned to the caller.
+///
+/// # Examples
+///
+/// ```
+/// // Create the data directory if needed; propagate or assert success in tests.
+/// assert!(nxv::paths::ensure_data_dir().is_ok());
+/// ```
 #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
 pub fn ensure_data_dir() -> std::io::Result<()> {
     let data_dir = get_data_dir();

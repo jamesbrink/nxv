@@ -7,7 +7,20 @@ use comfy_table::{
     presets::{ASCII_FULL, UTF8_FULL},
 };
 
-/// Print search results as a colored table.
+/// Render package search results as a colored table to stdout.
+///
+/// The table shows columns for Package (attribute path), Version, Commit, Date,
+/// and Description. If `options.show_platforms` is true, a Platforms column is
+/// appended. The ASCII/UTF-8 drawing preset is selected according to
+/// `options.ascii`.
+///
+/// # Examples
+///
+/// ```
+/// // Render an empty result set (no packages found).
+/// let results: &[crate::db::queries::PackageVersion] = &[];
+/// crate::output::print_table(results, crate::output::TableOptions::default());
+/// ```
 pub fn print_table(results: &[PackageVersion], options: TableOptions) {
     if results.is_empty() {
         println!("No packages found.");

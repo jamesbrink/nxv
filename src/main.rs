@@ -22,6 +22,19 @@ use owo_colors::{OwoColorize, Stream::Stderr};
 
 use cli::{Cli, Commands};
 
+/// Program entry point: parses CLI arguments, dispatches the selected command, and handles top-level errors.
+///
+/// This function configures global color behavior based on the CLI, invokes the appropriate command handler
+/// for the parsed subcommand, and on error prints a colored error header followed by each cause in the error
+/// chain before exiting with status code 1.
+///
+/// # Examples
+///
+/// ```
+/// // Running the binary will invoke `main`. In doctests this demonstrates that `main` is callable.
+/// // Note: calling `main()` will execute the program logic and may exit the process on error.
+/// nxv::main();
+/// ```
 fn main() {
     let cli = Cli::parse();
 
@@ -70,10 +83,27 @@ fn main() {
     }
 }
 
-/// Get the backend based on NXV_API_URL environment variable.
+/// Selects and initializes the appropriate backend based on the `NXV_API_URL` environment variable.
 ///
-/// If NXV_API_URL is set, uses a remote API client.
-/// Otherwise, uses the local database.
+/// If `NXV_API_URL` is set, constructs an `ApiClient` for that URL and returns `Backend::Remote`.
+/// Otherwise opens the local database at `cli.db_path` in read-only mode and returns `Backend::Local`.
+///
+/// # Errors
+///
+/// Returns any error produced while creating the API client or opening the local database.
+///
+/// # Examples
+///
+/// ```
+/// // chooses remote when NXV_API_URL is set
+/// std::env::set_var("NXV_API_URL", "https://example.com");
+/// let cli = crate::cli::Cli::default(); // adjust as needed for test context
+/// let backend = crate::main::get_backend(&cli).unwrap();
+/// match backend {
+///     crate::backend::Backend::Remote(_) => {}
+///     _ => panic!("expected remote backend"),
+/// }
+/// ```
 fn get_backend(cli: &Cli) -> Result<backend::Backend> {
     use backend::Backend;
 
@@ -86,7 +116,29 @@ fn get_backend(cli: &Cli) -> Result<backend::Backend> {
     }
 }
 
-/// Get backend with first-run experience (prompt to download index).
+/// Selects the runtime backend (remote API client or local readonly database) and
+/// offers an interactive first-run flow to download the local index when none is found.
+///
+/// If the `NXV_API_URL` environment variable is set, a remote API client backend is created.
+/// Otherwise the function attempts to open the local database at `cli.db_path`.
+/// If no local index exists and the process is running in interactive terminals and `cli.quiet` is false,
+/// the user is prompted to download the index; consenting runs the update flow and the database is reopened.
+/// All other errors are propagated.
+///
+/// # Returns
+///
+/// A configured `backend::Backend` instance: either a remote API client or a local readonly database.
+///
+/// # Examples
+///
+/// ```no_run
+/// let cli = Cli::parse();
+/// let backend = get_backend_with_prompt(&cli).expect("failed to initialize backend");
+/// match backend {
+///     backend::Backend::Local(_) => println!("using local database"),
+///     backend::Backend::Remote(_) => println!("using remote API"),
+/// }
+/// ```
 fn get_backend_with_prompt(cli: &Cli) -> Result<backend::Backend> {
     use backend::Backend;
     use std::io::{IsTerminal, Write};
@@ -133,6 +185,28 @@ fn get_backend_with_prompt(cli: &Cli) -> Result<backend::Backend> {
     }
 }
 
+/// Searches for packages using the configured backend and prints results according to CLI options.
+///
+/// This runs the search described by `args` against either the local database or a remote API,
+/// may consult a local bloom filter to short-circuit exact-name lookups, and emits results in
+/// the output format selected on the CLI. Respects verbosity and quiet flags and will print a
+/// "more results" hint when the backend reports additional matches beyond the returned page.
+///
+/// # Examples
+///
+/// ```no_run
+/// # use crate::cli::{Cli, SearchArgs};
+/// # fn make_cli() -> Cli { unimplemented!() }
+/// # fn make_args() -> SearchArgs { unimplemented!() }
+/// let cli = make_cli();
+/// let args = make_args();
+/// // Call from a CLI command handler context
+/// let _ = crate::cmd_search(&cli, &args);
+/// ```
+///
+/// # Returns
+///
+/// `Ok(())` on success, or an error if the backend operation fails.
 fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
     use crate::bloom::PackageBloomFilter;
     use crate::cli::Verbosity;
@@ -240,6 +314,29 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
     Ok(())
 }
 
+/// Updates the local package index from the configured manifest or remote API.
+///
+/// Performs an update using the provided CLI context and update arguments, and prints
+/// user-facing progress and the final outcome (up-to-date, downloaded, delta applied,
+/// or full download). Verbosity and quiet flags on `cli` control additional output.
+///
+/// # Returns
+///
+/// `Ok(())` on success, or an error if the update process fails.
+///
+/// # Examples
+///
+/// ```no_run
+/// # use anyhow::Result;
+/// # use crate::cli::{Cli, UpdateArgs};
+/// # fn example() -> Result<()> {
+/// // `cli` and `args` would typically come from CLI parsing.
+/// let cli = Cli::parse();
+/// let args = UpdateArgs { force: false, manifest_url: None };
+/// cmd_update(&cli, &args)?;
+/// # Ok(())
+/// # }
+/// ```
 fn cmd_update(cli: &Cli, args: &cli::UpdateArgs) -> Result<()> {
     use crate::cli::Verbosity;
     use crate::remote::update::{UpdateStatus, perform_update};
@@ -298,6 +395,36 @@ fn cmd_update(cli: &Cli, args: &cli::UpdateArgs) -> Result<()> {
     Ok(())
 }
 
+/// Display detailed information for a package in the format requested by the CLI.
+///
+/// Obtains the configured backend (local database or remote API), looks up the package
+/// by attribute path or name (optionally restricted to a version), and writes the
+/// package information to stdout using the chosen output format (JSON, plain key/value
+/// lines, or a human-friendly table view).
+///
+/// The table view presents a detailed single-package summary (description, availability,
+/// maintainers, platforms, usage examples) and lists other attribute paths when multiple
+/// results are found. If no matching package is found, a not-found message is printed.
+///
+/// # Returns
+///
+/// `Ok(())` on success, error otherwise.
+///
+/// # Examples
+///
+/// ```no_run
+/// // Example (no runtime guarantees): construct CLI/args and print package info.
+/// # use crate::cli;
+/// # use crate::Cli;
+/// # use crate::cmd_pkg_info;
+/// let cli = Cli::parse_from(&["nxv"]);
+/// let args = cli::InfoArgs {
+///     package: "hello".to_string(),
+///     version: None,
+///     format: cli::OutputFormatArg::Table,
+/// };
+/// cmd_pkg_info(&cli, &args).unwrap();
+/// ```
 fn cmd_pkg_info(cli: &Cli, args: &cli::InfoArgs) -> Result<()> {
     use owo_colors::OwoColorize;
 
@@ -503,6 +630,21 @@ fn cmd_pkg_info(cli: &Cli, args: &cli::InfoArgs) -> Result<()> {
     Ok(())
 }
 
+/// Prints index metadata and aggregate statistics for the configured backend to stdout.
+///
+/// Obtains a backend (remote when `NXV_API_URL` is set, otherwise the local database) and prints
+/// index information (API endpoint or database path, index version, last indexed commit) and
+/// aggregate statistics (total version ranges, unique package names/versions, oldest/newest commit
+/// dates). If using a local backend, also prints the database file size and bloom filter status.
+/// If a local index is missing, prints guidance to run `nxv update` and returns without error.
+///
+/// # Examples
+///
+/// ```no_run
+/// // Typical invocation from the CLI entry point:
+/// // let cli = Cli::parse();
+/// // cmd_stats(&cli).unwrap();
+/// ```
 fn cmd_stats(cli: &Cli) -> Result<()> {
     // Check if using remote API
     let is_remote = std::env::var("NXV_API_URL").is_ok();
@@ -588,6 +730,26 @@ fn cmd_stats(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
+/// Display version history for a package in one of several formats.
+///
+/// When `args.version` is provided, shows when that specific version first appeared and was last seen,
+/// including short commit hashes, dates, and a usage hint. When `args.full` is set, prints detailed
+/// rows for every matching package/version. Otherwise prints a summary list of versions with first
+/// and last seen dates. Output format is selected via `args.format` (JSON, plain, or table) and
+/// table rendering respects `args.ascii`.
+///
+/// # Returns
+///
+/// `Ok(())` if the command completed successfully, or an error if data retrieval or rendering failed.
+///
+/// # Examples
+///
+/// ```ignore
+/// // Typical usage from a CLI entry point:
+/// let cli = Cli::parse();
+/// let args = cli::HistoryArgs { package: "foo".into(), ..Default::default() };
+/// cmd_history(&cli, &args)?;
+/// ```
 fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
     // Get backend (local DB or remote API)
     let backend = get_backend_with_prompt(cli)?;
@@ -763,6 +925,28 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
     Ok(())
 }
 
+/// Run the indexer against a nixpkgs repository and update the local index database.
+///
+/// This performs either a full rebuild or an incremental index (depending on `args.full`),
+/// registers a Ctrl+C handler for graceful shutdown, prints progress and a summary of results,
+/// and always (even after interruption) builds and saves a bloom filter from the resulting
+/// database state.
+///
+/// On success the function prints indexing metrics and returns normally; on failure it returns
+/// an error describing what went wrong.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// # use crate::cli::{Cli, IndexArgs};
+/// # use crate::cmd_index;
+/// // Build or parse CLI structures (example placeholders)
+/// let cli: Cli = unimplemented!();
+/// let args: IndexArgs = unimplemented!();
+///
+/// // Run the index command (no_run prevents execution in doctests)
+/// let _ = cmd_index(&cli, &args);
+/// ```
 #[cfg(feature = "indexer")]
 fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
     use crate::db::Database;
@@ -831,6 +1015,29 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
     Ok(())
 }
 
+/// Runs a backfill process to populate or repair package metadata in the local index.
+///
+/// This command executes a backfill over the repository at `args.nixpkgs_path`, updating fields
+/// in the database at `cli.db_path` according to `args` (fields, limit, dry-run, and whether to
+/// operate in historical mode). It prints progress and a summary of metrics to stderr, and installs
+/// a Ctrl+C handler to request a graceful shutdown; if interrupted, the run stops cleanly and the
+/// summary indicates that it was interrupted.
+///
+/// The command reports:
+/// - whether it ran in historical or HEAD mode,
+/// - packages checked,
+/// - commits processed (only in historical mode),
+/// - records updated,
+/// - number of source_path fields filled,
+/// - number of homepage fields filled,
+/// and a note advising to re-run if it was interrupted.
+///
+/// # Examples
+///
+/// ```no_run
+/// // Typical invocation from main command dispatch:
+/// // cmd_backfill(&cli, &cli.backfill_args)?;
+/// ```
 #[cfg(feature = "indexer")]
 fn cmd_backfill(cli: &Cli, args: &cli::BackfillArgs) -> Result<()> {
     use crate::index::backfill::{BackfillConfig, create_shutdown_flag, run_backfill};
@@ -891,6 +1098,21 @@ fn cmd_backfill(cli: &Cli, args: &cli::BackfillArgs) -> Result<()> {
     Ok(())
 }
 
+/// Resets the local nixpkgs git repository to a given reference, optionally fetching from origin first.
+///
+/// If `args.fetch` is true, the repository will be fetched from origin before performing a hard reset.
+/// The repository is reset to `args.to` when provided, otherwise to `origin/master`. Progress and the
+/// resulting HEAD short hash are printed to stderr. Errors from repository operations are propagated.
+///
+/// # Examples
+///
+/// ```no_run
+/// # use crate::cli::{ResetArgs, Cli};
+/// // Construct `args` with the desired path and options.
+/// let cli = Cli::parse(); // placeholder for context where Cli is available
+/// let args = ResetArgs { nixpkgs_path: "/path/to/nixpkgs".into(), fetch: true, to: None };
+/// cmd_reset(&cli, &args).unwrap();
+/// ```
 #[cfg(feature = "indexer")]
 fn cmd_reset(_cli: &Cli, args: &cli::ResetArgs) -> Result<()> {
     use crate::index::git::NixpkgsRepo;
@@ -922,6 +1144,16 @@ fn cmd_reset(_cli: &Cli, args: &cli::ResetArgs) -> Result<()> {
     Ok(())
 }
 
+/// Starts the HTTP server using the provided CLI configuration and serve arguments.
+///
+/// Builds a ServerConfig from `cli` and `args`, creates a Tokio runtime, and runs the HTTP server.
+///
+/// # Examples
+///
+/// ```no_run
+/// // Construct `Cli` and `cli::ServeArgs` per your application, then start the server:
+/// // cmd_serve(&cli, &args).unwrap();
+/// ```
 fn cmd_serve(cli: &Cli, args: &cli::ServeArgs) -> Result<()> {
     use crate::server::{ServerConfig, run_server};
 

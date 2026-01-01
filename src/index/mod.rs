@@ -73,6 +73,19 @@ struct OpenRange {
 }
 
 impl OpenRange {
+    /// Convert this OpenRange into a PackageVersion using the provided last commit metadata.
+    ///
+    /// The returned PackageVersion contains all metadata carried by the OpenRange plus the
+    /// supplied `last_commit_hash` and `last_commit_date`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// // Construct an OpenRange and finalize it into a PackageVersion:
+    /// let open = OpenRange { /* populate fields */ };
+    /// let pv = open.to_package_version("deadbeef", chrono::Utc::now());
+    /// assert_eq!(pv.last_commit_hash, "deadbeef");
+    /// ```
     fn to_package_version(
         &self,
         last_commit_hash: &str,
@@ -96,8 +109,46 @@ impl OpenRange {
         }
     }
 
-    /// Update metadata fields if they have changed.
-    /// Returns true if any field was updated.
+    /// Conditionally updates the stored metadata fields with the provided values.
+    ///
+    /// Each optional field replaces the corresponding stored value if it differs.
+    /// The `source_path` is set only if the existing `source_path` is `None` and
+    /// a new `Some` value is provided; it is never overwritten once set.
+    ///
+    /// # Returns
+    ///
+    /// `true` if any field was changed, `false` otherwise.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut r = OpenRange {
+    ///     name: "pkg".into(),
+    ///     version: "1.0".into(),
+    ///     first_commit_hash: "abc".into(),
+    ///     first_commit_date: "2020-01-01".into(),
+    ///     attribute_path: "pkgs.pkg".into(),
+    ///     description: None,
+    ///     license: None,
+    ///     homepage: None,
+    ///     maintainers: None,
+    ///     platforms: None,
+    ///     source_path: None,
+    /// };
+    ///
+    /// let changed = r.update_metadata(
+    ///     Some("desc".into()),
+    ///     Some("MIT".into()),
+    ///     None,
+    ///     None,
+    ///     None,
+    ///     Some("path/to/source".into()),
+    /// );
+    ///
+    /// assert!(changed);
+    /// assert_eq!(r.description, Some("desc".into()));
+    /// assert_eq!(r.source_path, Some("path/to/source".into()));
+    /// ```
     fn update_metadata(
         &mut self,
         description: Option<String>,
@@ -152,6 +203,31 @@ struct PackageAggregate {
 }
 
 impl PackageAggregate {
+    /// Creates a PackageAggregate from an extracted PackageInfo.
+    ///
+    /// Initializes the license, maintainers, and platforms as sets populated from the
+    /// corresponding optional lists in `pkg`, and copies scalar metadata fields
+    /// (name, version, attribute_path, description, homepage, source_path).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Construct a minimal PackageInfo for illustration.
+    /// let pkg = extractor::PackageInfo {
+    ///     name: "foo".to_string(),
+    ///     version: "1.0".to_string(),
+    ///     attribute_path: "pkgs.foo".to_string(),
+    ///     description: Some("Example".to_string()),
+    ///     homepage: Some("https://example.org".to_string()),
+    ///     license: Some(vec!["MIT".to_string()]),
+    ///     maintainers: Some(vec!["alice".to_string()]),
+    ///     platforms: Some(vec!["x86_64-linux".to_string()]),
+    ///     source_path: Some("pkgs/foo/default.nix".to_string()),
+    /// };
+    /// let agg = PackageAggregate::new(pkg);
+    /// assert_eq!(agg.name, "foo");
+    /// assert!(agg.license.contains("MIT"));
+    /// ```
     fn new(pkg: extractor::PackageInfo) -> Self {
         let mut license = HashSet::new();
         let mut maintainers = HashSet::new();
@@ -180,6 +256,49 @@ impl PackageAggregate {
         }
     }
 
+    /// Merge metadata from an extracted `PackageInfo` into this aggregate.
+    ///
+    /// This will set `description`, `homepage`, and `source_path` only if they are
+    /// currently `None`, and will extend the `license`, `maintainers`, and
+    /// `platforms` sets with any values present on `pkg`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::collections::HashSet;
+    ///
+    /// // Construct an example aggregate (fields omitted for brevity)
+    /// let mut agg = PackageAggregate {
+    ///     name: "foo".into(),
+    ///     version: "1.0".into(),
+    ///     attribute_path: "pkgs.foo".into(),
+    ///     description: None,
+    ///     homepage: None,
+    ///     license: HashSet::new(),
+    ///     maintainers: HashSet::new(),
+    ///     platforms: HashSet::new(),
+    ///     source_path: None,
+    /// };
+    ///
+    /// // Simulated extracted package info with some metadata
+    /// let pkg = extractor::PackageInfo {
+    ///     name: "foo".into(),
+    ///     version: "1.0".into(),
+    ///     attribute_path: "pkgs.foo".into(),
+    ///     description: Some("A package".into()),
+    ///     homepage: Some("https://example/".into()),
+    ///     license: Some(HashSet::from(["MIT".into()])),
+    ///     maintainers: Some(HashSet::from(["alice".into()])),
+    ///     platforms: Some(HashSet::from(["x86_64-linux".into()])),
+    ///     source_path: Some("pkgs/foo/default.nix".into()),
+    /// };
+    ///
+    /// agg.merge(pkg);
+    ///
+    /// assert_eq!(agg.description.as_deref(), Some("A package"));
+    /// assert!(agg.license.contains("MIT"));
+    /// assert_eq!(agg.source_path.as_deref(), Some("pkgs/foo/default.nix"));
+    /// ```
     fn merge(&mut self, pkg: extractor::PackageInfo) {
         if self.description.is_none() {
             self.description = pkg.description;
@@ -218,6 +337,19 @@ impl PackageAggregate {
     }
 }
 
+/// Converts a set of strings into a sorted JSON array string.
+///
+/// Returns `Some` containing the JSON array (with elements sorted lexicographically) if `values` is non-empty, `None` if `values` is empty.
+///
+/// # Examples
+///
+/// ```
+/// use std::collections::HashSet;
+/// let mut s = HashSet::new();
+/// s.insert("b".to_string());
+/// s.insert("a".to_string());
+/// assert_eq!(set_to_json(&s), Some("[\"a\",\"b\"]".to_string()));
+/// ```
 fn set_to_json(values: &HashSet<String>) -> Option<String> {
     if values.is_empty() {
         return None;
@@ -244,6 +376,19 @@ struct EtaTracker {
 }
 
 impl EtaTracker {
+    /// Creates an EtaTracker that smooths ETA estimates over a sliding window.
+    ///
+    /// `window_size` is the maximum number of recent commit durations retained for averaging; larger
+    /// values produce a smoother but less responsive ETA.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let tracker = EtaTracker::new(5);
+    /// assert_eq!(tracker.window_size, 5);
+    /// assert!(tracker.avg_time_per_commit().is_none());
+    /// assert_eq!(tracker.eta_string(), "calculating...");
+    /// ```
     fn new(window_size: usize) -> Self {
         Self {
             times: VecDeque::with_capacity(window_size),
@@ -253,12 +398,35 @@ impl EtaTracker {
         }
     }
 
-    /// Start timing a new commit.
+    /// Begin timing for the current commit.
+    ///
+    /// Records the current instant so that a subsequent call to `finish_commit` can
+    /// measure and record the commit's elapsed time.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut tracker = EtaTracker::new(3);
+    /// tracker.start_commit(); // begin timing for one commit
+    /// ```
     fn start_commit(&mut self) {
         self.commit_start = Some(Instant::now());
     }
 
-    /// Finish timing the current commit and record its duration.
+    /// Stops the current commit timer and records its elapsed duration into the sliding window.
+    ///
+    /// This appends the duration measured since the last `start_commit` to the internal times
+    /// buffer and drops the oldest entry if the buffer exceeds `window_size`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut tracker = EtaTracker::new(3);
+    /// tracker.start_commit();
+    /// std::thread::sleep(std::time::Duration::from_millis(10));
+    /// tracker.finish_commit();
+    /// assert!(tracker.avg_time_per_commit().is_some());
+    /// ```
     fn finish_commit(&mut self) {
         if let Some(start) = self.commit_start.take() {
             let elapsed = start.elapsed();
@@ -269,12 +437,37 @@ impl EtaTracker {
         }
     }
 
-    /// Update the remaining count.
+    /// Sets the number of remaining commits used to compute the ETA.
+    ///
+    /// This updates the internal remaining-count which eta() and eta_string() use
+    /// to calculate the estimated time left.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut tracker = EtaTracker::new(3);
+    /// tracker.set_remaining(42);
+    /// assert_eq!(tracker.eta().is_none(), true);
+    /// ```
     fn set_remaining(&mut self, remaining: u64) {
         self.total_remaining = remaining;
     }
 
-    /// Calculate the average time per commit from the sliding window.
+    /// Compute the average duration per commit from the tracked sliding window.
+    ///
+    /// Returns `Some(duration)` equal to the arithmetic mean of the recorded commit durations when at least one sample exists, or `None` if no durations have been recorded.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// let mut tracker = super::EtaTracker::new(5);
+    /// // simulate recorded commit durations
+    /// tracker.times.push_back(Duration::from_millis(100));
+    /// tracker.times.push_back(Duration::from_millis(200));
+    /// let avg = tracker.avg_time_per_commit().unwrap();
+    /// assert_eq!(avg, Duration::from_millis(150));
+    /// ```
     fn avg_time_per_commit(&self) -> Option<Duration> {
         if self.times.is_empty() {
             return None;
@@ -283,13 +476,43 @@ impl EtaTracker {
         Some(total / self.times.len() as u32)
     }
 
-    /// Calculate smoothed ETA based on average processing time.
+    /// Compute a smoothed estimated remaining duration using the sliding-window average of recent commit timings.
+    ///
+    /// Uses the average time per commit from the tracker multiplied by the configured remaining commit count.
+    ///
+    /// # Returns
+    ///
+    /// `Some(Duration)` equal to the average duration per commit multiplied by `total_remaining`, `None` if there is no timing data.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut t = EtaTracker::new(3);
+    /// t.start_commit();
+    /// t.finish_commit();
+    /// t.set_remaining(5);
+    /// let e = t.eta();
+    /// assert!(e.is_some());
+    /// ```
     fn eta(&self) -> Option<Duration> {
         let avg = self.avg_time_per_commit()?;
         Some(avg * self.total_remaining as u32)
     }
 
-    /// Format ETA as human-readable string.
+    /// Returns a human-readable ETA string for the remaining work.
+    ///
+    /// The duration is formatted as:
+    /// - `"<secs>s"` for durations less than 60 seconds,
+    /// - `"<mins>m <secs>s"` for durations less than an hour,
+    /// - `"<hours>h <mins>m"` for one hour or more.
+    /// If no ETA can be computed, returns `"calculating..."`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let tracker = EtaTracker::new(3);
+    /// assert_eq!(tracker.eta_string(), "calculating...");
+    /// ```
     fn eta_string(&self) -> String {
         match self.eta() {
             Some(eta) => {
@@ -372,10 +595,28 @@ impl Indexer {
         self.process_commits(&mut db, &nixpkgs_path, &repo, commits, None)
     }
 
-    /// Run an incremental index, processing only new commits.
+    /// Run an incremental index, processing only commits that have not yet been indexed.
     ///
-    /// If no previous index exists or the last indexed commit is not found,
-    /// this falls back to a full index.
+    /// If a last indexed commit is recorded in the database this attempts to index commits
+    /// since that commit that touch the `pkgs` tree. If the last indexed commit is missing
+    /// from the repository or no previous index exists, this falls back to performing a full index.
+    /// The function verifies repository ancestry and will error if the repository HEAD is older
+    /// than the last indexed commit; ancestry check failures are warned and indexing proceeds when possible.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(IndexResult)` containing counts and status for the indexing run; returns `Err` on failure.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::path::Path;
+    /// # use crate::index::{Indexer, IndexerConfig};
+    /// // Create an indexer and run incremental indexing against paths (example only).
+    /// let indexer = Indexer::new(IndexerConfig::default());
+    /// let result = indexer.index_incremental("path/to/nixpkgs", "path/to/db");
+    /// assert!(result.is_ok());
+    /// ```
     pub fn index_incremental<P: AsRef<Path>, Q: AsRef<Path>>(
         &self,
         nixpkgs_path: P,
@@ -473,7 +714,44 @@ impl Indexer {
         }
     }
 
-    /// Process a list of commits, extracting packages and inserting into the database.
+    /// Processes a sequence of commits: extracts package metadata for configured systems,
+    /// tracks open version ranges across commits, finalizes and inserts package versions
+    /// into the database, and updates indexing checkpoint metadata.
+    ///
+    /// This method iterates the provided commits in order, checking out each commit,
+    /// extracting packages for the indexer's configured target systems, merging per-system
+    /// metadata, and maintaining "open" version ranges for packages that persist across
+    /// commits. When a range ends (the package disappears or a checkpoint is reached),
+    /// the range is converted to a PackageVersion and written to the database in batches.
+    /// The method also supports graceful shutdown (saving a checkpoint and flushing pending
+    /// inserts), periodic checkpoints controlled by the indexer's configuration, and optional
+    /// progress reporting with a smoothed ETA. It updates database meta keys such as
+    /// "last_indexed_commit" and "checkpoint_open_ranges" and attempts to restore the
+    /// repository's original HEAD upon completion.
+    ///
+    /// # Returns
+    ///
+    /// An `IndexResult` summarizing the indexing operation: number of commits processed,
+    /// packages found, ranges created, unique package names observed, and whether the run
+    /// was interrupted.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from git operations, extraction, and database interactions.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # // pseudocode; adapt with real repo/db objects in tests
+    /// # use crate::index::{Indexer, IndexerConfig};
+    /// # use crate::db::Database;
+    /// let indexer = Indexer::new(IndexerConfig::default());
+    /// let mut db = Database::open("/tmp/index.db").unwrap();
+    /// let repo = open_nixpkgs_repo("/path/to/nixpkgs").unwrap();
+    /// let commits = repo.list_commits_touching_pkgs().unwrap();
+    /// let result = indexer.process_commits(&mut db, "/path/to/nixpkgs", &repo, commits, None).unwrap();
+    /// println!("Indexed {} commits", result.commits_processed);
+    /// ```
     fn process_commits<P: AsRef<Path>>(
         &self,
         db: &mut Database,
@@ -904,9 +1182,25 @@ pub struct IndexResult {
     pub was_interrupted: bool,
 }
 
-/// Build a bloom filter from all unique package attribute paths in the database.
+/// Constructs a Bloom filter containing all unique package attribute paths from the database.
 ///
-/// This should be called after indexing is complete.
+/// The filter is created with a target false-positive rate of 1% and an initial capacity
+/// derived from the number of attributes (minimum of 1000). Iterate over all unique
+/// attribute paths stored in the database and insert each into the filter.
+///
+/// # Examples
+///
+/// ```
+/// # // Hidden setup: obtain a `Database` instance appropriate for your environment.
+/// # use crate::db::Database;
+/// # use crate::index::build_bloom_filter;
+/// # fn try_build(db: &Database) -> anyhow::Result<()> {
+/// let filter = build_bloom_filter(db)?;
+/// // `filter` can now be queried for probable membership of attribute paths.
+/// // (Bloom filter may yield false positives but not false negatives.)
+/// # Ok(())
+/// # }
+/// ```
 pub fn build_bloom_filter(db: &Database) -> Result<PackageBloomFilter> {
     use crate::db::queries;
 
@@ -1001,7 +1295,20 @@ mod tests {
         assert!(eta_str.contains("s") || eta_str.contains("calculating"));
     }
 
-    /// Create a test git repository with known commits and a pkgs/ directory.
+    /// Creates a temporary git repository resembling a minimal nixpkgs checkout.
+    ///
+    /// The repository contains a pkgs/ directory, a minimal default.nix defining
+    /// a single package, and an initial commit. Returns the temporary directory
+    /// (kept alive by the caller) and the repository path.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let (_tmpdir, repo_path) = create_test_nixpkgs_repo();
+    /// assert!(repo_path.join("pkgs").exists());
+    /// assert!(repo_path.join("default.nix").exists());
+    /// assert!(repo_path.join(".git").exists());
+    /// ```
     fn create_test_nixpkgs_repo() -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();

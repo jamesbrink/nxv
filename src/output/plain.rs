@@ -2,7 +2,24 @@
 
 use crate::db::queries::PackageVersion;
 
-/// Print search results as plain text (tab-separated, no colors).
+/// Print search results as plain tab-separated text.
+///
+/// Each `PackageVersion` in `results` is printed as one line with the columns:
+/// `PACKAGE` (attribute path), `VERSION`, `COMMIT` (last commit hash), `DATE` (formatted `YYYY-MM-DD`), and `DESCRIPTION`.
+/// If `show_platforms` is `true`, a `PLATFORMS` column is appended.
+/// For `description` and `platforms`, `None` is rendered as `-`. If `results` is empty, prints `No packages found.`.
+///
+/// # Parameters
+///
+/// - `results`: slice of `PackageVersion` entries to print.
+/// - `show_platforms`: when `true`, include a `PLATFORMS` column for each row.
+///
+/// # Examples
+///
+/// ```
+/// // Print nothing but the "No packages found." message.
+/// print_plain(&[], false);
+/// ```
 pub fn print_plain(results: &[PackageVersion], show_platforms: bool) {
     if results.is_empty() {
         println!("No packages found.");

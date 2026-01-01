@@ -54,6 +54,10 @@ pub enum Commands {
     #[cfg(feature = "indexer")]
     Index(IndexArgs),
 
+    /// Backfill missing metadata (source_path, homepage) from current nixpkgs.
+    #[cfg(feature = "indexer")]
+    Backfill(BackfillArgs),
+
     /// Start the API server.
     Serve(ServeArgs),
 
@@ -243,6 +247,27 @@ pub struct IndexArgs {
     /// Limit the number of commits processed.
     #[arg(long)]
     pub max_commits: Option<usize>,
+}
+
+/// Arguments for the backfill command (feature-gated).
+#[cfg(feature = "indexer")]
+#[derive(Parser, Debug)]
+pub struct BackfillArgs {
+    /// Path to the nixpkgs repository.
+    #[arg(long)]
+    pub nixpkgs_path: PathBuf,
+
+    /// Only backfill these specific fields.
+    #[arg(long, value_delimiter = ',')]
+    pub fields: Option<Vec<String>>,
+
+    /// Limit the number of packages to backfill (for testing).
+    #[arg(long)]
+    pub limit: Option<usize>,
+
+    /// Dry run - show what would be updated without making changes.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// Output format argument.

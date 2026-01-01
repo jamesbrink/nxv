@@ -43,6 +43,8 @@ fn main() {
         }
         #[cfg(feature = "indexer")]
         Commands::Index(args) => cmd_index(&cli, args),
+        #[cfg(feature = "indexer")]
+        Commands::Backfill(args) => cmd_backfill(&cli, args),
         Commands::Serve(args) => cmd_serve(&cli, args),
     };
 
@@ -820,6 +822,33 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
         eprintln!();
         eprintln!("Note: Indexing was interrupted. Run again to continue from checkpoint.");
     }
+
+    Ok(())
+}
+
+#[cfg(feature = "indexer")]
+fn cmd_backfill(cli: &Cli, args: &cli::BackfillArgs) -> Result<()> {
+    use crate::index::backfill::{BackfillConfig, run_backfill};
+
+    eprintln!("Backfilling metadata from {:?}", args.nixpkgs_path);
+
+    let config = BackfillConfig {
+        fields: args.fields.clone().unwrap_or_default(),
+        limit: args.limit,
+        dry_run: args.dry_run,
+    };
+
+    let result = run_backfill(&args.nixpkgs_path, &cli.db_path, config)?;
+
+    eprintln!();
+    eprintln!("Backfill complete!");
+    eprintln!("  Packages checked: {}", result.packages_checked);
+    eprintln!("  Records updated: {}", result.records_updated);
+    eprintln!(
+        "  source_path fields filled: {}",
+        result.source_paths_filled
+    );
+    eprintln!("  homepage fields filled: {}", result.homepages_filled);
 
     Ok(())
 }

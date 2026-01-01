@@ -2,6 +2,7 @@
 //!
 //! This module is only available when the `indexer` feature is enabled.
 
+pub mod backfill;
 pub mod extractor;
 pub mod git;
 pub mod publisher;
@@ -1256,6 +1257,7 @@ mod tests {
                 homepage: Some("https://python.org".to_string()),
                 maintainers: None,
                 platforms: None,
+                source_path: None,
             },
             PackageVersion {
                 id: 0,
@@ -1271,6 +1273,7 @@ mod tests {
                 homepage: Some("https://nodejs.org".to_string()),
                 maintainers: None,
                 platforms: None,
+                source_path: None,
             },
         ];
 
@@ -1320,6 +1323,7 @@ mod tests {
                 homepage: None,
                 maintainers: None,
                 platforms: None,
+                source_path: None,
             };
             db.insert_package_ranges_batch(&[pkg]).unwrap();
 
@@ -1354,6 +1358,7 @@ mod tests {
                 homepage: None,
                 maintainers: None,
                 platforms: None,
+                source_path: None,
             };
             db.insert_package_ranges_batch(&[pkg]).unwrap();
 

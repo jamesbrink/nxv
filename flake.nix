@@ -108,11 +108,91 @@
           };
         });
 
+        # Static musl build (Linux only)
+        # Uses cross-compilation approach to avoid build script crashes
+        nxv-static = let
+          # Only build static on Linux
+          isLinux = pkgs.stdenv.isLinux;
+          target = if system == "aarch64-linux"
+                   then "aarch64-unknown-linux-musl"
+                   else "x86_64-unknown-linux-musl";
+
+          # musl cross-compilation pkgs
+          pkgsMusl = if system == "aarch64-linux"
+                     then pkgs.pkgsCross.aarch64-multiplatform-musl
+                     else pkgs.pkgsCross.musl64;
+
+          # Get the musl C compiler
+          muslCC = "${pkgsMusl.stdenv.cc}/bin/${pkgsMusl.stdenv.cc.targetPrefix}cc";
+
+          # Toolchain with musl target added
+          rustToolchainMusl = pkgs.rust-bin.stable.latest.default.override {
+            targets = [ target ];
+          };
+
+          # Crane lib with musl toolchain
+          craneLibMusl = (crane.mkLib pkgs).overrideToolchain rustToolchainMusl;
+
+          # Common musl build args
+          muslBuildArgs = {
+            inherit src;
+            inherit (crateInfo) pname version;
+            strictDeps = true;
+
+            CARGO_BUILD_TARGET = target;
+            CARGO_BUILD_RUSTFLAGS = "-C target-feature=+crt-static -C linker=${muslCC}";
+
+            # C compiler configuration for musl
+            # HOST_CC is for build scripts that run on the build machine
+            # TARGET_CC/CC_x86_64_unknown_linux_musl is for code that runs on target
+            HOST_CC = "${pkgs.stdenv.cc}/bin/cc";
+            TARGET_CC = muslCC;
+            CC_x86_64_unknown_linux_musl = muslCC;
+            CC_aarch64_unknown_linux_musl = muslCC;
+
+            # Disable glibc-specific hardening that breaks musl
+            hardeningDisable = [ "fortify" ];
+
+            nativeBuildInputs = [
+              pkgs.pkg-config
+              pkgsMusl.stdenv.cc  # musl cross-compiler
+            ];
+
+            # Add musl libc for static linking
+            buildInputs = [ ];
+          };
+
+          cargoArtifactsMusl = craneLibMusl.buildDepsOnly muslBuildArgs;
+
+        in if isLinux then craneLibMusl.buildPackage (muslBuildArgs // {
+          pname = "nxv-static";
+          cargoArtifacts = cargoArtifactsMusl;
+
+          nativeBuildInputs = muslBuildArgs.nativeBuildInputs ++ [
+            pkgs.installShellFiles
+          ];
+
+          # Shell completions still work - binary runs on host during build
+          postInstall = installCompletions;
+
+          meta = {
+            description = "CLI tool for finding specific versions of Nix packages (static musl binary)";
+            homepage = "https://github.com/jamesbrink/nxv";
+            license = pkgs.lib.licenses.mit;
+            maintainers = [ ];
+            mainProgram = "nxv";
+            platforms = [ "x86_64-linux" "aarch64-linux" ];
+          };
+        }) else pkgs.runCommand "nxv-static-unavailable" {} ''
+          echo "nxv-static is only available on Linux" >&2
+          exit 1
+        '';
+
       in
       {
         # Packages
         packages = {
-          inherit nxv nxv-indexer;
+          inherit nxv nxv-indexer nxv-static;
           default = nxv;
         };
 

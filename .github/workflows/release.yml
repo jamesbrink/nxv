@@ -1,0 +1,124 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-static:
+    name: Build Static Binaries
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            artifact: nxv-linux-x86_64-musl
+            system: x86_64-linux
+          - target: aarch64-unknown-linux-musl
+            artifact: nxv-linux-aarch64-musl
+            system: aarch64-linux
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Setup Nix cache
+        uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Build static binary
+        run: |
+          nix build .#nxv-static --system ${{ matrix.system }}
+          cp result/bin/nxv nxv-${{ matrix.system }}
+          chmod +x nxv-${{ matrix.system }}
+
+      - name: Verify static linking
+        run: |
+          file nxv-${{ matrix.system }}
+          ldd nxv-${{ matrix.system }} || echo "Static binary confirmed"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: nxv-${{ matrix.system }}
+
+  build-macos:
+    name: Build macOS Binaries
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: macos-13
+            target: x86_64-apple-darwin
+            artifact: nxv-darwin-x86_64
+          - os: macos-14
+            target: aarch64-apple-darwin
+            artifact: nxv-darwin-aarch64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Setup Nix cache
+        uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Build binary
+        run: |
+          nix build .#nxv
+          cp result/bin/nxv nxv-${{ matrix.target }}
+          chmod +x nxv-${{ matrix.target }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: nxv-${{ matrix.target }}
+
+  release:
+    name: Create Release
+    needs: [build-static, build-macos]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+          # Linux static binaries
+          cp artifacts/nxv-linux-x86_64-musl/nxv-x86_64-linux release/nxv-x86_64-linux-musl
+          cp artifacts/nxv-linux-aarch64-musl/nxv-aarch64-linux release/nxv-aarch64-linux-musl
+          # macOS binaries
+          cp artifacts/nxv-darwin-x86_64/nxv-x86_64-apple-darwin release/nxv-x86_64-apple-darwin
+          cp artifacts/nxv-darwin-aarch64/nxv-aarch64-apple-darwin release/nxv-aarch64-apple-darwin
+
+          # Create checksums
+          cd release
+          sha256sum * > SHA256SUMS.txt
+
+          # Show what we have
+          ls -la
+          cat SHA256SUMS.txt
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref, '-') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

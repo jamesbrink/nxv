@@ -58,6 +58,10 @@ pub enum Commands {
     #[cfg(feature = "indexer")]
     Backfill(BackfillArgs),
 
+    /// Reset/clean the nixpkgs repository to a known state.
+    #[cfg(feature = "indexer")]
+    Reset(ResetArgs),
+
     /// Start the API server.
     Serve(ServeArgs),
 
@@ -273,6 +277,23 @@ pub struct BackfillArgs {
     /// Without this flag, metadata is extracted from current nixpkgs HEAD only.
     #[arg(long)]
     pub history: bool,
+}
+
+/// Arguments for the reset command (feature-gated).
+#[cfg(feature = "indexer")]
+#[derive(Parser, Debug)]
+pub struct ResetArgs {
+    /// Path to the nixpkgs repository.
+    #[arg(long)]
+    pub nixpkgs_path: PathBuf,
+
+    /// Reset to a specific commit or ref (default: origin/master).
+    #[arg(long)]
+    pub to: Option<String>,
+
+    /// Also fetch from origin before resetting.
+    #[arg(long)]
+    pub fetch: bool,
 }
 
 /// Output format argument.

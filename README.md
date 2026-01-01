@@ -97,6 +97,21 @@ nxv backfill --nixpkgs-path ./nixpkgs
 nxv backfill --nixpkgs-path ./nixpkgs --history
 ```
 
+### Resetting nixpkgs Repository
+
+If the nixpkgs repository gets into a messy state (e.g., after an interrupted operation), reset it:
+
+```bash
+# Reset to origin/master
+nxv reset --nixpkgs-path ./nixpkgs
+
+# Fetch and reset to latest
+nxv reset --nixpkgs-path ./nixpkgs --fetch
+
+# Reset to a specific commit
+nxv reset --nixpkgs-path ./nixpkgs --to abc1234
+```
+
 ## Development
 
 ```bash

@@ -374,6 +374,20 @@ impl NixpkgsRepo {
     /// Uses force checkout to handle conflicts when switching between
     /// commits with very different file structures.
     pub fn checkout_commit(&self, hash: &str) -> Result<()> {
+        // Remove any stale index.lock file that might be left from a crashed process
+        self.remove_index_lock();
+
+        // Try libgit2 first (faster)
+        if let Ok(()) = self.checkout_commit_libgit2(hash) {
+            return Ok(());
+        }
+
+        // Fall back to command-line git (more robust with directory changes)
+        self.checkout_commit_cli(hash)
+    }
+
+    /// Checkout using libgit2 (faster but can fail with complex directory changes).
+    fn checkout_commit_libgit2(&self, hash: &str) -> Result<()> {
         let oid = Oid::from_str(hash).map_err(|_| {
             NxvError::Git(git2::Error::from_str(&format!(
                 "Invalid commit hash: {}",
@@ -384,16 +398,67 @@ impl NixpkgsRepo {
         let commit = self.repo.find_commit(oid)?;
         let tree = commit.tree()?;
 
-        // Use force checkout to avoid conflicts
+        // Use force checkout with aggressive options to handle dirty state
         let mut checkout_opts = git2::build::CheckoutBuilder::new();
         checkout_opts.force();
         checkout_opts.remove_untracked(true);
+        checkout_opts.remove_ignored(true);
+        checkout_opts.recreate_missing(true);
 
         self.repo
             .checkout_tree(tree.as_object(), Some(&mut checkout_opts))?;
         self.repo.set_head_detached(oid)?;
 
         Ok(())
+    }
+
+    /// Checkout using command-line git (slower but more robust).
+    fn checkout_commit_cli(&self, hash: &str) -> Result<()> {
+        let repo_path = self.path();
+
+        // Run git clean first to remove any untracked files/directories
+        let clean_output = Command::new("git")
+            .args(["clean", "-fdx"])
+            .current_dir(repo_path)
+            .output();
+
+        if let Err(e) = clean_output {
+            return Err(NxvError::Git(git2::Error::from_str(&format!(
+                "Failed to run git clean: {}",
+                e
+            ))));
+        }
+
+        // Then checkout the commit
+        let output = Command::new("git")
+            .args(["checkout", "-f", hash])
+            .current_dir(repo_path)
+            .output()
+            .map_err(|e| {
+                NxvError::Git(git2::Error::from_str(&format!(
+                    "Failed to run git checkout: {}",
+                    e
+                )))
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(NxvError::Git(git2::Error::from_str(&format!(
+                "git checkout failed: {}",
+                stderr.lines().take(3).collect::<Vec<_>>().join(" ")
+            ))));
+        }
+
+        Ok(())
+    }
+
+    /// Remove stale index.lock file if it exists.
+    fn remove_index_lock(&self) {
+        let git_dir = self.repo.path();
+        let lock_file = git_dir.join("index.lock");
+        if lock_file.exists() {
+            let _ = std::fs::remove_file(&lock_file);
+        }
     }
 
     /// Get the current HEAD commit hash.
@@ -587,6 +652,98 @@ impl NixpkgsRepo {
 
         for name in worktrees {
             let _ = self.remove_worktree(&name);
+        }
+
+        Ok(())
+    }
+
+    /// Fetch from origin.
+    pub fn fetch_origin(&self) -> Result<()> {
+        let output = Command::new("git")
+            .args(["fetch", "origin"])
+            .current_dir(&self.path)
+            .output()
+            .map_err(|e| {
+                NxvError::Git(git2::Error::from_str(&format!(
+                    "Failed to run git fetch: {}",
+                    e
+                )))
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(NxvError::Git(git2::Error::from_str(&format!(
+                "git fetch failed: {}",
+                stderr.lines().take(3).collect::<Vec<_>>().join(" ")
+            ))));
+        }
+
+        Ok(())
+    }
+
+    /// Reset the repository to a clean state.
+    ///
+    /// This performs a hard reset to the specified ref (default: origin/master),
+    /// and cleans all untracked files. Useful for recovering from a messy state
+    /// after interrupted operations.
+    pub fn reset_hard(&self, target: Option<&str>) -> Result<()> {
+        // Remove any stale lock files
+        self.remove_index_lock();
+
+        let target_ref = target.unwrap_or("origin/master");
+
+        // First, try to abort any in-progress operations
+        let _ = Command::new("git")
+            .args(["merge", "--abort"])
+            .current_dir(&self.path)
+            .output();
+        let _ = Command::new("git")
+            .args(["rebase", "--abort"])
+            .current_dir(&self.path)
+            .output();
+        let _ = Command::new("git")
+            .args(["cherry-pick", "--abort"])
+            .current_dir(&self.path)
+            .output();
+
+        // Reset to target ref
+        let output = Command::new("git")
+            .args(["reset", "--hard", target_ref])
+            .current_dir(&self.path)
+            .output()
+            .map_err(|e| {
+                NxvError::Git(git2::Error::from_str(&format!(
+                    "Failed to run git reset: {}",
+                    e
+                )))
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(NxvError::Git(git2::Error::from_str(&format!(
+                "git reset failed: {}",
+                stderr.lines().take(3).collect::<Vec<_>>().join(" ")
+            ))));
+        }
+
+        // Clean untracked files and directories
+        let output = Command::new("git")
+            .args(["clean", "-fdx"])
+            .current_dir(&self.path)
+            .output()
+            .map_err(|e| {
+                NxvError::Git(git2::Error::from_str(&format!(
+                    "Failed to run git clean: {}",
+                    e
+                )))
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(NxvError::Git(git2::Error::from_str(&format!(
+                "git clean failed: {}",
+                stderr.lines().take(3).collect::<Vec<_>>().join(" ")
+            ))));
         }
 
         Ok(())
@@ -793,11 +950,15 @@ mod tests {
         // This test uses the real nixpkgs submodule if it exists
         let nixpkgs_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("nixpkgs");
 
-        if !nixpkgs_path.exists() || !nixpkgs_path.join("pkgs").exists() {
-            // Skip if nixpkgs submodule isn't present
+        // Check if nixpkgs submodule is properly initialized (has .git file/dir and pkgs/)
+        let has_git = nixpkgs_path.join(".git").exists();
+        let has_pkgs = nixpkgs_path.join("pkgs").exists();
+
+        if !has_git || !has_pkgs {
+            // Skip if nixpkgs submodule isn't properly initialized
             eprintln!(
-                "Skipping: nixpkgs submodule not present at {:?}",
-                nixpkgs_path
+                "Skipping: nixpkgs submodule not properly initialized at {:?} (has_git={}, has_pkgs={})",
+                nixpkgs_path, has_git, has_pkgs
             );
             return;
         }

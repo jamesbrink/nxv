@@ -18,6 +18,8 @@ use crate::index::git::NixpkgsRepo;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Result of a backfill operation.
 #[derive(Debug, Default)]
@@ -32,6 +34,8 @@ pub struct BackfillResult {
     pub homepages_filled: usize,
     /// Number of commits processed (historical mode only).
     pub commits_processed: usize,
+    /// Whether the operation was interrupted.
+    pub was_interrupted: bool,
 }
 
 /// Configuration for backfill operation.
@@ -58,16 +62,22 @@ impl Default for BackfillConfig {
     }
 }
 
+/// Create a shutdown flag for graceful interruption.
+pub fn create_shutdown_flag() -> Arc<AtomicBool> {
+    Arc::new(AtomicBool::new(false))
+}
+
 /// Run backfill to update missing metadata.
 pub fn run_backfill<P: AsRef<Path>, Q: AsRef<Path>>(
     nixpkgs_path: P,
     db_path: Q,
     config: BackfillConfig,
+    shutdown_flag: Arc<AtomicBool>,
 ) -> Result<BackfillResult> {
     if config.use_history {
-        run_backfill_historical(nixpkgs_path, db_path, config)
+        run_backfill_historical(nixpkgs_path, db_path, config, shutdown_flag)
     } else {
-        run_backfill_head(nixpkgs_path, db_path, config)
+        run_backfill_head(nixpkgs_path, db_path, config, shutdown_flag)
     }
 }
 
@@ -76,6 +86,7 @@ fn run_backfill_head<P: AsRef<Path>, Q: AsRef<Path>>(
     nixpkgs_path: P,
     db_path: Q,
     config: BackfillConfig,
+    shutdown_flag: Arc<AtomicBool>,
 ) -> Result<BackfillResult> {
     let nixpkgs_path = nixpkgs_path.as_ref();
     let db = Database::open(&db_path)?;
@@ -135,6 +146,13 @@ fn run_backfill_head<P: AsRef<Path>, Q: AsRef<Path>>(
     );
 
     for batch in attr_list.chunks(batch_size) {
+        // Check for interruption
+        if shutdown_flag.load(Ordering::SeqCst) {
+            result.was_interrupted = true;
+            progress.finish_with_message("Interrupted");
+            return Ok(result);
+        }
+
         let batch_vec: Vec<String> = batch.to_vec();
 
         // Extract from x86_64-linux (most common)
@@ -187,6 +205,7 @@ fn run_backfill_historical<P: AsRef<Path>, Q: AsRef<Path>>(
     nixpkgs_path: P,
     db_path: Q,
     config: BackfillConfig,
+    shutdown_flag: Arc<AtomicBool>,
 ) -> Result<BackfillResult> {
     let nixpkgs_path = nixpkgs_path.as_ref();
     let db = Database::open(&db_path)?;
@@ -258,6 +277,17 @@ fn run_backfill_historical<P: AsRef<Path>, Q: AsRef<Path>>(
     // Process commits in batches - group nearby commits to reduce checkouts
     // For now, process each commit individually (can optimize later)
     for (commit, attr_paths) in &packages_by_commit {
+        // Check for interruption
+        if shutdown_flag.load(Ordering::SeqCst) {
+            result.was_interrupted = true;
+            // Restore original ref before returning
+            if let Err(e) = repo.restore_ref(&original_ref) {
+                progress.println(format!("Warning: Failed to restore git state: {}", e));
+            }
+            progress.finish_with_message("Interrupted");
+            return Ok(result);
+        }
+
         // Checkout the commit
         if let Err(e) = repo.checkout_commit(commit) {
             progress.println(format!(

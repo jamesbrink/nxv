@@ -45,6 +45,8 @@ fn main() {
         Commands::Index(args) => cmd_index(&cli, args),
         #[cfg(feature = "indexer")]
         Commands::Backfill(args) => cmd_backfill(&cli, args),
+        #[cfg(feature = "indexer")]
+        Commands::Reset(args) => cmd_reset(&cli, args),
         Commands::Serve(args) => cmd_serve(&cli, args),
     };
 
@@ -828,7 +830,8 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
 
 #[cfg(feature = "indexer")]
 fn cmd_backfill(cli: &Cli, args: &cli::BackfillArgs) -> Result<()> {
-    use crate::index::backfill::{BackfillConfig, run_backfill};
+    use crate::index::backfill::{BackfillConfig, create_shutdown_flag, run_backfill};
+    use std::sync::atomic::Ordering;
 
     if args.history {
         eprintln!(
@@ -849,10 +852,23 @@ fn cmd_backfill(cli: &Cli, args: &cli::BackfillArgs) -> Result<()> {
         use_history: args.history,
     };
 
-    let result = run_backfill(&args.nixpkgs_path, &cli.db_path, config)?;
+    // Set up Ctrl+C handler
+    let shutdown_flag = create_shutdown_flag();
+    let flag_clone = shutdown_flag.clone();
+    ctrlc::set_handler(move || {
+        eprintln!("\nReceived Ctrl+C, requesting graceful shutdown...");
+        flag_clone.store(true, Ordering::SeqCst);
+    })
+    .expect("Error setting Ctrl+C handler");
+
+    let result = run_backfill(&args.nixpkgs_path, &cli.db_path, config, shutdown_flag)?;
 
     eprintln!();
-    eprintln!("Backfill complete!");
+    if result.was_interrupted {
+        eprintln!("Backfill interrupted!");
+    } else {
+        eprintln!("Backfill complete!");
+    }
     eprintln!("  Packages checked: {}", result.packages_checked);
     if args.history {
         eprintln!("  Commits processed: {}", result.commits_processed);
@@ -863,6 +879,42 @@ fn cmd_backfill(cli: &Cli, args: &cli::BackfillArgs) -> Result<()> {
         result.source_paths_filled
     );
     eprintln!("  homepage fields filled: {}", result.homepages_filled);
+
+    if result.was_interrupted {
+        eprintln!();
+        eprintln!("Note: Backfill was interrupted. Run again to continue.");
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "indexer")]
+fn cmd_reset(_cli: &Cli, args: &cli::ResetArgs) -> Result<()> {
+    use crate::index::git::NixpkgsRepo;
+
+    eprintln!("Resetting nixpkgs repository at {:?}", args.nixpkgs_path);
+
+    let repo = NixpkgsRepo::open(&args.nixpkgs_path)?;
+
+    if args.fetch {
+        eprintln!("Fetching from origin...");
+        repo.fetch_origin()?;
+        eprintln!("Fetch complete.");
+    }
+
+    let target = args.to.as_deref();
+    let target_display = target.unwrap_or("origin/master");
+    eprintln!("Resetting to {}...", target_display);
+
+    repo.reset_hard(target)?;
+
+    eprintln!("Reset complete.");
+    eprintln!("  Repository is now at: {}", target_display);
+
+    // Show current HEAD
+    if let Ok(head) = repo.head_commit() {
+        eprintln!("  HEAD: {}", &head[..12.min(head.len())]);
+    }
 
     Ok(())
 }

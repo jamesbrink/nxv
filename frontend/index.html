@@ -791,6 +791,13 @@
     const loadStats = async () => {
       try {
         const res = await fetch(`${API_BASE}/stats`);
+
+        if (!res.ok) {
+          const errorBody = await res.text();
+          console.error(`Failed to load stats: HTTP ${res.status}`, errorBody);
+          return;
+        }
+
         const { data } = await res.json();
 
         document.getElementById('statPackages').textContent = formatNumber(data.unique_names);

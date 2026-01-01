@@ -29,11 +29,11 @@ pub fn get_index_path() -> PathBuf {
 ///
 /// ```
 /// std::env::remove_var("NXV_BLOOM_PATH");
-/// let path = crate::paths::get_bloom_path();
+/// let path = nxv::paths::get_bloom_path();
 /// assert!(path.ends_with("index.bloom"));
 ///
 /// std::env::set_var("NXV_BLOOM_PATH", "/tmp/custom.bloom");
-/// let overridden = crate::paths::get_bloom_path();
+/// let overridden = nxv::paths::get_bloom_path();
 /// assert_eq!(overridden, std::path::PathBuf::from("/tmp/custom.bloom"));
 /// ```
 pub fn get_bloom_path() -> PathBuf {

@@ -125,7 +125,7 @@ impl Backend {
             }
             Backend::Remote(client) => {
                 if version.is_some() {
-                    client.search_by_name_version(package, version)
+                    client.search_by_name_version(package, version, None)
                 } else {
                     // Try exact attribute path first
                     let by_attr = client.get_package(package)?;

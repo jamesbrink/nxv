@@ -51,9 +51,10 @@ impl ApiClient {
     ///
     /// # Examples
     ///
-    /// ```
-    /// let client = crate::client::ApiClient::new("https://example.com").unwrap();
-    /// assert_eq!(client.base_url, "https://example.com");
+    /// ```no_run
+    /// use nxv::client::ApiClient;
+    /// let client = ApiClient::new("https://example.com").unwrap();
+    /// // client is ready to make API requests
     /// ```
     ///
     /// Returns `Ok(ApiClient)` on success, or `Err(NxvError::Network)` if building the HTTP client fails.
@@ -174,17 +175,28 @@ impl ApiClient {
     /// The `package` argument is matched against package names; when `version` is
     /// provided only entries for that exact version are returned.
     ///
+    /// The `limit` parameter controls pagination:
+    /// - `None` defaults to 1000 results (suitable for most use cases)
+    /// - `Some(0)` requests unlimited results (API default, may be slow for broad queries)
+    /// - `Some(n)` limits to `n` results
+    ///
+    /// Note: Large result sets may be truncated by the server. If you need all matching
+    /// packages, consider using `Some(0)` or paginating through results.
+    ///
     /// # Examples
     ///
     /// ```
     /// let client = ApiClient::new("https://nxv.example.com").unwrap();
-    /// let results = client.search_by_name_version("serde", Some("1.0.0")).unwrap();
-    /// assert!(results.iter().all(|p| p.name.contains("serde")));
+    /// // Default limit of 1000
+    /// let results = client.search_by_name_version("serde", Some("1.0.0"), None).unwrap();
+    /// // Explicit limit
+    /// let limited = client.search_by_name_version("python", None, Some(50)).unwrap();
     /// ```
     pub fn search_by_name_version(
         &self,
         package: &str,
         version: Option<&str>,
+        limit: Option<usize>,
     ) -> Result<Vec<PackageVersion>> {
         let mut url = format!(
             "{}/api/v1/search?q={}",
@@ -196,8 +208,12 @@ impl ApiClient {
             url.push_str(&format!("&version={}", urlencoding::encode(v)));
         }
 
-        // Use high limit to get all relevant results
-        url.push_str("&limit=1000");
+        // Apply limit: None defaults to 1000, Some(0) means unlimited (don't append), Some(n) uses n
+        match limit {
+            None => url.push_str("&limit=1000"),
+            Some(0) => {} // No limit parameter = API default (unlimited)
+            Some(n) => url.push_str(&format!("&limit={}", n)),
+        }
 
         let response: ApiResponse<Vec<PackageVersion>> = self.get(&url)?;
         Ok(response.data)

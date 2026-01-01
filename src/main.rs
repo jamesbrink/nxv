@@ -830,12 +830,23 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
 fn cmd_backfill(cli: &Cli, args: &cli::BackfillArgs) -> Result<()> {
     use crate::index::backfill::{BackfillConfig, run_backfill};
 
-    eprintln!("Backfilling metadata from {:?}", args.nixpkgs_path);
+    if args.history {
+        eprintln!(
+            "Backfilling metadata from {:?} (historical mode)",
+            args.nixpkgs_path
+        );
+    } else {
+        eprintln!(
+            "Backfilling metadata from {:?} (HEAD mode)",
+            args.nixpkgs_path
+        );
+    }
 
     let config = BackfillConfig {
         fields: args.fields.clone().unwrap_or_default(),
         limit: args.limit,
         dry_run: args.dry_run,
+        use_history: args.history,
     };
 
     let result = run_backfill(&args.nixpkgs_path, &cli.db_path, config)?;
@@ -843,6 +854,9 @@ fn cmd_backfill(cli: &Cli, args: &cli::BackfillArgs) -> Result<()> {
     eprintln!();
     eprintln!("Backfill complete!");
     eprintln!("  Packages checked: {}", result.packages_checked);
+    if args.history {
+        eprintln!("  Commits processed: {}", result.commits_processed);
+    }
     eprintln!("  Records updated: {}", result.records_updated);
     eprintln!(
         "  source_path fields filled: {}",

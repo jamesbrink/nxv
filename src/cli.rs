@@ -268,6 +268,11 @@ pub struct BackfillArgs {
     /// Dry run - show what would be updated without making changes.
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Traverse git history to extract metadata from original commits.
+    /// Without this flag, metadata is extracted from current nixpkgs HEAD only.
+    #[arg(long)]
+    pub history: bool,
 }
 
 /// Output format argument.

@@ -85,6 +85,18 @@ cargo build --release --features indexer
 nxv index --nixpkgs-path ./nixpkgs --full
 ```
 
+### Backfilling Metadata
+
+Update missing `source_path` and `homepage` fields without rebuilding:
+
+```bash
+# Fast: extract from current nixpkgs HEAD
+nxv backfill --nixpkgs-path ./nixpkgs
+
+# Accurate: traverse git history to original commits
+nxv backfill --nixpkgs-path ./nixpkgs --history
+```
+
 ## Development
 
 ```bash

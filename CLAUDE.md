@@ -45,6 +45,9 @@ The `indexer` feature enables building indexes from a local nixpkgs clone:
 - `git.rs`: Walks nixpkgs git history (commits from 2017+)
 - `extractor.rs`: Runs `nix eval` to extract package metadata per commit
 - `mod.rs`: Coordinates indexing with checkpointing for Ctrl+C resilience
+- `backfill.rs`: Updates missing metadata (source_path, homepage) for existing records
+  - HEAD mode: Fast extraction from current nixpkgs (may miss renamed/removed packages)
+  - Historical mode (`--history`): Traverses git to original commits for accuracy
 
 ### Database Schema (`db/mod.rs`)
 

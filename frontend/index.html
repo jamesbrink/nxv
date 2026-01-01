@@ -1065,9 +1065,13 @@
 
       try {
         const res = await fetch(`${API_BASE}/packages/${encodeURIComponent(attr)}/history`);
+        if (!res.ok) {
+          body.innerHTML = `<p>Failed to load version history (HTTP ${res.status})</p>`;
+          return;
+        }
         const { data } = await res.json();
 
-        if (data.length === 0) {
+        if (!data || data.length === 0) {
           body.innerHTML = '<p>No version history found.</p>';
           return;
         }
@@ -1086,10 +1090,12 @@
         );
 
         // Store expressions in the map for history items
+        // Use escapeHtml(attr) to match the data-id attribute in the rendered HTML
+        const escapedAttr = escapeHtml(attr);
         versionsWithHashes.forEach(v => {
           if (v.commit_hash) {
             const nixExpr = `(import (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/${v.commit_hash}.tar.gz") {}).${attr}`;
-            expressionStore.set(`history-${attr}-${v.idx}`, nixExpr);
+            expressionStore.set(`history-${escapedAttr}-${v.idx}`, nixExpr);
           }
         });
 

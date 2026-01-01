@@ -27,11 +27,12 @@ use std::time::Duration;
 
 use axum::{
     Router,
-    http::header,
+    http::{HeaderValue, header},
     response::{Html, IntoResponse},
     routing::get,
 };
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 use utoipa::OpenApi;
 use utoipa_scalar::{Scalar, Servable};
@@ -129,7 +130,13 @@ pub struct ServerConfig {
 /// // router can now be served with Axum.
 /// ```
 fn build_router(state: Arc<AppState>, cors: Option<CorsLayer>) -> Router {
-    let api_routes = Router::new()
+    // Cache header values
+    let cache_1h = HeaderValue::from_static("public, max-age=3600"); // 1 hour
+    let cache_24h = HeaderValue::from_static("public, max-age=86400"); // 24 hours
+    let no_cache = HeaderValue::from_static("no-cache, no-store, must-revalidate");
+
+    // Cacheable API routes (1 hour) - package data changes infrequently
+    let cacheable_api_routes = Router::new()
         .route("/search", get(handlers::search_packages))
         .route("/search/description", get(handlers::search_description))
         .route("/packages/{attr}", get(handlers::get_package))
@@ -150,9 +157,26 @@ fn build_router(state: Arc<AppState>, cors: Option<CorsLayer>) -> Router {
             get(handlers::get_last_occurrence),
         )
         .route("/stats", get(handlers::get_stats))
-        .route("/health", get(handlers::health_check));
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::CACHE_CONTROL,
+            cache_1h,
+        ));
 
-    let mut app = Router::new()
+    // Health check - never cache (for load balancer checks)
+    let health_route = Router::new()
+        .route("/health", get(handlers::health_check))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::CACHE_CONTROL,
+            no_cache,
+        ));
+
+    // Combine API routes
+    let api_routes = Router::new()
+        .merge(cacheable_api_routes)
+        .merge(health_route);
+
+    // Static assets with long cache (24 hours)
+    let static_routes = Router::new()
         .route("/", get(|| async { Html(FRONTEND_HTML) }))
         .route(
             "/favicon.svg",
@@ -166,12 +190,19 @@ fn build_router(state: Arc<AppState>, cors: Option<CorsLayer>) -> Router {
                 ([(header::CONTENT_TYPE, "image/svg+xml")], FAVICON_SVG).into_response()
             }),
         )
-        .nest("/api/v1", api_routes)
         .merge(Scalar::with_url("/docs", openapi::ApiDoc::openapi()))
         .route(
             "/openapi.json",
             get(|| async { axum::Json(openapi::ApiDoc::openapi()) }),
         )
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::CACHE_CONTROL,
+            cache_24h,
+        ));
+
+    let mut app = Router::new()
+        .merge(static_routes)
+        .nest("/api/v1", api_routes)
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 

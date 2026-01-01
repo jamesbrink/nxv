@@ -330,7 +330,10 @@ pub fn extract_packages_for_attrs<P: AsRef<Path>>(
             let attr_file = temp_dir.path().join("attrs.json");
             let json = serde_json::to_string(attr_names)?;
             std::fs::write(&attr_file, &json)?;
-            format!("builtins.fromJSON (builtins.readFile {})", attr_file.display())
+            format!(
+                "builtins.fromJSON (builtins.readFile {})",
+                attr_file.display()
+            )
         } else {
             let items: Vec<String> = attr_names.iter().map(|s| format!("\"{}\"", s)).collect();
             format!("[ {} ]", items.join(" "))

@@ -64,6 +64,36 @@ nxv serve --host 0.0.0.0 --port 3000 --cors
 
 Endpoints: `/api/v1/search`, `/api/v1/packages/{attr}`, `/api/v1/stats`, `/docs`
 
+### NixOS Module
+
+Run the API server as a systemd service:
+
+```nix
+{
+  inputs.nxv.url = "github:jamesbrink/nxv";
+
+  outputs = { nixpkgs, nxv, ... }: {
+    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+      modules = [
+        nxv.nixosModules.default
+        {
+          services.nxv = {
+            enable = true;
+            host = "0.0.0.0";
+            port = 8080;
+            cors.enable = true;
+            openFirewall = true;
+            autoUpdate.enable = true;  # daily index updates
+          };
+        }
+      ];
+    };
+  };
+}
+```
+
+The module creates a dedicated user, applies systemd hardening, and optionally manages automatic index updates.
+
 ## Remote API
 
 Point the CLI at a remote server instead of local database:

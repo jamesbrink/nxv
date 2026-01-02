@@ -22,17 +22,33 @@
 #     };
 #   }
 
+# The module takes an optional flakePackages argument that is passed from
+# the flake. This is a function from system to package, allowing the module
+# to work without requiring the overlay.
+{ flakePackages ? null }:
+
 { config, lib, pkgs, ... }:
 
 let
   cfg = config.services.nxv;
-  inherit (lib) mkEnableOption mkOption mkIf mkPackageOption types;
+  inherit (lib) mkEnableOption mkOption mkIf types;
+
+  # Use the package from the flake if provided, otherwise fall back to pkgs.nxv
+  defaultPkg =
+    if flakePackages != null && flakePackages ? ${pkgs.system}
+    then flakePackages.${pkgs.system}.nxv
+    else pkgs.nxv or (throw "nxv package not found. Either use the nxv overlay or set services.nxv.package.");
 in
 {
   options.services.nxv = {
     enable = mkEnableOption "nxv API server for querying Nix package versions";
 
-    package = mkPackageOption pkgs "nxv" { };
+    package = mkOption {
+      type = types.package;
+      default = defaultPkg;
+      defaultText = lib.literalExpression "pkgs.nxv";
+      description = "The nxv package to use.";
+    };
 
     host = mkOption {
       type = types.str;

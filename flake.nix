@@ -20,7 +20,8 @@
       };
 
       # NixOS module for running nxv as a service
-      nixosModules.default = import ./nix/module.nix;
+      # The module is passed the flake's packages so it works without the overlay
+      nixosModules.default = import ./nix/module.nix { flakePackages = self.packages; };
       nixosModules.nxv = self.nixosModules.default;
     } // flake-utils.lib.eachDefaultSystem (system:
       let

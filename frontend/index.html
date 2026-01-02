@@ -1,826 +1,929 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>nxv - Nix Version Search</title>
-  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-  <style>
-    :root {
-      --bg: #0d1117;
-      --bg-secondary: #161b22;
-      --bg-tertiary: #21262d;
-      --border: #30363d;
-      --text: #e6edf3;
-      --text-muted: #8b949e;
-      --accent: #58a6ff;
-      --accent-hover: #79b8ff;
-      --success: #388bfd;
-      --warning: #d29922;
-      --error: #f85149;
-      --radius: 8px;
-      --shadow: 0 8px 24px rgba(0,0,0,0.4);
-    }
-
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-    }
-
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
-      background: var(--bg);
-      color: var(--text);
-      min-height: 100vh;
-      line-height: 1.5;
-    }
-
-    .container {
-      max-width: 1200px;
-      margin: 0 auto;
-      padding: 2rem 1rem;
-    }
-
-    header {
-      text-align: center;
-      margin-bottom: 2rem;
-    }
-
-    .logo {
-      font-size: 3rem;
-      font-weight: 700;
-      letter-spacing: -0.05em;
-      background: linear-gradient(135deg, var(--accent), #a371f7);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      background-clip: text;
-    }
-
-    .tagline {
-      color: var(--text-muted);
-      margin-top: 0.5rem;
-      font-size: 1.1rem;
-    }
-
-    .search-container {
-      max-width: 700px;
-      margin: 0 auto 2rem;
-    }
-
-    .search-box {
-      display: flex;
-      gap: 0.5rem;
-      background: var(--bg-secondary);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 0.5rem;
-      transition: border-color 0.2s;
-    }
-
-    .search-box:focus-within {
-      border-color: var(--accent);
-    }
-
-    .search-input {
-      flex: 1;
-      background: transparent;
-      border: none;
-      color: var(--text);
-      font-size: 1.1rem;
-      padding: 0.75rem;
-      outline: none;
-    }
-
-    .search-input::placeholder {
-      color: var(--text-muted);
-    }
-
-    .search-btn {
-      background: var(--accent);
-      color: var(--bg);
-      border: none;
-      padding: 0.75rem 1.5rem;
-      border-radius: calc(var(--radius) - 2px);
-      font-weight: 600;
-      cursor: pointer;
-      transition: background 0.2s;
-    }
-
-    .search-btn:hover {
-      background: var(--accent-hover);
-    }
-
-    .search-options {
-      display: flex;
-      gap: 1rem;
-      margin-top: 0.75rem;
-      flex-wrap: wrap;
-      justify-content: center;
-    }
-
-    .search-option {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      color: var(--text-muted);
-      font-size: 0.9rem;
-    }
-
-    .search-option input,
-    .search-option select {
-      background: var(--bg-tertiary);
-      border: 1px solid var(--border);
-      color: var(--text);
-      padding: 0.35rem 0.5rem;
-      border-radius: 4px;
-      font-size: 0.85rem;
-    }
-
-    .search-option select {
-      cursor: pointer;
-    }
-
-    .stats-bar {
-      display: flex;
-      justify-content: center;
-      gap: 2rem;
-      padding: 1rem;
-      background: var(--bg-secondary);
-      border-radius: var(--radius);
-      margin-bottom: 2rem;
-      flex-wrap: wrap;
-    }
-
-    .stat {
-      text-align: center;
-    }
-
-    .stat-value {
-      font-size: 1.5rem;
-      font-weight: 700;
-      color: var(--accent);
-    }
-
-    .stat-label {
-      font-size: 0.85rem;
-      color: var(--text-muted);
-    }
-
-    .results-info {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 1rem;
-      color: var(--text-muted);
-      font-size: 0.9rem;
-    }
-
-    .results-grid {
-      display: grid;
-      gap: 1rem;
-    }
-
-    .result-card {
-      background: var(--bg-secondary);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 1.25rem;
-      transition: border-color 0.2s;
-    }
-
-    .result-card:hover {
-      border-color: var(--accent);
-    }
-
-    .result-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: flex-start;
-      gap: 1rem;
-      margin-bottom: 0.75rem;
-    }
-
-    .result-name {
-      font-size: 1.1rem;
-      font-weight: 600;
-      color: var(--accent);
-      word-break: break-word;
-    }
-
-    .result-version {
-      background: var(--bg-tertiary);
-      padding: 0.25rem 0.75rem;
-      border-radius: 999px;
-      font-size: 0.85rem;
-      font-weight: 500;
-      white-space: nowrap;
-    }
-
-    .result-attr {
-      font-family: 'SF Mono', Monaco, monospace;
-      font-size: 0.85rem;
-      color: var(--text-muted);
-      margin-bottom: 0.5rem;
-    }
-
-    .result-desc {
-      color: var(--text-muted);
-      font-size: 0.9rem;
-      margin-bottom: 1rem;
-      display: -webkit-box;
-      -webkit-line-clamp: 2;
-      line-clamp: 2;
-      -webkit-box-orient: vertical;
-      overflow: hidden;
-    }
-
-    .result-meta {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 1rem;
-      font-size: 0.8rem;
-      color: var(--text-muted);
-      margin-bottom: 1rem;
-    }
-
-    .result-meta-item {
-      display: flex;
-      align-items: center;
-      gap: 0.35rem;
-    }
-
-    .result-actions {
-      display: flex;
-      gap: 0.5rem;
-      flex-wrap: wrap;
-    }
-
-    .btn {
-      background: var(--bg-tertiary);
-      border: 1px solid var(--border);
-      color: var(--text);
-      padding: 0.5rem 0.75rem;
-      border-radius: 6px;
-      font-size: 0.8rem;
-      cursor: pointer;
-      transition: all 0.2s;
-      display: inline-flex;
-      align-items: center;
-      gap: 0.35rem;
-      text-decoration: none;
-    }
-
-    .btn:hover {
-      border-color: var(--accent);
-      color: var(--accent);
-    }
-
-    .btn-primary {
-      background: var(--accent);
-      border-color: var(--accent);
-      color: var(--bg);
-    }
-
-    .btn-primary:hover {
-      background: var(--accent-hover);
-      border-color: var(--accent-hover);
-      color: var(--bg);
-    }
-
-    .btn-copied {
-      background: var(--success);
-      border-color: var(--success);
-      color: var(--bg);
-    }
-
-    .loading {
-      text-align: center;
-      padding: 3rem;
-      color: var(--text-muted);
-    }
-
-    .spinner {
-      width: 40px;
-      height: 40px;
-      border: 3px solid var(--border);
-      border-top-color: var(--accent);
-      border-radius: 50%;
-      animation: spin 1s linear infinite;
-      margin: 0 auto 1rem;
-    }
-
-    @keyframes spin {
-      to { transform: rotate(360deg); }
-    }
-
-    .empty-state {
-      text-align: center;
-      padding: 3rem;
-      color: var(--text-muted);
-    }
-
-    .empty-state svg {
-      width: 64px;
-      height: 64px;
-      margin-bottom: 1rem;
-      opacity: 0.5;
-    }
-
-    .error-state {
-      text-align: center;
-      padding: 2rem;
-      background: rgba(248, 81, 73, 0.1);
-      border: 1px solid var(--error);
-      border-radius: var(--radius);
-      color: var(--error);
-    }
-
-    .pagination {
-      display: flex;
-      justify-content: center;
-      gap: 0.5rem;
-      margin-top: 2rem;
-    }
-
-    .modal-overlay {
-      position: fixed;
-      inset: 0;
-      background: rgba(0, 0, 0, 0.75);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 1rem;
-      z-index: 1000;
-      opacity: 0;
-      visibility: hidden;
-      transition: all 0.2s;
-    }
-
-    .modal-overlay.active {
-      opacity: 1;
-      visibility: visible;
-    }
-
-    .modal {
-      background: var(--bg-secondary);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      max-width: 700px;
-      width: 100%;
-      max-height: 80vh;
-      overflow: hidden;
-      display: flex;
-      flex-direction: column;
-      box-shadow: var(--shadow);
-      transform: scale(0.95);
-      transition: transform 0.2s;
-    }
-
-    .modal-overlay.active .modal {
-      transform: scale(1);
-    }
-
-    .modal-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 1rem 1.25rem;
-      border-bottom: 1px solid var(--border);
-    }
-
-    .modal-title {
-      font-size: 1.1rem;
-      font-weight: 600;
-    }
-
-    .modal-close {
-      background: none;
-      border: none;
-      color: var(--text-muted);
-      cursor: pointer;
-      padding: 0.5rem;
-      font-size: 1.25rem;
-      line-height: 1;
-    }
-
-    .modal-close:hover {
-      color: var(--text);
-    }
-
-    .modal-body {
-      padding: 1.25rem;
-      overflow-y: auto;
-    }
-
-    .version-list {
-      display: grid;
-      gap: 0.75rem;
-    }
-
-    .version-item {
-      display: flex;
-      justify-content: space-between;
-      align-items: flex-start;
-      padding: 0.75rem 1rem;
-      background: var(--bg-tertiary);
-      border-radius: 6px;
-      gap: 1rem;
-    }
-
-    .version-info {
-      flex: 1;
-      min-width: 0;
-    }
-
-    .version-number {
-      font-weight: 600;
-      margin-bottom: 0.25rem;
-    }
-
-    .version-dates {
-      font-size: 0.8rem;
-      color: var(--text-muted);
-    }
-
-    .version-commit {
-      font-family: 'SF Mono', Monaco, monospace;
-      font-size: 0.75rem;
-      color: var(--text-muted);
-      margin-top: 0.25rem;
-    }
-
-    .version-item .btn {
-      flex-shrink: 0;
-      margin-top: 0.25rem;
-    }
-
-    .platform-badges {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 0.5rem;
-      margin: 0.75rem 0;
-    }
-
-    .platform-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.4rem;
-      background: var(--bg);
-      border: 1px solid var(--border);
-      padding: 0.3rem 0.6rem;
-      border-radius: 4px;
-      font-size: 0.7rem;
-      color: var(--text-muted);
-      font-family: 'SF Mono', Monaco, monospace;
-    }
-
-    .platform-badge svg {
-      opacity: 0.6;
-      flex-shrink: 0;
-    }
-
-    .platform-badge.highlighted {
-      background: var(--accent);
-      border-color: var(--accent);
-      color: var(--bg);
-    }
-
-    .platform-badge.highlighted svg {
-      opacity: 1;
-    }
-
-    .code-block {
-      background: var(--bg);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 1rem;
-      font-family: 'SF Mono', Monaco, monospace;
-      font-size: 0.85rem;
-      overflow-x: auto;
-      position: relative;
-    }
-
-    .code-block .copy-btn {
-      position: absolute;
-      top: 0.5rem;
-      right: 0.5rem;
-    }
-
-    footer {
-      text-align: center;
-      padding: 2rem;
-      color: var(--text-muted);
-      font-size: 0.85rem;
-    }
-
-    footer a {
-      color: var(--accent);
-      text-decoration: none;
-    }
-
-    footer a:hover {
-      text-decoration: underline;
-    }
-
-    .toast {
-      position: fixed;
-      bottom: 1.5rem;
-      right: 1.5rem;
-      background: var(--bg-secondary);
-      border: 1px solid var(--border);
-      padding: 0.75rem 1rem;
-      border-radius: var(--radius);
-      box-shadow: var(--shadow);
-      transform: translateY(100px);
-      opacity: 0;
-      transition: all 0.3s;
-      z-index: 1001;
-    }
-
-    .toast.show {
-      transform: translateY(0);
-      opacity: 1;
-    }
-
-    @media (max-width: 640px) {
-      .logo { font-size: 2rem; }
-      .stats-bar { gap: 1rem; }
-      .stat-value { font-size: 1.2rem; }
-      .result-header { flex-direction: column; gap: 0.5rem; }
-      .result-actions { flex-direction: column; }
-      .btn { width: 100%; justify-content: center; }
-    }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <header>
-      <h1 class="logo">nxv</h1>
-      <p class="tagline">Find any version of any Nix package, instantly</p>
-    </header>
-
-    <div class="search-container">
-      <div class="search-box">
-        <input
-          type="text"
-          class="search-input"
-          id="searchInput"
-          placeholder="Search packages... (e.g., python, nodejs, rustc)"
-          autocomplete="off"
-        >
-        <button class="search-btn" id="searchBtn">Search</button>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>nxv - Nix Version Search</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <style>
+      :root {
+        --bg: #0d1117;
+        --bg-secondary: #161b22;
+        --bg-tertiary: #21262d;
+        --border: #30363d;
+        --text: #e6edf3;
+        --text-muted: #8b949e;
+        --accent: #58a6ff;
+        --accent-hover: #79b8ff;
+        --success: #388bfd;
+        --warning: #d29922;
+        --error: #f85149;
+        --radius: 8px;
+        --shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+      }
+
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+
+      body {
+        font-family:
+          -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        min-height: 100vh;
+        line-height: 1.5;
+      }
+
+      .container {
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: 2rem 1rem;
+      }
+
+      header {
+        text-align: center;
+        margin-bottom: 2rem;
+      }
+
+      .logo {
+        font-size: 3rem;
+        font-weight: 700;
+        letter-spacing: -0.05em;
+        background: linear-gradient(135deg, var(--accent), #a371f7);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+      }
+
+      .tagline {
+        color: var(--text-muted);
+        margin-top: 0.5rem;
+        font-size: 1.1rem;
+      }
+
+      .search-container {
+        max-width: 700px;
+        margin: 0 auto 2rem;
+      }
+
+      .search-box {
+        display: flex;
+        gap: 0.5rem;
+        background: var(--bg-secondary);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 0.5rem;
+        transition: border-color 0.2s;
+      }
+
+      .search-box:focus-within {
+        border-color: var(--accent);
+      }
+
+      .search-input {
+        flex: 1;
+        background: transparent;
+        border: none;
+        color: var(--text);
+        font-size: 1.1rem;
+        padding: 0.75rem;
+        outline: none;
+      }
+
+      .search-input::placeholder {
+        color: var(--text-muted);
+      }
+
+      .search-btn {
+        background: var(--accent);
+        color: var(--bg);
+        border: none;
+        padding: 0.75rem 1.5rem;
+        border-radius: calc(var(--radius) - 2px);
+        font-weight: 600;
+        cursor: pointer;
+        transition: background 0.2s;
+      }
+
+      .search-btn:hover {
+        background: var(--accent-hover);
+      }
+
+      .search-options {
+        display: flex;
+        gap: 1rem;
+        margin-top: 0.75rem;
+        flex-wrap: wrap;
+        justify-content: center;
+      }
+
+      .search-option {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        color: var(--text-muted);
+        font-size: 0.9rem;
+      }
+
+      .search-option input,
+      .search-option select {
+        background: var(--bg-tertiary);
+        border: 1px solid var(--border);
+        color: var(--text);
+        padding: 0.35rem 0.5rem;
+        border-radius: 4px;
+        font-size: 0.85rem;
+      }
+
+      .search-option select {
+        cursor: pointer;
+      }
+
+      .stats-bar {
+        display: flex;
+        justify-content: center;
+        gap: 2rem;
+        padding: 1rem;
+        background: var(--bg-secondary);
+        border-radius: var(--radius);
+        margin-bottom: 2rem;
+        flex-wrap: wrap;
+      }
+
+      .stat {
+        text-align: center;
+      }
+
+      .stat-value {
+        font-size: 1.5rem;
+        font-weight: 700;
+        color: var(--accent);
+      }
+
+      .stat-label {
+        font-size: 0.85rem;
+        color: var(--text-muted);
+      }
+
+      .results-info {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 1rem;
+        color: var(--text-muted);
+        font-size: 0.9rem;
+      }
+
+      .results-grid {
+        display: grid;
+        gap: 1rem;
+      }
+
+      .result-card {
+        background: var(--bg-secondary);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 1.25rem;
+        transition: border-color 0.2s;
+      }
+
+      .result-card:hover {
+        border-color: var(--accent);
+      }
+
+      .result-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 1rem;
+        margin-bottom: 0.75rem;
+      }
+
+      .result-name {
+        font-size: 1.1rem;
+        font-weight: 600;
+        color: var(--accent);
+        word-break: break-word;
+      }
+
+      .result-version {
+        background: var(--bg-tertiary);
+        padding: 0.25rem 0.75rem;
+        border-radius: 999px;
+        font-size: 0.85rem;
+        font-weight: 500;
+        white-space: nowrap;
+      }
+
+      .result-attr {
+        font-family: 'SF Mono', Monaco, monospace;
+        font-size: 0.85rem;
+        color: var(--text-muted);
+        margin-bottom: 0.5rem;
+      }
+
+      .result-desc {
+        color: var(--text-muted);
+        font-size: 0.9rem;
+        margin-bottom: 1rem;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+      }
+
+      .result-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 1rem;
+        font-size: 0.8rem;
+        color: var(--text-muted);
+        margin-bottom: 1rem;
+      }
+
+      .result-meta-item {
+        display: flex;
+        align-items: center;
+        gap: 0.35rem;
+      }
+
+      .result-actions {
+        display: flex;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+      }
+
+      .btn {
+        background: var(--bg-tertiary);
+        border: 1px solid var(--border);
+        color: var(--text);
+        padding: 0.5rem 0.75rem;
+        border-radius: 6px;
+        font-size: 0.8rem;
+        cursor: pointer;
+        transition: all 0.2s;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        text-decoration: none;
+      }
+
+      .btn:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+
+      .btn-primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: var(--bg);
+      }
+
+      .btn-primary:hover {
+        background: var(--accent-hover);
+        border-color: var(--accent-hover);
+        color: var(--bg);
+      }
+
+      .btn-copied {
+        background: var(--success);
+        border-color: var(--success);
+        color: var(--bg);
+      }
+
+      .loading {
+        text-align: center;
+        padding: 3rem;
+        color: var(--text-muted);
+      }
+
+      .spinner {
+        width: 40px;
+        height: 40px;
+        border: 3px solid var(--border);
+        border-top-color: var(--accent);
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+        margin: 0 auto 1rem;
+      }
+
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
+      .empty-state {
+        text-align: center;
+        padding: 3rem;
+        color: var(--text-muted);
+      }
+
+      .empty-state svg {
+        width: 64px;
+        height: 64px;
+        margin-bottom: 1rem;
+        opacity: 0.5;
+      }
+
+      .error-state {
+        text-align: center;
+        padding: 2rem;
+        background: rgba(248, 81, 73, 0.1);
+        border: 1px solid var(--error);
+        border-radius: var(--radius);
+        color: var(--error);
+      }
+
+      .pagination {
+        display: flex;
+        justify-content: center;
+        gap: 0.5rem;
+        margin-top: 2rem;
+      }
+
+      .modal-overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.75);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 1rem;
+        z-index: 1000;
+        opacity: 0;
+        visibility: hidden;
+        transition: all 0.2s;
+      }
+
+      .modal-overlay.active {
+        opacity: 1;
+        visibility: visible;
+      }
+
+      .modal {
+        background: var(--bg-secondary);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        max-width: 700px;
+        width: 100%;
+        max-height: 80vh;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+        box-shadow: var(--shadow);
+        transform: scale(0.95);
+        transition: transform 0.2s;
+      }
+
+      .modal-overlay.active .modal {
+        transform: scale(1);
+      }
+
+      .modal-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 1rem 1.25rem;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .modal-title {
+        font-size: 1.1rem;
+        font-weight: 600;
+      }
+
+      .modal-close {
+        background: none;
+        border: none;
+        color: var(--text-muted);
+        cursor: pointer;
+        padding: 0.5rem;
+        font-size: 1.25rem;
+        line-height: 1;
+      }
+
+      .modal-close:hover {
+        color: var(--text);
+      }
+
+      .modal-body {
+        padding: 1.25rem;
+        overflow-y: auto;
+      }
+
+      .version-list {
+        display: grid;
+        gap: 0.75rem;
+      }
+
+      .version-item {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        padding: 0.75rem 1rem;
+        background: var(--bg-tertiary);
+        border-radius: 6px;
+        gap: 1rem;
+      }
+
+      .version-info {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .version-number {
+        font-weight: 600;
+        margin-bottom: 0.25rem;
+      }
+
+      .version-dates {
+        font-size: 0.8rem;
+        color: var(--text-muted);
+      }
+
+      .version-commit {
+        font-family: 'SF Mono', Monaco, monospace;
+        font-size: 0.75rem;
+        color: var(--text-muted);
+        margin-top: 0.25rem;
+      }
+
+      .version-item .btn {
+        flex-shrink: 0;
+        margin-top: 0.25rem;
+      }
+
+      .platform-badges {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        margin: 0.75rem 0;
+      }
+
+      .platform-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        padding: 0.3rem 0.6rem;
+        border-radius: 4px;
+        font-size: 0.7rem;
+        color: var(--text-muted);
+        font-family: 'SF Mono', Monaco, monospace;
+      }
+
+      .platform-badge svg {
+        opacity: 0.6;
+        flex-shrink: 0;
+      }
+
+      .platform-badge.highlighted {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: var(--bg);
+      }
+
+      .platform-badge.highlighted svg {
+        opacity: 1;
+      }
+
+      .code-block {
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 1rem;
+        font-family: 'SF Mono', Monaco, monospace;
+        font-size: 0.85rem;
+        overflow-x: auto;
+        position: relative;
+      }
+
+      .code-block .copy-btn {
+        position: absolute;
+        top: 0.5rem;
+        right: 0.5rem;
+      }
+
+      footer {
+        text-align: center;
+        padding: 2rem;
+        color: var(--text-muted);
+        font-size: 0.85rem;
+      }
+
+      footer a {
+        color: var(--accent);
+        text-decoration: none;
+      }
+
+      footer a:hover {
+        text-decoration: underline;
+      }
+
+      .toast {
+        position: fixed;
+        bottom: 1.5rem;
+        right: 1.5rem;
+        background: var(--bg-secondary);
+        border: 1px solid var(--border);
+        padding: 0.75rem 1rem;
+        border-radius: var(--radius);
+        box-shadow: var(--shadow);
+        transform: translateY(100px);
+        opacity: 0;
+        transition: all 0.3s;
+        z-index: 1001;
+      }
+
+      .toast.show {
+        transform: translateY(0);
+        opacity: 1;
+      }
+
+      @media (max-width: 640px) {
+        .logo {
+          font-size: 2rem;
+        }
+        .stats-bar {
+          gap: 1rem;
+        }
+        .stat-value {
+          font-size: 1.2rem;
+        }
+        .result-header {
+          flex-direction: column;
+          gap: 0.5rem;
+        }
+        .result-actions {
+          flex-direction: column;
+        }
+        .btn {
+          width: 100%;
+          justify-content: center;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <header>
+        <h1 class="logo">nxv</h1>
+        <p class="tagline">Find any version of any Nix package, instantly</p>
+      </header>
+
+      <div class="search-container">
+        <div class="search-box">
+          <input
+            type="text"
+            class="search-input"
+            id="searchInput"
+            placeholder="Search packages... (e.g., python, nodejs 18, ruby 2.7)"
+            autocomplete="off"
+          />
+          <button class="search-btn" id="searchBtn">Search</button>
+        </div>
+        <div class="search-options">
+          <label class="search-option">
+            <input type="checkbox" id="exactMatch" />
+            Exact match
+          </label>
+          <label class="search-option">
+            Version:
+            <input type="text" id="versionFilter" placeholder="e.g., 3.11" style="width: 80px" />
+          </label>
+          <label class="search-option">
+            Arch:
+            <select id="archFilter">
+              <option value="">All</option>
+              <option value="x86_64-linux">x86_64 Linux</option>
+              <option value="aarch64-linux">aarch64 Linux</option>
+              <option value="x86_64-darwin">x86_64 macOS</option>
+              <option value="aarch64-darwin">aarch64 macOS</option>
+            </select>
+          </label>
+          <label class="search-option">
+            Sort:
+            <select id="sortOrder">
+              <option value="date">Date</option>
+              <option value="name">Name</option>
+              <option value="version">Version</option>
+            </select>
+          </label>
+        </div>
       </div>
-      <div class="search-options">
-        <label class="search-option">
-          <input type="checkbox" id="exactMatch">
-          Exact match
-        </label>
-        <label class="search-option">
-          Version:
-          <input type="text" id="versionFilter" placeholder="e.g., 3.11" style="width: 80px">
-        </label>
-        <label class="search-option">
-          Arch:
-          <select id="archFilter">
-            <option value="">All</option>
-            <option value="x86_64-linux">x86_64 Linux</option>
-            <option value="aarch64-linux">aarch64 Linux</option>
-            <option value="x86_64-darwin">x86_64 macOS</option>
-            <option value="aarch64-darwin">aarch64 macOS</option>
-          </select>
-        </label>
-        <label class="search-option">
-          Sort:
-          <select id="sortOrder">
-            <option value="date">Date</option>
-            <option value="name">Name</option>
-            <option value="version">Version</option>
-          </select>
-        </label>
-      </div>
-    </div>
 
-    <div class="stats-bar" id="statsBar">
-      <div class="stat">
-        <div class="stat-value" id="statPackages">-</div>
-        <div class="stat-label">Packages</div>
+      <div class="stats-bar" id="statsBar">
+        <div class="stat">
+          <div class="stat-value" id="statPackages">-</div>
+          <div class="stat-label">Packages</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value" id="statVersions">-</div>
+          <div class="stat-label">Versions</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value" id="statRanges">-</div>
+          <div class="stat-label">Records</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value" id="statHistory">-</div>
+          <div class="stat-label">Years of History</div>
+        </div>
       </div>
-      <div class="stat">
-        <div class="stat-value" id="statVersions">-</div>
-        <div class="stat-label">Versions</div>
+      <div
+        class="index-updated"
+        id="indexUpdated"
+        style="
+          display: none;
+          text-align: center;
+          color: var(--text-muted);
+          font-size: 0.85rem;
+          margin-top: -1rem;
+          margin-bottom: 1.5rem;
+        "
+      >
+        Index updated
+        <span id="indexUpdatedDate"></span>
       </div>
-      <div class="stat">
-        <div class="stat-value" id="statRanges">-</div>
-        <div class="stat-label">Records</div>
-      </div>
-      <div class="stat">
-        <div class="stat-value" id="statHistory">-</div>
-        <div class="stat-label">Years of History</div>
-      </div>
-    </div>
 
-    <div id="resultsInfo" class="results-info" style="display: none;">
-      <span id="resultsCount"></span>
-      <span id="resultsTime"></span>
-    </div>
-
-    <div id="resultsContainer">
-      <div class="empty-state" id="emptyState">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="11" cy="11" r="8"/>
-          <path d="m21 21-4.35-4.35"/>
-        </svg>
-        <p>Start typing to search for Nix packages</p>
+      <div id="resultsInfo" class="results-info" style="display: none">
+        <span id="resultsCount"></span>
+        <span id="resultsTime"></span>
       </div>
-    </div>
-  </div>
 
-  <div class="modal-overlay" id="historyModal">
-    <div class="modal">
-      <div class="modal-header">
-        <h3 class="modal-title" id="historyTitle">Version History</h3>
-        <button class="modal-close" id="historyClose">&times;</button>
-      </div>
-      <div class="modal-body" id="historyBody">
-        <div class="loading">
-          <div class="spinner"></div>
-          <p>Loading version history...</p>
+      <div id="resultsContainer">
+        <div class="empty-state" id="emptyState">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="8" />
+            <path d="m21 21-4.35-4.35" />
+          </svg>
+          <p>Start typing to search for Nix packages</p>
         </div>
       </div>
     </div>
-  </div>
 
-  <div class="toast" id="toast"></div>
+    <div class="modal-overlay" id="historyModal">
+      <div class="modal">
+        <div class="modal-header">
+          <h3 class="modal-title" id="historyTitle">Version History</h3>
+          <button class="modal-close" id="historyClose">&times;</button>
+        </div>
+        <div class="modal-body" id="historyBody">
+          <div class="loading">
+            <div class="spinner"></div>
+            <p>Loading version history...</p>
+          </div>
+        </div>
+      </div>
+    </div>
 
-  <footer>
-    <p style="margin-bottom: 0.75rem; display: flex; align-items: center; justify-content: center; gap: 0.5rem; flex-wrap: wrap;">
-      <a href="https://github.com/jamesbrink/nxv" target="_blank" style="display: inline-flex; align-items: center; gap: 0.35rem;">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" style="vertical-align: middle;"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
-        GitHub
-      </a>
-      <span>&mdash;</span>
-      <a href="/docs">API Docs</a>
-      <span>&mdash;</span>
-      <a href="/openapi.json">OpenAPI Spec</a>
-    </p>
-    <p style="color: var(--text-muted); font-size: 0.8rem;">
-      Built with love for the Nix community by <a href="https://github.com/jamesbrink">James Brink</a>
-      &mdash; <a href="https://github.com/jamesbrink/nxv/blob/main/LICENSE">MIT License</a>
-    </p>
-  </footer>
+    <div class="toast" id="toast"></div>
 
-  <script>
-    const API_BASE = '/api/v1';
-    let searchTimeout;
-    let currentOffset = 0;
-    const LIMIT = 25;
+    <footer>
+      <p
+        style="
+          margin-bottom: 0.75rem;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 0.5rem;
+          flex-wrap: wrap;
+        "
+      >
+        <a
+          href="https://github.com/jamesbrink/nxv"
+          target="_blank"
+          style="display: inline-flex; align-items: center; gap: 0.35rem"
+        >
+          <svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="currentColor"
+            style="vertical-align: middle"
+          >
+            <path
+              d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"
+            />
+          </svg>
+          GitHub
+        </a>
+        <span>&mdash;</span>
+        <a href="/docs">API Docs</a>
+        <span>&mdash;</span>
+        <a href="/openapi.json">OpenAPI Spec</a>
+      </p>
+      <p style="color: var(--text-muted); font-size: 0.8rem">
+        Built with love for the Nix community by
+        <a href="https://github.com/jamesbrink">James Brink</a>
+        &mdash;
+        <a href="https://github.com/jamesbrink/nxv/blob/main/LICENSE">MIT License</a>
+      </p>
+    </footer>
 
-    // Store expressions by ID to avoid HTML escaping issues
-    const expressionStore = new Map();
+    <script>
+      const API_BASE = '/api/v1';
+      let searchTimeout;
+      let currentOffset = 0;
+      const LIMIT = 25;
+      let versionAutoPopulated = false; // Track if version was auto-filled
 
-    // Format number with commas
-    const formatNumber = (n) => n?.toLocaleString() ?? '-';
+      // Store expressions by ID to avoid HTML escaping issues
+      const expressionStore = new Map();
 
-    // Format date nicely
-    const formatDate = (dateStr) => {
-      const d = new Date(dateStr);
-      return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
-    };
+      // Parse "package version" style queries (e.g., "python 2.7", "nodejs 18.0.0")
+      const parseSearchQuery = (input) => {
+        const trimmed = input.trim();
 
-    // Format platforms into clean arch badges
-    const formatPlatforms = (platforms) => {
-      if (!platforms) return [];
-      const archMap = {
-        'x86_64-linux': 'x86_64 Linux',
-        'aarch64-linux': 'aarch64 Linux',
-        'x86_64-darwin': 'x86_64 macOS',
-        'aarch64-darwin': 'aarch64 macOS',
-        'i686-linux': 'i686 Linux',
-        'armv7l-linux': 'armv7 Linux',
-      };
-      // Parse platforms string (could be JSON array or comma-separated)
-      let platformList = [];
-      try {
-        platformList = JSON.parse(platforms);
-      } catch {
-        platformList = platforms.split(',').map(p => p.trim());
-      }
-      return platformList
-        .map(p => archMap[p] || p)
-        .filter(p => p && p.length > 0)
-        .slice(0, 4); // Limit to 4 to avoid clutter
-    };
+        // Match patterns like:
+        // - "python 2.7", "python 2.7.18"
+        // - "nodejs 18", "nodejs 18.0.0"
+        // - "gcc 12.3.0"
+        // - "ruby 2.7.6-p219", "node 18.0.0-alpha.1"
+        // - "package v1.2.3" (version with 'v' prefix)
+        // - "package 20230101" (date-based versions)
+        //
+        // Version pattern: starts with digit or 'v' followed by digit,
+        // then any combo of digits, dots, dashes, underscores, and alphanumerics
+        const match = trimmed.match(/^(.+?)\s+(v?\d[\d.]*[\w.-]*)$/i);
 
-    // Format platforms with raw values for matching against filter
-    const formatPlatformsWithRaw = (platforms) => {
-      if (!platforms) return [];
-      const archMap = {
-        'x86_64-linux': 'x86_64 Linux',
-        'aarch64-linux': 'aarch64 Linux',
-        'x86_64-darwin': 'x86_64 macOS',
-        'aarch64-darwin': 'aarch64 macOS',
-        'i686-linux': 'i686 Linux',
-        'armv7l-linux': 'armv7 Linux',
-      };
-      let platformList = [];
-      try {
-        platformList = JSON.parse(platforms);
-      } catch {
-        platformList = platforms.split(',').map(p => p.trim());
-      }
-      return platformList
-        .filter(p => p && p.length > 0)
-        .slice(0, 4)
-        .map(p => ({ raw: p, display: archMap[p] || p }));
-    };
+        if (match) {
+          const [, pkg, ver] = match;
+          // Only split if the package part doesn't look like it ends with a version
+          // (e.g., don't split "python3" into "python" + "3")
+          if (pkg.length > 0 && !pkg.match(/\d$/)) {
+            return { package: pkg.trim(), version: ver };
+          }
+        }
 
-    // Show toast notification
-    const showToast = (message) => {
-      const toast = document.getElementById('toast');
-      toast.textContent = message;
-      toast.classList.add('show');
-      setTimeout(() => toast.classList.remove('show'), 2000);
-    };
-
-    // Copy to clipboard with fallback
-    const copyToClipboard = async (text, btn) => {
-      if (!text) {
-        showToast('Nothing to copy');
-        return;
-      }
-
-      const showSuccess = () => {
-        const originalText = btn.innerHTML;
-        btn.classList.add('btn-copied');
-        btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg> Copied!';
-        setTimeout(() => {
-          btn.classList.remove('btn-copied');
-          btn.innerHTML = originalText;
-        }, 1500);
+        return { package: trimmed, version: null };
       };
 
-      // Try modern clipboard API first
-      if (navigator.clipboard && navigator.clipboard.writeText) {
+      // Format number with commas
+      const formatNumber = (n) => n?.toLocaleString() ?? '-';
+
+      // Format date nicely
+      const formatDate = (dateStr) => {
+        const d = new Date(dateStr);
+        return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+      };
+
+      // Format platforms into clean arch badges
+      const formatPlatforms = (platforms) => {
+        if (!platforms) return [];
+        const archMap = {
+          'x86_64-linux': 'x86_64 Linux',
+          'aarch64-linux': 'aarch64 Linux',
+          'x86_64-darwin': 'x86_64 macOS',
+          'aarch64-darwin': 'aarch64 macOS',
+          'i686-linux': 'i686 Linux',
+          'armv7l-linux': 'armv7 Linux',
+        };
+        // Parse platforms string (could be JSON array or comma-separated)
+        let platformList = [];
         try {
-          await navigator.clipboard.writeText(text);
+          platformList = JSON.parse(platforms);
+        } catch {
+          platformList = platforms.split(',').map((p) => p.trim());
+        }
+        return platformList
+          .map((p) => archMap[p] || p)
+          .filter((p) => p && p.length > 0)
+          .slice(0, 4); // Limit to 4 to avoid clutter
+      };
+
+      // Format platforms with raw values for matching against filter
+      const formatPlatformsWithRaw = (platforms) => {
+        if (!platforms) return [];
+        const archMap = {
+          'x86_64-linux': 'x86_64 Linux',
+          'aarch64-linux': 'aarch64 Linux',
+          'x86_64-darwin': 'x86_64 macOS',
+          'aarch64-darwin': 'aarch64 macOS',
+          'i686-linux': 'i686 Linux',
+          'armv7l-linux': 'armv7 Linux',
+        };
+        let platformList = [];
+        try {
+          platformList = JSON.parse(platforms);
+        } catch {
+          platformList = platforms.split(',').map((p) => p.trim());
+        }
+        return platformList
+          .filter((p) => p && p.length > 0)
+          .slice(0, 4)
+          .map((p) => ({ raw: p, display: archMap[p] || p }));
+      };
+
+      // Show toast notification
+      const showToast = (message) => {
+        const toast = document.getElementById('toast');
+        toast.textContent = message;
+        toast.classList.add('show');
+        setTimeout(() => toast.classList.remove('show'), 2000);
+      };
+
+      // Copy to clipboard with fallback
+      const copyToClipboard = async (text, btn) => {
+        if (!text) {
+          showToast('Nothing to copy');
+          return;
+        }
+
+        const showSuccess = () => {
+          const originalText = btn.innerHTML;
+          btn.classList.add('btn-copied');
+          btn.innerHTML =
+            '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg> Copied!';
+          setTimeout(() => {
+            btn.classList.remove('btn-copied');
+            btn.innerHTML = originalText;
+          }, 1500);
+        };
+
+        // Try modern clipboard API first
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          try {
+            await navigator.clipboard.writeText(text);
+            showSuccess();
+            return;
+          } catch (err) {
+            // Fall through to fallback
+          }
+        }
+
+        // Fallback for older browsers or non-HTTPS
+        try {
+          const textarea = document.createElement('textarea');
+          textarea.value = text;
+          textarea.style.position = 'fixed';
+          textarea.style.opacity = '0';
+          document.body.appendChild(textarea);
+          textarea.select();
+          document.execCommand('copy');
+          document.body.removeChild(textarea);
           showSuccess();
-          return;
         } catch (err) {
-          // Fall through to fallback
+          showToast('Failed to copy - try manually selecting');
         }
-      }
+      };
 
-      // Fallback for older browsers or non-HTTPS
-      try {
-        const textarea = document.createElement('textarea');
-        textarea.value = text;
-        textarea.style.position = 'fixed';
-        textarea.style.opacity = '0';
-        document.body.appendChild(textarea);
-        textarea.select();
-        document.execCommand('copy');
-        document.body.removeChild(textarea);
-        showSuccess();
-      } catch (err) {
-        showToast('Failed to copy - try manually selecting');
-      }
-    };
+      // Load stats
+      const loadStats = async () => {
+        try {
+          const res = await fetch(`${API_BASE}/stats`);
 
-    // Load stats
-    const loadStats = async () => {
-      try {
-        const res = await fetch(`${API_BASE}/stats`);
+          if (!res.ok) {
+            const errorBody = await res.text();
+            console.error(`Failed to load stats: HTTP ${res.status}`, errorBody);
+            return;
+          }
 
-        if (!res.ok) {
-          const errorBody = await res.text();
-          console.error(`Failed to load stats: HTTP ${res.status}`, errorBody);
-          return;
+          const { data } = await res.json();
+
+          document.getElementById('statPackages').textContent = formatNumber(data.unique_names);
+          document.getElementById('statVersions').textContent = formatNumber(data.unique_versions);
+          document.getElementById('statRanges').textContent = formatNumber(data.total_ranges);
+
+          if (data.oldest_commit_date && data.newest_commit_date) {
+            const oldest = new Date(data.oldest_commit_date).getFullYear();
+            const newest = new Date(data.newest_commit_date).getFullYear();
+            document.getElementById('statHistory').textContent = `${newest - oldest}+`;
+
+            // Show index updated date
+            const updatedDate = new Date(data.newest_commit_date);
+            document.getElementById('indexUpdatedDate').textContent =
+              updatedDate.toLocaleDateString('en-US', {
+                year: 'numeric',
+                month: 'short',
+                day: 'numeric',
+              });
+            document.getElementById('indexUpdated').style.display = 'block';
+          }
+        } catch (err) {
+          console.error('Failed to load stats:', err);
         }
+      };
 
-        const { data } = await res.json();
+      // Search packages
+      const search = async (query, offset = 0) => {
+        const container = document.getElementById('resultsContainer');
+        const resultsInfo = document.getElementById('resultsInfo');
+        const versionInput = document.getElementById('versionFilter');
 
-        document.getElementById('statPackages').textContent = formatNumber(data.unique_names);
-        document.getElementById('statVersions').textContent = formatNumber(data.unique_versions);
-        document.getElementById('statRanges').textContent = formatNumber(data.total_ranges);
-
-        if (data.oldest_commit_date && data.newest_commit_date) {
-          const oldest = new Date(data.oldest_commit_date).getFullYear();
-          const newest = new Date(data.newest_commit_date).getFullYear();
-          document.getElementById('statHistory').textContent = `${newest - oldest}+`;
-        }
-      } catch (err) {
-        console.error('Failed to load stats:', err);
-      }
-    };
-
-    // Search packages
-    const search = async (query, offset = 0) => {
-      const container = document.getElementById('resultsContainer');
-      const resultsInfo = document.getElementById('resultsInfo');
-
-      if (!query.trim()) {
-        container.innerHTML = `
+        if (!query.trim()) {
+          // Clear auto-populated version when search is cleared
+          if (versionAutoPopulated) {
+            versionInput.value = '';
+            versionAutoPopulated = false;
+          }
+          container.innerHTML = `
           <div class="empty-state" id="emptyState">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <circle cx="11" cy="11" r="8"/>
@@ -829,59 +932,88 @@
             <p>Start typing to search for Nix packages</p>
           </div>
         `;
+          resultsInfo.style.display = 'none';
+          return;
+        }
+
+        container.innerHTML =
+          '<div class="loading"><div class="spinner"></div><p>Searching...</p></div>';
         resultsInfo.style.display = 'none';
-        return;
-      }
 
-      container.innerHTML = '<div class="loading"><div class="spinner"></div><p>Searching...</p></div>';
-      resultsInfo.style.display = 'none';
+        const startTime = performance.now();
 
-      const startTime = performance.now();
+        try {
+          // Smart parse: detect "python 2.7" style queries
+          const parsed = parseSearchQuery(query);
+          const currentVersion = versionInput.value.trim();
 
-      try {
-        const params = new URLSearchParams({
-          q: query,
-          limit: LIMIT,
-          offset: offset,
-          sort: document.getElementById('sortOrder').value,
-        });
+          // Use detected version if:
+          // 1. No version in the field, OR
+          // 2. The current version was auto-populated (update it as user types)
+          let effectiveQuery = query;
+          let effectiveVersion = currentVersion;
 
-        if (document.getElementById('exactMatch').checked) {
-          params.append('exact', 'true');
-        }
+          if (parsed.version && (!currentVersion || versionAutoPopulated)) {
+            effectiveQuery = parsed.package;
+            effectiveVersion = parsed.version;
 
-        const version = document.getElementById('versionFilter').value.trim();
-        if (version) {
-          params.append('version', version);
-        }
+            // Auto-populate version field for transparency
+            versionInput.value = parsed.version;
+            versionAutoPopulated = true;
+            versionInput.style.borderColor = 'var(--accent)';
+            versionInput.style.transition = 'border-color 0.3s';
+            setTimeout(() => {
+              versionInput.style.borderColor = '';
+            }, 2000);
+          } else if (!parsed.version && versionAutoPopulated) {
+            // Clear auto-populated version if query no longer has version
+            versionInput.value = '';
+            versionAutoPopulated = false;
+            effectiveVersion = '';
+          }
 
-        const res = await fetch(`${API_BASE}/search?${params}`);
-        const json = await res.json();
-        const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
-
-        if (!res.ok) {
-          throw new Error((json && json.message) || json?.error || 'Search failed');
-        }
-
-        let { data, meta } = json;
-        currentOffset = offset;
-
-        // Client-side architecture filter
-        const archFilter = document.getElementById('archFilter').value;
-        if (archFilter) {
-          data = data.filter(pkg => {
-            if (!pkg.platforms) return false;
-            try {
-              const platforms = JSON.parse(pkg.platforms);
-              return platforms.includes(archFilter);
-            } catch {
-              return pkg.platforms.includes(archFilter);
-            }
+          const params = new URLSearchParams({
+            q: effectiveQuery,
+            limit: LIMIT,
+            offset: offset,
+            sort: document.getElementById('sortOrder').value,
           });
-        }
 
-        if (data.length === 0) {
-          container.innerHTML = `
+          if (document.getElementById('exactMatch').checked) {
+            params.append('exact', 'true');
+          }
+
+          if (effectiveVersion) {
+            params.append('version', effectiveVersion);
+          }
+
+          const res = await fetch(`${API_BASE}/search?${params}`);
+          const json = await res.json();
+          const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
+
+          if (!res.ok) {
+            throw new Error((json && json.message) || json?.error || 'Search failed');
+          }
+
+          let { data, meta } = json;
+          currentOffset = offset;
+
+          // Client-side architecture filter
+          const archFilter = document.getElementById('archFilter').value;
+          if (archFilter) {
+            data = data.filter((pkg) => {
+              if (!pkg.platforms) return false;
+              try {
+                const platforms = JSON.parse(pkg.platforms);
+                return platforms.includes(archFilter);
+              } catch {
+                return pkg.platforms.includes(archFilter);
+              }
+            });
+          }
+
+          if (data.length === 0) {
+            container.innerHTML = `
             <div class="empty-state">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <circle cx="12" cy="12" r="10"/>
@@ -890,63 +1022,63 @@
               <p>No packages found for "${escapeHtml(query)}"${archFilter ? ` on ${archFilter}` : ''}</p>
             </div>
           `;
-          resultsInfo.style.display = 'none';
-          return;
-        }
+            resultsInfo.style.display = 'none';
+            return;
+          }
 
-        resultsInfo.style.display = 'flex';
-        const filteredNote = archFilter ? ` (filtered from ${meta?.total || '?'})` : '';
-        document.getElementById('resultsCount').textContent =
-          `Showing ${offset + 1}-${offset + data.length} of ${formatNumber(data.length)} results${filteredNote}`;
-        document.getElementById('resultsTime').textContent = `${elapsed}s`;
+          resultsInfo.style.display = 'flex';
+          const filteredNote = archFilter ? ` (filtered from ${meta?.total || '?'})` : '';
+          document.getElementById('resultsCount').textContent =
+            `Showing ${offset + 1}-${offset + data.length} of ${formatNumber(data.length)} results${filteredNote}`;
+          document.getElementById('resultsTime').textContent = `${elapsed}s`;
 
-        container.innerHTML = `
+          container.innerHTML = `
           <div class="results-grid">
-            ${data.map(pkg => renderPackageCard(pkg)).join('')}
+            ${data.map((pkg) => renderPackageCard(pkg)).join('')}
           </div>
           ${archFilter ? '' : renderPagination(meta?.total || data.length, offset)}
         `;
 
-        // Attach event listeners
-        attachCardListeners();
-        attachPaginationListeners(query);
-      } catch (err) {
-        container.innerHTML = `
+          // Attach event listeners
+          attachCardListeners();
+          attachPaginationListeners(query);
+        } catch (err) {
+          container.innerHTML = `
           <div class="error-state">
             <p>Error: ${escapeHtml(err.message)}</p>
           </div>
         `;
-      }
-    };
+        }
+      };
 
-    // Escape HTML
-    const escapeHtml = (str) => {
-      const div = document.createElement('div');
-      div.textContent = str;
-      return div.innerHTML;
-    };
+      // Escape HTML
+      const escapeHtml = (str) => {
+        const div = document.createElement('div');
+        div.textContent = str;
+        return div.innerHTML;
+      };
 
-    // Validate URL has safe protocol (http: or https: only)
-    const isSafeUrl = (url) => {
-      try {
-        const parsed = new URL(url);
-        return parsed.protocol === 'http:' || parsed.protocol === 'https:';
-      } catch {
-        return false;
-      }
-    };
+      // Validate URL has safe protocol (http: or https: only)
+      const isSafeUrl = (url) => {
+        try {
+          const parsed = new URL(url);
+          return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+        } catch {
+          return false;
+        }
+      };
 
-    // Render a package card
-    const renderPackageCard = (pkg) => {
-      const cardId = `pkg-${pkg.id}`;
-      const nixExpr = `(import (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/${pkg.last_commit_hash}.tar.gz") {}).${pkg.attribute_path}`;
-      const nixShell = `nix-shell -p '(import (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/${pkg.last_commit_hash}.tar.gz") {}).${pkg.attribute_path}'`;
+      // Render a package card
+      const renderPackageCard = (pkg) => {
+        const cardId = `pkg-${pkg.id}`;
+        const nixExpr = `(import (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/${pkg.last_commit_hash}.tar.gz") {}).${pkg.attribute_path}`;
+        const nixShell = `nix-shell -p '(import (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/${pkg.last_commit_hash}.tar.gz") {}).${pkg.attribute_path}'`;
 
-      // Store expressions in the map
-      expressionStore.set(`${cardId}-expr`, nixExpr);
-      expressionStore.set(`${cardId}-shell`, nixShell);
+        // Store expressions in the map
+        expressionStore.set(`${cardId}-expr`, nixExpr);
+        expressionStore.set(`${cardId}-shell`, nixShell);
 
-      return `
+        return `
         <div class="result-card" data-attr="${escapeHtml(pkg.attribute_path)}">
           <div class="result-header">
             <span class="result-name">${escapeHtml(pkg.name)}</span>
@@ -965,10 +1097,12 @@
             const platforms = formatPlatformsWithRaw(pkg.platforms);
             if (platforms.length === 0) return '';
             const activeArch = document.getElementById('archFilter').value;
-            return `<div class="platform-badges">${platforms.map(p => {
-              const isHighlighted = activeArch && p.raw === activeArch;
-              return `<span class="platform-badge${isHighlighted ? ' highlighted' : ''}"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>${escapeHtml(p.display)}</span>`;
-            }).join('')}</div>`;
+            return `<div class="platform-badges">${platforms
+              .map((p) => {
+                const isHighlighted = activeArch && p.raw === activeArch;
+                return `<span class="platform-badge${isHighlighted ? ' highlighted' : ''}"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>${escapeHtml(p.display)}</span>`;
+              })
+              .join('')}</div>`;
           })()}
           <div class="result-actions">
             <button class="btn copy-expr" data-id="${cardId}-expr">
@@ -979,23 +1113,31 @@
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m4 17 6-6-6-6M12 19h8"/></svg>
               Copy nix-shell
             </button>
-            ${pkg.source_path ? `
+            ${
+              pkg.source_path
+                ? `
               <a class="btn" href="https://github.com/NixOS/nixpkgs/blob/${pkg.last_commit_hash}/${escapeHtml(pkg.source_path)}" target="_blank" rel="noopener" title="View source in nixpkgs">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
                 View Source
               </a>
-            ` : `
+            `
+                : `
               <a class="btn" href="https://github.com/NixOS/nixpkgs/tree/${pkg.last_commit_hash}" target="_blank" rel="noopener" title="View nixpkgs at this commit">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
                 View nixpkgs
               </a>
-            `}
-            ${pkg.homepage && isSafeUrl(pkg.homepage) ? `
+            `
+            }
+            ${
+              pkg.homepage && isSafeUrl(pkg.homepage)
+                ? `
               <a class="btn" href="${escapeHtml(pkg.homepage)}" target="_blank" rel="noopener" title="Visit project homepage">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
                 Homepage
               </a>
-            ` : ''}
+            `
+                : ''
+            }
             <button class="btn btn-primary view-history" data-attr="${escapeHtml(pkg.attribute_path)}">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
               All Versions
@@ -1003,200 +1145,211 @@
           </div>
         </div>
       `;
-    };
+      };
 
-    // Render pagination
-    const renderPagination = (total, offset) => {
-      if (total <= LIMIT) return '';
+      // Render pagination
+      const renderPagination = (total, offset) => {
+        if (total <= LIMIT) return '';
 
-      const pages = Math.ceil(total / LIMIT);
-      const currentPage = Math.floor(offset / LIMIT) + 1;
+        const pages = Math.ceil(total / LIMIT);
+        const currentPage = Math.floor(offset / LIMIT) + 1;
 
-      return `
+        return `
         <div class="pagination">
           <button class="btn" ${currentPage === 1 ? 'disabled' : ''} data-page="${currentPage - 1}">Previous</button>
           <span style="padding: 0.5rem 1rem; color: var(--text-muted);">Page ${currentPage} of ${pages}</span>
           <button class="btn" ${currentPage === pages ? 'disabled' : ''} data-page="${currentPage + 1}">Next</button>
         </div>
       `;
-    };
+      };
 
-    // Attach card event listeners
-    const attachCardListeners = () => {
-      document.querySelectorAll('.copy-expr').forEach(btn => {
-        btn.addEventListener('click', () => {
-          const text = expressionStore.get(btn.dataset.id);
-          copyToClipboard(text, btn);
+      // Attach card event listeners
+      const attachCardListeners = () => {
+        document.querySelectorAll('.copy-expr').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const text = expressionStore.get(btn.dataset.id);
+            copyToClipboard(text, btn);
+          });
         });
-      });
 
-      document.querySelectorAll('.copy-shell').forEach(btn => {
-        btn.addEventListener('click', () => {
-          const text = expressionStore.get(btn.dataset.id);
-          copyToClipboard(text, btn);
+        document.querySelectorAll('.copy-shell').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const text = expressionStore.get(btn.dataset.id);
+            copyToClipboard(text, btn);
+          });
         });
-      });
 
-      document.querySelectorAll('.view-history').forEach(btn => {
-        btn.addEventListener('click', () => showHistory(btn.dataset.attr));
-      });
-    };
-
-    // Attach pagination listeners
-    const attachPaginationListeners = (query) => {
-      document.querySelectorAll('.pagination .btn').forEach(btn => {
-        btn.addEventListener('click', () => {
-          const page = parseInt(btn.dataset.page);
-          search(query, (page - 1) * LIMIT);
-          window.scrollTo({ top: 0, behavior: 'smooth' });
+        document.querySelectorAll('.view-history').forEach((btn) => {
+          btn.addEventListener('click', () => showHistory(btn.dataset.attr));
         });
-      });
-    };
+      };
 
-    // Show version history modal
-    const showHistory = async (attr) => {
-      const modal = document.getElementById('historyModal');
-      const body = document.getElementById('historyBody');
-      const title = document.getElementById('historyTitle');
+      // Attach pagination listeners
+      const attachPaginationListeners = (query) => {
+        document.querySelectorAll('.pagination .btn').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const page = parseInt(btn.dataset.page);
+            search(query, (page - 1) * LIMIT);
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+          });
+        });
+      };
 
-      title.textContent = `Version History: ${attr}`;
-      body.innerHTML = '<div class="loading"><div class="spinner"></div><p>Loading version history...</p></div>';
-      modal.classList.add('active');
+      // Show version history modal
+      const showHistory = async (attr) => {
+        const modal = document.getElementById('historyModal');
+        const body = document.getElementById('historyBody');
+        const title = document.getElementById('historyTitle');
 
-      try {
-        const res = await fetch(`${API_BASE}/packages/${encodeURIComponent(attr)}/history`);
-        if (!res.ok) {
-          body.innerHTML = `<p>Failed to load version history (HTTP ${res.status})</p>`;
-          return;
-        }
-        const { data } = await res.json();
+        title.textContent = `Version History: ${attr}`;
+        body.innerHTML =
+          '<div class="loading"><div class="spinner"></div><p>Loading version history...</p></div>';
+        modal.classList.add('active');
 
-        if (!data || data.length === 0) {
-          body.innerHTML = '<p>No version history found.</p>';
-          return;
-        }
-
-        // Fetch full version info for each version to get commit hashes
-        const versionsWithHashes = await Promise.all(
-          data.map(async (v, idx) => {
-            try {
-              const vRes = await fetch(`${API_BASE}/packages/${encodeURIComponent(attr)}/versions/${encodeURIComponent(v.version)}`);
-              const vJson = await vRes.json();
-              return { ...v, commit_hash: vJson.data?.last_commit_hash, idx };
-            } catch {
-              return { ...v, commit_hash: null, idx };
-            }
-          })
-        );
-
-        // Store expressions in the map for history items
-        // Use escapeHtml(attr) to match the data-id attribute in the rendered HTML
-        const escapedAttr = escapeHtml(attr);
-        versionsWithHashes.forEach(v => {
-          if (v.commit_hash) {
-            const nixExpr = `(import (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/${v.commit_hash}.tar.gz") {}).${attr}`;
-            expressionStore.set(`history-${escapedAttr}-${v.idx}`, nixExpr);
+        try {
+          const res = await fetch(`${API_BASE}/packages/${encodeURIComponent(attr)}/history`);
+          if (!res.ok) {
+            body.innerHTML = `<p>Failed to load version history (HTTP ${res.status})</p>`;
+            return;
           }
-        });
+          const { data } = await res.json();
 
-        body.innerHTML = `
+          if (!data || data.length === 0) {
+            body.innerHTML = '<p>No version history found.</p>';
+            return;
+          }
+
+          // Fetch full version info for each version to get commit hashes
+          const versionsWithHashes = await Promise.all(
+            data.map(async (v, idx) => {
+              try {
+                const vRes = await fetch(
+                  `${API_BASE}/packages/${encodeURIComponent(attr)}/versions/${encodeURIComponent(v.version)}`
+                );
+                const vJson = await vRes.json();
+                return { ...v, commit_hash: vJson.data?.last_commit_hash, idx };
+              } catch {
+                return { ...v, commit_hash: null, idx };
+              }
+            })
+          );
+
+          // Store expressions in the map for history items
+          // Use escapeHtml(attr) to match the data-id attribute in the rendered HTML
+          const escapedAttr = escapeHtml(attr);
+          versionsWithHashes.forEach((v) => {
+            if (v.commit_hash) {
+              const nixExpr = `(import (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/${v.commit_hash}.tar.gz") {}).${attr}`;
+              expressionStore.set(`history-${escapedAttr}-${v.idx}`, nixExpr);
+            }
+          });
+
+          body.innerHTML = `
           <div class="version-list">
-            ${versionsWithHashes.map(v => {
-              const hasCommit = v.commit_hash;
-              return `
+            ${versionsWithHashes
+              .map((v) => {
+                const hasCommit = v.commit_hash;
+                return `
                 <div class="version-item">
                   <div class="version-info">
                     <div class="version-number">${escapeHtml(v.version)}</div>
                     <div class="version-dates">${formatDate(v.first_seen)} - ${formatDate(v.last_seen)}</div>
                     ${hasCommit ? `<div class="version-commit">${v.commit_hash.substring(0, 12)}</div>` : ''}
                   </div>
-                  ${hasCommit ? `
+                  ${
+                    hasCommit
+                      ? `
                     <button class="btn copy-version-expr" data-id="history-${escapeHtml(attr)}-${v.idx}">
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                       Copy
                     </button>
-                  ` : '<span style="color: var(--text-muted); font-size: 0.8rem;">No commit</span>'}
+                  `
+                      : '<span style="color: var(--text-muted); font-size: 0.8rem;">No commit</span>'
+                  }
                 </div>
               `;
-            }).join('')}
+              })
+              .join('')}
           </div>
         `;
 
-        body.querySelectorAll('.copy-version-expr').forEach(btn => {
-          btn.addEventListener('click', () => {
-            const text = expressionStore.get(btn.dataset.id);
-            copyToClipboard(text, btn);
+          body.querySelectorAll('.copy-version-expr').forEach((btn) => {
+            btn.addEventListener('click', () => {
+              const text = expressionStore.get(btn.dataset.id);
+              copyToClipboard(text, btn);
+            });
           });
-        });
-      } catch (err) {
-        body.innerHTML = `<div class="error-state"><p>Failed to load history: ${escapeHtml(err.message)}</p></div>`;
-      }
-    };
+        } catch (err) {
+          body.innerHTML = `<div class="error-state"><p>Failed to load history: ${escapeHtml(err.message)}</p></div>`;
+        }
+      };
 
-    // Close modal
-    document.getElementById('historyClose').addEventListener('click', () => {
-      document.getElementById('historyModal').classList.remove('active');
-    });
-
-    document.getElementById('historyModal').addEventListener('click', (e) => {
-      if (e.target.id === 'historyModal') {
+      // Close modal
+      document.getElementById('historyClose').addEventListener('click', () => {
         document.getElementById('historyModal').classList.remove('active');
-      }
-    });
+      });
 
-    // Search input handling
-    const searchInput = document.getElementById('searchInput');
-    const searchBtn = document.getElementById('searchBtn');
+      document.getElementById('historyModal').addEventListener('click', (e) => {
+        if (e.target.id === 'historyModal') {
+          document.getElementById('historyModal').classList.remove('active');
+        }
+      });
 
-    searchInput.addEventListener('input', () => {
-      clearTimeout(searchTimeout);
-      searchTimeout = setTimeout(() => search(searchInput.value), 300);
-    });
+      // Search input handling
+      const searchInput = document.getElementById('searchInput');
+      const searchBtn = document.getElementById('searchBtn');
 
-    searchInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
+      searchInput.addEventListener('input', () => {
         clearTimeout(searchTimeout);
-        search(searchInput.value);
-      }
-    });
+        searchTimeout = setTimeout(() => search(searchInput.value), 300);
+      });
 
-    searchBtn.addEventListener('click', () => {
-      clearTimeout(searchTimeout);
-      search(searchInput.value);
-    });
-
-    // Filter changes trigger search (dropdowns and checkbox on change)
-    ['exactMatch', 'sortOrder', 'archFilter'].forEach(id => {
-      document.getElementById(id).addEventListener('change', () => {
-        if (searchInput.value.trim()) {
+      searchInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          clearTimeout(searchTimeout);
           search(searchInput.value);
         }
       });
-    });
 
-    // Version filter triggers on input with debounce (like search input)
-    const versionFilter = document.getElementById('versionFilter');
-    versionFilter.addEventListener('input', () => {
-      if (searchInput.value.trim()) {
+      searchBtn.addEventListener('click', () => {
         clearTimeout(searchTimeout);
-        searchTimeout = setTimeout(() => search(searchInput.value), 300);
-      }
-    });
+        search(searchInput.value);
+      });
 
-    // Keyboard shortcut: focus search with /
-    document.addEventListener('keydown', (e) => {
-      if (e.key === '/' && document.activeElement !== searchInput) {
-        e.preventDefault();
-        searchInput.focus();
-      }
-      if (e.key === 'Escape') {
-        document.getElementById('historyModal').classList.remove('active');
-      }
-    });
+      // Filter changes trigger search (dropdowns and checkbox on change)
+      ['exactMatch', 'sortOrder', 'archFilter'].forEach((id) => {
+        document.getElementById(id).addEventListener('change', () => {
+          if (searchInput.value.trim()) {
+            search(searchInput.value);
+          }
+        });
+      });
 
-    // Initialize
-    loadStats();
-    searchInput.focus();
-  </script>
-</body>
+      // Version filter triggers on input with debounce (like search input)
+      const versionFilter = document.getElementById('versionFilter');
+      versionFilter.addEventListener('input', () => {
+        // User is manually editing, so reset auto-populated flag
+        versionAutoPopulated = false;
+        if (searchInput.value.trim()) {
+          clearTimeout(searchTimeout);
+          searchTimeout = setTimeout(() => search(searchInput.value), 300);
+        }
+      });
+
+      // Keyboard shortcut: focus search with /
+      document.addEventListener('keydown', (e) => {
+        if (e.key === '/' && document.activeElement !== searchInput) {
+          e.preventDefault();
+          searchInput.focus();
+        }
+        if (e.key === 'Escape') {
+          document.getElementById('historyModal').classList.remove('active');
+        }
+      });
+
+      // Initialize
+      loadStats();
+      searchInput.focus();
+    </script>
+  </body>
 </html>

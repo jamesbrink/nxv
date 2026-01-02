@@ -19,9 +19,10 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # Configure the index storage location
-  INDEX_BUCKET: ${{ secrets.INDEX_BUCKET }}
-  INDEX_URL_PREFIX: ${{ secrets.INDEX_URL_PREFIX }}
+  # Index is stored in a GitHub release with this tag
+  # Forks can override INDEX_URL_PREFIX via repository variable (Settings > Secrets and variables > Actions > Variables)
+  INDEX_RELEASE_TAG: index-latest
+  INDEX_URL_PREFIX: ${{ vars.INDEX_URL_PREFIX || format('https://github.com/{0}/releases/download/index-latest', github.repository) }}
 
 jobs:
   update-index:
@@ -63,14 +64,21 @@ jobs:
         if: ${{ github.event.inputs.full_rebuild != 'true' }}
         continue-on-error: true
         run: |
+          set -euo pipefail
           mkdir -p ~/.local/share/nxv
-          # Download existing index if available
-          if [ -n "$INDEX_URL_PREFIX" ]; then
-            curl -sSfL "$INDEX_URL_PREFIX/nxv-index-full.db.zst" -o ~/.local/share/nxv/index.db.zst || true
-            if [ -f ~/.local/share/nxv/index.db.zst ]; then
-              zstd -d ~/.local/share/nxv/index.db.zst -o ~/.local/share/nxv/index.db
+          # Download existing index from GitHub release
+          curl -sSfL "${INDEX_URL_PREFIX}/index.db.zst" -o ~/.local/share/nxv/index.db.zst || true
+          if [ -f ~/.local/share/nxv/index.db.zst ]; then
+            if zstd -d ~/.local/share/nxv/index.db.zst -o ~/.local/share/nxv/index.db; then
               rm ~/.local/share/nxv/index.db.zst
+            else
+              rm -f ~/.local/share/nxv/index.db.zst ~/.local/share/nxv/index.db
             fi
+          fi
+          # Also download bloom filter if available
+          curl -sSfL "${INDEX_URL_PREFIX}/bloom.bin" -o ~/.local/share/nxv/bloom.bin || true
+          if [ -f ~/.local/share/nxv/bloom.bin ] && [ ! -s ~/.local/share/nxv/bloom.bin ]; then
+            rm -f ~/.local/share/nxv/bloom.bin
           fi
 
       - name: Run indexer
@@ -83,74 +91,48 @@ jobs:
 
       - name: Generate publishable artifacts
         run: |
-          mkdir -p publish
+          ./target/release/nxv publish \
+            --output ./publish \
+            --url-prefix "${INDEX_URL_PREFIX}"
 
-          # Get the index database path
-          INDEX_DB="$HOME/.local/share/nxv/index.db"
-
-          # Generate compressed index and manifest using the publisher
-          # This would use `nxv publish` if implemented, for now manual steps:
-
-          # Compress the database
-          zstd -19 "$INDEX_DB" -o publish/nxv-index-full.db.zst
-
-          # Generate bloom filter
-          cp "$HOME/.local/share/nxv/index.bloom" publish/nxv-bloom.bin || true
-
-          # Calculate checksums
-          sha256sum publish/nxv-index-full.db.zst | cut -d' ' -f1 > publish/nxv-index-full.db.zst.sha256
-          sha256sum publish/nxv-bloom.bin | cut -d' ' -f1 > publish/nxv-bloom.bin.sha256 || true
-
-          # Get last indexed commit from database
-          LAST_COMMIT=$(sqlite3 "$INDEX_DB" "SELECT value FROM meta WHERE key='last_indexed_commit'")
-
-          # Generate manifest
-          cat > publish/manifest.json << EOF
-          {
-            "version": 1,
-            "latest_commit": "$LAST_COMMIT",
-            "latest_commit_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "full_index": {
-              "url": "${INDEX_URL_PREFIX}/nxv-index-full.db.zst",
-              "size_bytes": $(stat -c%s publish/nxv-index-full.db.zst),
-              "sha256": "$(cat publish/nxv-index-full.db.zst.sha256)"
-            },
-            "bloom_filter": {
-              "url": "${INDEX_URL_PREFIX}/nxv-bloom.bin",
-              "size_bytes": $(stat -c%s publish/nxv-bloom.bin 2>/dev/null || echo 0),
-              "sha256": "$(cat publish/nxv-bloom.bin.sha256 2>/dev/null || echo '')"
-            },
-            "deltas": []
-          }
-          EOF
-
-      - name: Upload artifacts
+      - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
           name: nxv-index
           path: publish/
-          retention-days: 30
+          retention-days: 7
 
-      # Optional: Deploy to cloud storage
-      # Uncomment and configure for your storage provider
-      #
-      # - name: Deploy to S3
-      #   if: env.INDEX_BUCKET != ''
-      #   run: |
-      #     aws s3 sync publish/ s3://${{ env.INDEX_BUCKET }}/ --acl public-read
-      #
-      # - name: Deploy to GitHub Releases
-      #   uses: softprops/action-gh-release@v1
-      #   if: startsWith(github.ref, 'refs/tags/')
-      #   with:
-      #     files: publish/*
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Check if release exists, create if not
+          if ! gh release view "$INDEX_RELEASE_TAG" > /dev/null 2>&1; then
+            echo "Creating release $INDEX_RELEASE_TAG..."
+            gh release create "$INDEX_RELEASE_TAG" \
+              --title "Package Index" \
+              --notes "nxv package index files. Updated automatically." \
+              --latest=false
+          fi
+          gh release view "$INDEX_RELEASE_TAG" > /dev/null 2>&1
+
+          # Upload files (--clobber overwrites existing assets)
+          echo "Uploading index files to release..."
+          gh release upload "$INDEX_RELEASE_TAG" \
+            publish/index.db.zst \
+            publish/bloom.bin \
+            publish/manifest.json \
+            --clobber
 
       - name: Summary
         run: |
           echo "## Index Update Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- **Index size:** $(du -h publish/nxv-index-full.db.zst | cut -f1)" >> $GITHUB_STEP_SUMMARY
-          echo "- **Bloom filter size:** $(du -h publish/nxv-bloom.bin 2>/dev/null | cut -f1 || echo 'N/A')" >> $GITHUB_STEP_SUMMARY
-          echo "- **Manifest:** Generated" >> $GITHUB_STEP_SUMMARY
+          echo "- **Index size:** $(du -h publish/index.db.zst | cut -f1)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Bloom filter size:** $(du -h publish/bloom.bin 2>/dev/null | cut -f1 || echo 'N/A')" >> $GITHUB_STEP_SUMMARY
+          echo "- **Release:** [$INDEX_RELEASE_TAG](https://github.com/${{ github.repository }}/releases/tag/$INDEX_RELEASE_TAG)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```json' >> $GITHUB_STEP_SUMMARY
           cat publish/manifest.json >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY

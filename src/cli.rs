@@ -62,6 +62,10 @@ pub enum Commands {
     #[cfg(feature = "indexer")]
     Reset(ResetArgs),
 
+    /// Generate publishable index artifacts (compressed DB, bloom filter, manifest).
+    #[cfg(feature = "indexer")]
+    Publish(PublishArgs),
+
     /// Start the API server.
     Serve(ServeArgs),
 
@@ -95,9 +99,13 @@ pub struct SearchArgs {
     /// Package name or attribute path to search for.
     pub package: String,
 
-    /// Filter by version (prefix match).
-    #[arg(short = 'V', long)]
+    /// Version to filter by (positional, prefix match).
+    #[arg(conflicts_with = "version_opt")]
     pub version: Option<String>,
+
+    /// Filter by version (prefix match, alternative to positional).
+    #[arg(short = 'V', long = "version", conflicts_with = "version")]
+    pub version_opt: Option<String>,
 
     /// Search in package descriptions (FTS).
     #[arg(long)]
@@ -138,6 +146,13 @@ pub struct SearchArgs {
     /// Use ASCII table borders instead of Unicode.
     #[arg(long)]
     pub ascii: bool,
+}
+
+impl SearchArgs {
+    /// Get the version filter from either positional or option argument.
+    pub fn get_version(&self) -> Option<&str> {
+        self.version.as_deref().or(self.version_opt.as_deref())
+    }
 }
 
 /// Arguments for the update command.
@@ -181,12 +196,12 @@ pub struct InfoArgs {
     pub package: String,
 
     /// Specific version to show info for (positional).
-    #[arg(conflicts_with = "version_flag")]
+    #[arg(conflicts_with = "version_opt")]
     pub version: Option<String>,
 
-    /// Specific version to show info for (flag).
+    /// Specific version to show info for (alternative to positional).
     #[arg(short = 'V', long = "version", conflicts_with = "version")]
-    pub version_flag: Option<String>,
+    pub version_opt: Option<String>,
 
     /// Output format.
     #[arg(short, long, value_enum, default_value_t = OutputFormatArg::Table)]
@@ -194,9 +209,9 @@ pub struct InfoArgs {
 }
 
 impl InfoArgs {
-    /// Selects the version string provided by the positional argument or the version flag.
+    /// Selects the version string provided by the positional argument or the version option.
     ///
-    /// Prefers the positional `version` field and falls back to `version_flag` if the positional is `None`.
+    /// Prefers the positional `version` field and falls back to `version_opt` if the positional is `None`.
     ///
     /// # Returns
     ///
@@ -208,7 +223,7 @@ impl InfoArgs {
     /// let args = InfoArgs {
     ///     package: "pkg".to_string(),
     ///     version: Some("1.2.3".to_string()),
-    ///     version_flag: None,
+    ///     version_opt: None,
     ///     format: OutputFormatArg::Table,
     /// };
     /// assert_eq!(args.get_version(), Some("1.2.3"));
@@ -216,7 +231,7 @@ impl InfoArgs {
     /// let args2 = InfoArgs {
     ///     package: "pkg".to_string(),
     ///     version: None,
-    ///     version_flag: Some("2.0.0".to_string()),
+    ///     version_opt: Some("2.0.0".to_string()),
     ///     format: OutputFormatArg::Table,
     /// };
     /// assert_eq!(args2.get_version(), Some("2.0.0"));
@@ -224,13 +239,13 @@ impl InfoArgs {
     /// let args3 = InfoArgs {
     ///     package: "pkg".to_string(),
     ///     version: None,
-    ///     version_flag: None,
+    ///     version_opt: None,
     ///     format: OutputFormatArg::Table,
     /// };
     /// assert_eq!(args3.get_version(), None);
     /// ```
     pub fn get_version(&self) -> Option<&str> {
-        self.version.as_deref().or(self.version_flag.as_deref())
+        self.version.as_deref().or(self.version_opt.as_deref())
     }
 }
 
@@ -330,6 +345,19 @@ pub struct ResetArgs {
     pub fetch: bool,
 }
 
+/// Arguments for the publish command (feature-gated).
+#[cfg(feature = "indexer")]
+#[derive(Parser, Debug)]
+pub struct PublishArgs {
+    /// Output directory for generated artifacts.
+    #[arg(short, long, default_value = "./publish")]
+    pub output: PathBuf,
+
+    /// Base URL prefix for manifest URLs (e.g., https://github.com/user/repo/releases/download/index-latest).
+    #[arg(long)]
+    pub url_prefix: Option<String>,
+}
+
 /// Output format argument.
 #[derive(ValueEnum, Clone, Copy, Debug, Default)]
 pub enum OutputFormatArg {
@@ -423,17 +451,36 @@ mod tests {
     }
 
     #[test]
-    fn test_search_with_options() {
+    fn test_search_with_version_option() {
         let args = Cli::try_parse_from(["nxv", "search", "python", "--version", "3.11", "--exact"])
             .unwrap();
         match args.command {
             Commands::Search(search) => {
                 assert_eq!(search.package, "python");
-                assert_eq!(search.version, Some("3.11".to_string()));
+                assert_eq!(search.get_version(), Some("3.11"));
                 assert!(search.exact);
             }
             _ => panic!("Expected Search command"),
         }
+    }
+
+    #[test]
+    fn test_search_with_version_positional() {
+        let args = Cli::try_parse_from(["nxv", "search", "python", "2.7"]).unwrap();
+        match args.command {
+            Commands::Search(search) => {
+                assert_eq!(search.package, "python");
+                assert_eq!(search.get_version(), Some("2.7"));
+            }
+            _ => panic!("Expected Search command"),
+        }
+    }
+
+    #[test]
+    fn test_search_version_option_and_positional_conflict() {
+        // Cannot use both positional version and -V/--version option
+        let result = Cli::try_parse_from(["nxv", "search", "python", "2.7", "-V", "3.11"]);
+        assert!(result.is_err());
     }
 
     #[test]

@@ -60,6 +60,8 @@ fn main() {
         Commands::Backfill(args) => cmd_backfill(&cli, args),
         #[cfg(feature = "indexer")]
         Commands::Reset(args) => cmd_reset(&cli, args),
+        #[cfg(feature = "indexer")]
+        Commands::Publish(args) => cmd_publish(&cli, args),
         Commands::Serve(args) => cmd_serve(&cli, args),
     };
 
@@ -219,7 +221,7 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
     if verbosity >= Verbosity::Debug {
         eprintln!("[debug] Search parameters:");
         eprintln!("[debug]   package: {:?}", args.package);
-        eprintln!("[debug]   version: {:?}", args.version);
+        eprintln!("[debug]   version: {:?}", args.get_version());
         eprintln!("[debug]   exact: {}", args.exact);
         eprintln!("[debug]   desc: {}", args.desc);
         eprintln!("[debug]   license: {:?}", args.license);
@@ -270,7 +272,7 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
     // Build search options from CLI args
     let opts = SearchOptions {
         query: args.package.clone(),
-        version: args.version.clone(),
+        version: args.get_version().map(|s| s.to_string()),
         exact: args.exact,
         desc: args.desc,
         license: args.license.clone(),
@@ -284,7 +286,7 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
     // Determine query type for logging
     let query_type = if args.desc {
         "FTS description search"
-    } else if args.version.is_some() {
+    } else if args.get_version().is_some() {
         "package+version search"
     } else if args.exact {
         "exact package search"
@@ -1159,6 +1161,39 @@ fn cmd_reset(_cli: &Cli, args: &cli::ResetArgs) -> Result<()> {
     if let Ok(head) = repo.head_commit() {
         eprintln!("  HEAD: {}", &head[..12.min(head.len())]);
     }
+
+    Ok(())
+}
+
+/// Generates publishable index artifacts (compressed database, bloom filter, manifest).
+///
+/// Creates distribution-ready files in the specified output directory:
+/// - `index.db.zst` - zstd-compressed SQLite database
+/// - `bloom.bin` - Bloom filter for fast negative lookups
+/// - `manifest.json` - Manifest with URLs and checksums
+///
+/// The `--url-prefix` option sets the base URL for manifest download URLs.
+///
+/// # Examples
+///
+/// ```no_run
+/// // Generate artifacts with custom URL prefix:
+/// // nxv publish --output ./publish --url-prefix https://example.com/releases
+/// ```
+#[cfg(feature = "indexer")]
+fn cmd_publish(cli: &Cli, args: &cli::PublishArgs) -> Result<()> {
+    use crate::index::publisher::publish_index;
+
+    if !cli.quiet && args.url_prefix.is_none() {
+        eprintln!("Warning: --url-prefix not set; manifest URLs will be local file names.");
+    }
+
+    publish_index(
+        &cli.db_path,
+        &args.output,
+        args.url_prefix.as_deref(),
+        !cli.quiet,
+    )?;
 
     Ok(())
 }

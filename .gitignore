@@ -4,6 +4,9 @@
 # Nix build output
 /result
 
+# Publish output
+/publish/
+
 # IDE
 .idea/
 .vscode/

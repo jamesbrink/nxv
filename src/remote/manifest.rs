@@ -246,3 +246,83 @@ mod tests {
         assert!(result.is_err());
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// Manifest::parse should never panic on arbitrary input.
+        #[test]
+        fn parse_never_panics(s in "\\PC*") {
+            // Should return Ok or Err, never panic
+            let _ = Manifest::parse(&s);
+        }
+
+        /// Valid JSON that doesn't match schema should return Err, not panic.
+        #[test]
+        fn parse_rejects_wrong_schema(
+            version in any::<i32>(),
+            commit in "[a-f0-9]{12}",
+        ) {
+            // Missing required fields
+            let json = format!(r#"{{"version": {}, "latest_commit": "{}"}}"#, version, commit);
+            let result = Manifest::parse(&json);
+            assert!(result.is_err());
+        }
+
+        /// Malformed URLs in manifest should parse but be detectable.
+        #[test]
+        fn parse_accepts_any_url_string(
+            url in ".*",
+            commit in "[a-f0-9]{12}",
+        ) {
+            let json = format!(
+                r#"{{
+                    "version": 1,
+                    "latest_commit": "{}",
+                    "latest_commit_date": "2024-01-15T12:00:00Z",
+                    "full_index": {{"url": "{}", "size_bytes": 100, "sha256": "abc"}},
+                    "bloom_filter": {{"url": "{}", "size_bytes": 100, "sha256": "def"}},
+                    "deltas": []
+                }}"#,
+                commit,
+                url.replace('\\', "\\\\").replace('"', "\\\""),
+                url.replace('\\', "\\\\").replace('"', "\\\"")
+            );
+            // Should parse without panicking (URL validation is done elsewhere)
+            let _ = Manifest::parse(&json);
+        }
+
+        /// find_delta should handle any commit string.
+        #[test]
+        fn find_delta_handles_any_commit(commit in ".*") {
+            let json = r#"{
+                "version": 1,
+                "latest_commit": "def456",
+                "latest_commit_date": "2024-01-15T12:00:00Z",
+                "full_index": {"url": "https://example.com/index.db.zst", "size_bytes": 100, "sha256": "abc"},
+                "bloom_filter": {"url": "https://example.com/bloom.bin", "size_bytes": 100, "sha256": "def"},
+                "deltas": [
+                    {"from_commit": "abc123", "to_commit": "def456", "url": "https://example.com/delta.sql.zst", "size_bytes": 100, "sha256": "ghi"}
+                ]
+            }"#;
+
+            let manifest = Manifest::parse(json).unwrap();
+            // Should never panic
+            let _ = manifest.find_delta(&commit);
+        }
+
+        /// Signature verification should reject random data without panicking.
+        #[test]
+        fn verify_rejects_random_signature(
+            manifest in "[\\x00-\\x7F]{10,100}",
+            signature in "[\\x00-\\x7F]{10,100}",
+        ) {
+            let result = verify_manifest_signature(manifest.as_bytes(), &signature);
+            // Should return Err, not panic
+            assert!(result.is_err());
+        }
+    }
+}

@@ -43,11 +43,15 @@ pub struct ApiClient {
     client: Client,
 }
 
+/// Default timeout for API requests in seconds.
+const DEFAULT_TIMEOUT_SECS: u64 = 30;
+
 impl ApiClient {
     /// Creates a new ApiClient with a normalized base URL and a configured HTTP client.
     ///
     /// The `base_url` is normalized by removing a trailing slash if present. The internal
-    /// blocking HTTP client is built with a 30 second timeout.
+    /// blocking HTTP client timeout defaults to 30 seconds but can be overridden via
+    /// the `NXV_API_TIMEOUT` environment variable (in seconds).
     ///
     /// # Examples
     ///
@@ -60,8 +64,12 @@ impl ApiClient {
     /// Returns `Ok(ApiClient)` on success, or `Err(NxvError::Network)` if building the HTTP client fails.
     pub fn new(base_url: impl Into<String>) -> Result<Self> {
         let base_url = base_url.into().trim_end_matches('/').to_string();
+        let timeout_secs = std::env::var("NXV_API_TIMEOUT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_TIMEOUT_SECS);
         let client = Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(timeout_secs))
             .build()
             .map_err(NxvError::Network)?;
 
@@ -422,7 +430,7 @@ impl ApiClient {
     ///
     /// Maps `404 Not Found` to `NxvError::PackageNotFound`, `503 Service Unavailable`
     /// to `NxvError::NoIndex`, and all other status codes to `NxvError::ApiError` with
-    /// the status string included.
+    /// the status code and URL included for debugging.
     ///
     /// # Examples
     ///
@@ -434,11 +442,14 @@ impl ApiClient {
     ///     _ => panic!("unexpected error variant"),
     /// }
     /// ```
-    fn map_status_error(&self, status: StatusCode, _url: &str) -> NxvError {
+    fn map_status_error(&self, status: StatusCode, url: &str) -> NxvError {
         match status {
             StatusCode::NOT_FOUND => NxvError::PackageNotFound("Resource not found".to_string()),
             StatusCode::SERVICE_UNAVAILABLE => NxvError::NoIndex,
-            _ => NxvError::ApiError(format!("HTTP error: {}", status)),
+            _ => NxvError::ApiError {
+                status: status.as_u16(),
+                url: url.to_string(),
+            },
         }
     }
 }
@@ -480,5 +491,170 @@ mod urlencoding {
             }
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod urlencoding_tests {
+        use super::urlencoding;
+
+        #[test]
+        fn test_encode_unreserved_chars() {
+            // Letters, digits, and unreserved chars should pass through unchanged
+            assert_eq!(urlencoding::encode("abcXYZ"), "abcXYZ");
+            assert_eq!(urlencoding::encode("0123456789"), "0123456789");
+            assert_eq!(urlencoding::encode("-_.~"), "-_.~");
+        }
+
+        #[test]
+        fn test_encode_spaces() {
+            assert_eq!(urlencoding::encode("hello world"), "hello%20world");
+            assert_eq!(urlencoding::encode("  "), "%20%20");
+        }
+
+        #[test]
+        fn test_encode_special_chars() {
+            assert_eq!(urlencoding::encode("foo/bar"), "foo%2Fbar");
+            assert_eq!(urlencoding::encode("a=b&c=d"), "a%3Db%26c%3Dd");
+            assert_eq!(urlencoding::encode("test?query"), "test%3Fquery");
+        }
+
+        #[test]
+        fn test_encode_unicode() {
+            // UTF-8 encoding of 'é' is C3 A9
+            assert_eq!(urlencoding::encode("café"), "caf%C3%A9");
+            // UTF-8 encoding of '你' is E4 BD A0
+            assert_eq!(urlencoding::encode("你好"), "%E4%BD%A0%E5%A5%BD");
+        }
+
+        #[test]
+        fn test_encode_empty_string() {
+            assert_eq!(urlencoding::encode(""), "");
+        }
+
+        #[test]
+        fn test_encode_realistic_package_names() {
+            // Common package name patterns
+            assert_eq!(urlencoding::encode("python3"), "python3");
+            assert_eq!(urlencoding::encode("gcc-12"), "gcc-12");
+            assert_eq!(urlencoding::encode("node_modules"), "node_modules");
+            assert_eq!(urlencoding::encode("nixpkgs.python3"), "nixpkgs.python3");
+        }
+    }
+
+    mod api_client_tests {
+        use super::*;
+        use serial_test::serial;
+
+        #[test]
+        fn test_new_trims_trailing_slash() {
+            let client = ApiClient::new("https://example.com/").unwrap();
+            assert!(!client.base_url.ends_with('/'));
+        }
+
+        #[test]
+        fn test_new_no_trailing_slash() {
+            let client = ApiClient::new("https://example.com").unwrap();
+            assert_eq!(client.base_url, "https://example.com");
+        }
+
+        #[test]
+        fn test_new_multiple_trailing_slashes() {
+            // trim_end_matches removes ALL matching chars, so both slashes are removed
+            let client = ApiClient::new("https://example.com//").unwrap();
+            assert_eq!(client.base_url, "https://example.com");
+        }
+
+        #[test]
+        fn test_map_status_error_not_found() {
+            let client = ApiClient::new("https://example.com").unwrap();
+            let err = client.map_status_error(StatusCode::NOT_FOUND, "/test");
+            assert!(matches!(err, NxvError::PackageNotFound(_)));
+        }
+
+        #[test]
+        fn test_map_status_error_service_unavailable() {
+            let client = ApiClient::new("https://example.com").unwrap();
+            let err = client.map_status_error(StatusCode::SERVICE_UNAVAILABLE, "/test");
+            assert!(matches!(err, NxvError::NoIndex));
+        }
+
+        #[test]
+        fn test_map_status_error_other() {
+            let client = ApiClient::new("https://example.com").unwrap();
+            let err = client.map_status_error(StatusCode::INTERNAL_SERVER_ERROR, "/test");
+            match err {
+                NxvError::ApiError { status, url } => {
+                    assert_eq!(status, 500);
+                    assert_eq!(url, "/test");
+                }
+                _ => panic!("Expected ApiError"),
+            }
+        }
+
+        #[test]
+        #[serial(env)]
+        fn test_timeout_env_var_invalid_ignored() {
+            // Invalid values should fall back to default
+            // SAFETY: Test isolation via #[serial(env)] ensures no concurrent access
+            unsafe { std::env::set_var("NXV_API_TIMEOUT", "not_a_number") };
+            let client = ApiClient::new("https://example.com").unwrap();
+            assert!(!client.base_url.is_empty()); // Client created successfully
+            unsafe { std::env::remove_var("NXV_API_TIMEOUT") };
+        }
+
+        #[test]
+        #[serial(env)]
+        fn test_timeout_env_var_valid() {
+            // SAFETY: Test isolation via #[serial(env)] ensures no concurrent access
+            unsafe { std::env::set_var("NXV_API_TIMEOUT", "60") };
+            let client = ApiClient::new("https://example.com").unwrap();
+            assert!(!client.base_url.is_empty()); // Client created successfully
+            unsafe { std::env::remove_var("NXV_API_TIMEOUT") };
+        }
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::urlencoding;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// URL encoding should never panic on any input.
+        #[test]
+        fn encode_never_panics(s in "\\PC*") {
+            let _ = urlencoding::encode(&s);
+        }
+
+        /// Encoded strings should only contain safe URL characters.
+        #[test]
+        fn encode_produces_safe_chars(s in "[\\x00-\\x7F]{0,50}") {
+            let encoded = urlencoding::encode(&s);
+            for c in encoded.chars() {
+                prop_assert!(
+                    c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~' | '%'),
+                    "Unexpected character in encoded string: {:?}",
+                    c
+                );
+            }
+        }
+
+        /// Encoded strings should be at least as long as input.
+        #[test]
+        fn encode_length_reasonable(s in ".{0,30}") {
+            let encoded = urlencoding::encode(&s);
+            prop_assert!(encoded.len() >= s.len());
+        }
+
+        /// Unreserved characters should pass through unchanged.
+        #[test]
+        fn unreserved_chars_unchanged(s in "[a-zA-Z0-9._~-]+") {
+            let encoded = urlencoding::encode(&s);
+            prop_assert_eq!(encoded, s);
+        }
     }
 }

@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/jamesbrink/nxv/actions/workflows/ci.yml/badge.svg)](https://github.com/jamesbrink/nxv/actions/workflows/ci.yml)
 [![Release](https://github.com/jamesbrink/nxv/actions/workflows/release.yml/badge.svg)](https://github.com/jamesbrink/nxv/actions/workflows/release.yml)
+[![Crates.io](https://img.shields.io/crates/v/nxv.svg)](https://crates.io/crates/nxv)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
 [![Nix Flake](https://img.shields.io/badge/nix-flake-blue?logo=nixos)](https://nixos.wiki/wiki/Flakes)
@@ -10,6 +11,15 @@
 **Find any version of any Nix package, instantly.**
 
 nxv indexes the entire nixpkgs git history to help you discover when packages were added, which versions existed, and the exact commit to use with `nix shell nixpkgs/<commit>#package`.
+
+## Why nxv?
+
+Because sometimes you need Python 2.7 for that legacy project nobody wants to touch. Or Ruby 2.6 because the Gemfile hasn't been updated since the Obama administration.
+Instead of spending your afternoon spelunking through GitHub commits and praying to the Nix gods, just ask nxv. It's indexed 8+ years of nixpkgs history so you don't have to.
+
+<p align="center">
+  <img src="./docs/where-is-it.gif" alt="nxv in action" />
+</p>
 
 > **Early Development** — No public index available yet. Building your own index requires a local nixpkgs clone.
 
@@ -37,7 +47,8 @@ nxv indexes the entire nixpkgs git history to help you discover when packages we
 └─────────────────┘     └─────────────────┘     └─────────────────┘
 ```
 
-The indexer walks nixpkgs commits (from 2017+), runs `nix eval` to extract package metadata, and stores version ranges in SQLite. Users download a pre-built compressed index (~150MB) and query it locally or via the API server.
+The indexer walks nixpkgs commits (from 2017+), runs `nix eval` to extract package metadata, and stores version ranges in SQLite.
+Users download a pre-built compressed index (~150MB) and query it locally or via the API server.
 
 ## Installation
 
@@ -47,8 +58,11 @@ nix run github:jamesbrink/nxv -- search python
 
 # Install to profile
 nix profile install github:jamesbrink/nxv
+```
 
-# Or add to your flake
+Or add to your flake:
+
+```nix
 {
   inputs.nxv.url = "github:jamesbrink/nxv";
 
@@ -61,6 +75,20 @@ nix profile install github:jamesbrink/nxv
     };
   };
 }
+```
+
+### Quick Install (curl)
+
+```bash
+curl -sSfL https://raw.githubusercontent.com/jamesbrink/nxv/main/install.sh | sh
+```
+
+For extra safety, download the script first, review it, and verify release checksums from GitHub Releases. You can also set `NXV_VERIFY=1` to enforce checksum verification.
+
+### Cargo
+
+```bash
+cargo install nxv
 ```
 
 ### Pre-built Binaries
@@ -82,7 +110,7 @@ Shell completions for bash, zsh, and fish are included via `nxv completions <she
 
 ```bash
 nxv search python                    # Find all python packages
-nxv search python --version 3.11     # Filter by version prefix
+nxv search python 3.11               # Filter by version prefix
 nxv search python --exact            # Exact name match only
 nxv search --desc "json parser"      # Search descriptions (FTS)
 nxv search python --format json      # JSON output
@@ -193,6 +221,15 @@ Run the API server as a systemd service with automatic updates:
 
 ## Building Your Own Index
 
+The self-hosting workflow is:
+
+1. **Build** — Run `nxv index` against a nixpkgs clone to create the SQLite database
+2. **Publish** — Run `nxv publish` to generate compressed artifacts with a manifest
+3. **Host** — Upload artifacts to any static file host (S3, GitHub Releases, etc.)
+4. **Configure** — Point clients at your manifest via `NXV_MANIFEST_URL`
+
+### Indexing
+
 Requires the `indexer` feature and a local nixpkgs clone:
 
 ```bash
@@ -222,38 +259,156 @@ nxv backfill --nixpkgs-path ./nixpkgs
 nxv backfill --nixpkgs-path ./nixpkgs --history
 ```
 
+### Publishing Your Index
+
+Generate distribution-ready artifacts with the `publish` command:
+
+```bash
+# Generate compressed index, bloom filter, and manifest
+nxv publish --output ./publish --url-prefix https://your-server.com/nxv
+
+# Files created:
+#   publish/index.db.zst   - Compressed SQLite database (~150MB)
+#   publish/bloom.bin      - Bloom filter for fast lookups (~150KB)
+#   publish/manifest.json  - Manifest with URLs and checksums
+```
+
+The `--url-prefix` sets the base URL that will appear in the manifest. This should match where you'll host the files.
+
+### Integrity and Rollback
+
+- `manifest.json` includes SHA256 checksums; manifest signing is not implemented yet.
+- To roll back a bad index, re-upload a previous `index.db.zst`, `bloom.bin`, and `manifest.json` to the same location or point `NXV_MANIFEST_URL` at a known-good manifest.
+
 ### Hosting Your Own Index
 
-<details>
-<summary>Manifest format</summary>
+You can host the published artifacts anywhere that serves static files:
 
-Create a `manifest.json`:
+<details>
+<summary>GitHub Releases</summary>
+
+```bash
+# Generate artifacts
+nxv publish --output ./publish \
+  --url-prefix https://github.com/YOUR_USER/YOUR_REPO/releases/download/index-latest
+
+# Create release and upload
+gh release create index-latest \
+  --title "Package Index" \
+  --notes "nxv package index" \
+  --latest=false
+
+gh release upload index-latest publish/* --clobber
+```
+
+</details>
+
+<details>
+<summary>Amazon S3</summary>
+
+```bash
+# Generate artifacts
+nxv publish --output ./publish \
+  --url-prefix https://your-bucket.s3.amazonaws.com/nxv
+
+# Upload to S3
+aws s3 sync ./publish s3://your-bucket/nxv/ --acl public-read
+```
+
+</details>
+
+<details>
+<summary>Cloudflare R2</summary>
+
+```bash
+# Generate artifacts
+nxv publish --output ./publish \
+  --url-prefix https://your-bucket.r2.cloudflarestorage.com/nxv
+
+# Upload using rclone or wrangler
+rclone sync ./publish r2:your-bucket/nxv/
+```
+
+</details>
+
+<details>
+<summary>Any static file server</summary>
+
+```bash
+# Generate artifacts
+nxv publish --output ./publish \
+  --url-prefix https://your-server.com/nxv
+
+# Copy to your web server
+rsync -av ./publish/ your-server:/var/www/nxv/
+```
+
+</details>
+
+### Using a Custom Index
+
+There are two ways clients can consume your index:
+
+#### Option A: Static files (recommended)
+
+Clients download the index once and query locally. Low server load, works offline after initial download.
+
+```bash
+# One-time download
+nxv update --manifest-url https://your-server.com/nxv/manifest.json
+
+# Or set permanently
+export NXV_MANIFEST_URL=https://your-server.com/nxv/manifest.json
+```
+
+#### Option B: API server
+
+Run `nxv serve` to provide a web UI and REST API. Clients query remotely without downloading the index. Good for shared/team environments or the web UI.
+
+```bash
+# Server side
+nxv serve --host 0.0.0.0 --port 8080
+
+# Client side
+export NXV_API_URL=https://your-server.com:8080
+nxv search python  # Queries remote API
+```
+
+#### NixOS module with custom manifest
+
+Runs the API server with auto-updates from your manifest:
+
+```nix
+services.nxv = {
+  enable = true;
+  manifestUrl = "https://your-server.com/nxv/manifest.json";
+  host = "0.0.0.0";
+  autoUpdate.enable = true;
+};
+```
+
+<details>
+<summary>Manifest format reference</summary>
+
+The `manifest.json` format:
 
 ```json
 {
-  "version": 2,
+  "version": 1,
   "latest_commit": "abc123def456789...",
   "latest_commit_date": "2024-01-15T12:00:00Z",
   "full_index": {
-    "url": "https://your-server.com/index.db.zst",
+    "url": "https://your-server.com/nxv/index.db.zst",
     "size_bytes": 150000000,
     "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
   },
   "bloom_filter": {
-    "url": "https://your-server.com/bloom.bin",
+    "url": "https://your-server.com/nxv/bloom.bin",
     "size_bytes": 150000,
     "sha256": "d7a8fbb307d7809469ca9abcb0082e4f8d5651e46d3cdb762d02d0bf37c9e592"
   },
   "deltas": []
 }
-```
-
-Point clients at your manifest:
-
-```bash
-nxv update --manifest-url https://your-server.com/manifest.json
-# or
-export NXV_MANIFEST_URL=https://your-server.com/manifest.json
 ```
 
 </details>
@@ -262,10 +417,12 @@ export NXV_MANIFEST_URL=https://your-server.com/manifest.json
 
 | Variable | Description |
 | -------- | ----------- |
-| `NXV_DB_PATH` | Path to index database (bloom filter stored as sibling `.bloom` file) |
+| `NXV_DB_PATH` | Path to index database (bloom filter stored as sibling file) |
 | `NXV_API_URL` | Remote API URL (CLI uses remote instead of local DB when set) |
 | `NXV_MANIFEST_URL` | Custom manifest URL for index downloads |
 | `NO_COLOR` | Disable colored output |
+| `NXV_INSTALL_DIR` | Custom install directory for curl installer (default: `~/.local/bin`) |
+| `NXV_VERSION` | Specific version for curl installer (default: latest) |
 
 ## Development
 
@@ -293,7 +450,8 @@ src/
 └── index/           # Indexer (feature-gated)
     ├── git.rs       # Git history traversal
     ├── extractor.rs # Nix evaluation
-    └── backfill.rs  # Metadata backfill
+    ├── backfill.rs  # Metadata backfill
+    └── publisher.rs # Index publishing
 ```
 
 ## License

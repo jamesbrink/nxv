@@ -9,7 +9,7 @@ use std::path::Path;
 
 /// Default manifest URL.
 pub const DEFAULT_MANIFEST_URL: &str =
-    "https://github.com/jamesbrink/nxv/releases/latest/download/manifest.json";
+    "https://github.com/jamesbrink/nxv/releases/download/index-latest/manifest.json";
 
 /// Update status after checking for updates.
 #[derive(Debug, Clone)]

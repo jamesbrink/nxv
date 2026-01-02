@@ -1,40 +1,38 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-
-- `src/` contains the Rust CLI implementation. Key areas include command parsing in `src/cli.rs`, output formats in `src/output/`, indexing logic behind the `indexer` feature in `src/index/`, and remote update logic in `src/remote/`.
-- `tests/` holds CLI integration tests (see `tests/integration.rs`). Unit tests live alongside modules under `mod tests`.
-- `benches/` contains Criterion benchmarks for search and indexing.
-- `docs/` includes implementation notes and specs. Build artifacts land in `target/` (generated).
+- `src/` contains the Rust CLI, database, remote update logic, server, and indexer (feature-gated). See `src/index/` for indexer internals and `src/server/` for the HTTP API.
+- `tests/` holds integration tests (notably `tests/integration.rs`).
+- `frontend/` contains the static HTML/CSS/JS for the web UI served by `nxv serve`.
+- `docs/` hosts implementation specs and design notes.
+- `scripts/` includes operational scripts (e.g., cache publishing).
 
 ## Build, Test, and Development Commands
-
-- `nix develop` or `direnv allow` sets up the reproducible dev shell.
-- `cargo build` / `cargo build --release` builds debug or release binaries.
-- `cargo run -- <args>` runs the CLI locally.
-- `cargo build --features indexer` enables indexing workflows.
-- `cargo test` runs unit tests; `cargo test --test integration` runs CLI integration tests.
-- `cargo test --features indexer` runs all tests including indexer-only ones.
-- `cargo clippy -- -D warnings` enforces linting; `cargo fmt` formats the codebase.
+- `nix develop` enters the Nix dev shell with the Rust toolchain.
+- `cargo build` builds the debug CLI; `cargo build --features indexer` enables indexer support.
+- `cargo test` runs the default test suite; `cargo test --features indexer` includes indexer tests.
+- `cargo clippy -- -D warnings` runs linting with warnings treated as errors.
+- `cargo fmt` formats Rust code.
+- `nix flake check` runs the full Nix CI checks.
 
 ## Coding Style & Naming Conventions
-
-- Use `cargo fmt` (rustfmt defaults: 4-space indentation, trailing commas where applicable).
-- Run `cargo clippy -- -D warnings` before pushing changes.
-- Rust naming conventions apply: `snake_case` for functions/modules/files, `CamelCase` for types, `SCREAMING_SNAKE_CASE` for constants.
+- Rust is formatted with rustfmt defaults (4-space indentation).
+- Naming follows Rust conventions: `snake_case` for modules/functions, `CamelCase` for types, and `SCREAMING_SNAKE_CASE` for constants.
+- Run `cargo fmt` and `cargo clippy -- -D warnings` before submitting changes.
 
 ## Testing Guidelines
-
-- Unit tests live in each module’s `mod tests` section; keep them focused on pure logic and error handling.
-- Integration tests are in `tests/integration.rs` and exercise the CLI end-to-end.
-- Benchmarks live in `benches/` and run with `cargo bench`.
+- Unit tests live alongside code in `src/` modules using `#[test]`.
+- Integration tests are in `tests/integration.rs` and use `assert_cmd` and `tempfile`.
+- Some indexer tests require `nix` and are marked `#[ignore]`; run them explicitly when needed.
 
 ## Commit & Pull Request Guidelines
+- Commit messages are short, imperative, and title-style (e.g., "Fix CI workflow").
+- PRs should include: a clear description, linked issue (if any), and the test commands run.
+- Include screenshots or recordings for UI changes in `frontend/`.
 
-- Commit messages follow a short imperative summary without prefixes (e.g., “Add pure Nix flake with crane for reproducible builds”).
-- Keep commits scoped to a single change and explain behavior changes in the body if needed.
-- PRs should include a concise description, testing commands run, and any relevant context or linked issues.
+## Configuration & Data Paths
+- Key environment variables: `NXV_DB_PATH`, `NXV_API_URL`, `NXV_MANIFEST_URL`.
+- Default data locations are platform-specific (see `CLAUDE.md` and `README.md`).
 
-## Feature Flags & Indexing
-
-- The `indexer` feature gates index creation workflows; use it for developer-only indexing tasks such as `nxv index --nixpkgs-path <path> --full`.
+## Agent Notes
+- For deeper architecture and feature details, read `CLAUDE.md`.

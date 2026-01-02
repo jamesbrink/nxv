@@ -129,7 +129,7 @@ pub struct ServerConfig {
 /// let router = crate::server::build_router(state, None);
 /// // router can now be served with Axum.
 /// ```
-fn build_router(state: Arc<AppState>, cors: Option<CorsLayer>) -> Router {
+pub(crate) fn build_router(state: Arc<AppState>, cors: Option<CorsLayer>) -> Router {
     // Cache header values
     let cache_1h = HeaderValue::from_static("public, max-age=3600"); // 1 hour
     let cache_24h = HeaderValue::from_static("public, max-age=86400"); // 24 hours
@@ -318,4 +318,368 @@ async fn shutdown_signal() {
     tokio::signal::ctrl_c()
         .await
         .expect("Failed to install CTRL+C signal handler");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use http_body_util::BodyExt;
+    use rusqlite::Connection;
+    use serde_json::Value;
+    use tempfile::tempdir;
+    use tower::ServiceExt;
+
+    /// Create a test database with sample package data.
+    fn create_test_db(path: &std::path::Path) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE package_versions (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                version TEXT NOT NULL,
+                first_commit_hash TEXT NOT NULL,
+                first_commit_date INTEGER NOT NULL,
+                last_commit_hash TEXT NOT NULL,
+                last_commit_date INTEGER NOT NULL,
+                attribute_path TEXT NOT NULL,
+                description TEXT,
+                license TEXT,
+                homepage TEXT,
+                maintainers TEXT,
+                platforms TEXT,
+                source_path TEXT,
+                UNIQUE(attribute_path, version, first_commit_hash)
+            );
+            CREATE INDEX idx_packages_name ON package_versions(name);
+            CREATE INDEX idx_packages_attr ON package_versions(attribute_path);
+            CREATE VIRTUAL TABLE package_versions_fts USING fts5(
+                attribute_path, description, content='package_versions', content_rowid='id'
+            );
+
+            INSERT INTO meta (key, value) VALUES ('last_indexed_commit', 'abc1234567890def');
+            INSERT INTO package_versions
+                (name, version, first_commit_hash, first_commit_date,
+                 last_commit_hash, last_commit_date, attribute_path, description, license)
+            VALUES
+                ('python', '3.11.0', 'aaa111', 1700000000, 'bbb222', 1700100000, 'python311', 'Python interpreter', 'PSF'),
+                ('python', '3.12.0', 'ccc333', 1700200000, 'ddd444', 1700300000, 'python312', 'Python interpreter', 'PSF'),
+                ('nodejs', '20.0.0', 'eee555', 1700400000, 'fff666', 1700500000, 'nodejs_20', 'Node.js runtime', 'MIT'),
+                ('hello', '2.10', 'ggg777', 1700600000, 'hhh888', 1700700000, 'hello', 'Hello World program', 'GPL-3.0');
+
+            INSERT INTO package_versions_fts (rowid, attribute_path, description)
+            SELECT id, attribute_path, description FROM package_versions;
+            "#,
+        )
+        .unwrap();
+    }
+
+    /// Helper to make a request and get the response body as JSON.
+    async fn get_json(app: &Router, uri: &str) -> (StatusCode, Value) {
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        (status, json)
+    }
+
+    #[tokio::test]
+    async fn test_health_check() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None);
+
+        let (status, json) = get_json(&app, "/api/v1/health").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["status"], "ok");
+        assert!(json["version"].is_string());
+        assert_eq!(json["index_commit"], "abc1234567890def");
+    }
+
+    #[tokio::test]
+    async fn test_search_packages() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None);
+
+        let (status, json) = get_json(&app, "/api/v1/search?q=python").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["data"].is_array());
+        let data = json["data"].as_array().unwrap();
+        assert_eq!(data.len(), 2); // python311 and python312
+        assert!(json["meta"]["total"].as_u64().unwrap() >= 2);
+    }
+
+    #[tokio::test]
+    async fn test_search_exact_match() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None);
+
+        let (status, json) = get_json(&app, "/api/v1/search?q=hello&exact=true").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let data = json["data"].as_array().unwrap();
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0]["attribute_path"], "hello");
+    }
+
+    #[tokio::test]
+    async fn test_search_with_version_filter() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None);
+
+        let (status, json) = get_json(&app, "/api/v1/search?q=python&version=3.12").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let data = json["data"].as_array().unwrap();
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0]["version"], "3.12.0");
+    }
+
+    #[tokio::test]
+    async fn test_search_description() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None);
+
+        let (status, json) = get_json(&app, "/api/v1/search/description?q=runtime").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let data = json["data"].as_array().unwrap();
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0]["name"], "nodejs");
+    }
+
+    #[tokio::test]
+    async fn test_get_package() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None);
+
+        let (status, json) = get_json(&app, "/api/v1/packages/hello").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let data = json["data"].as_array().unwrap();
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0]["name"], "hello");
+        assert_eq!(data[0]["version"], "2.10");
+    }
+
+    #[tokio::test]
+    async fn test_get_package_not_found() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None);
+
+        let (status, json) = get_json(&app, "/api/v1/packages/nonexistent").await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(json["code"], "NOT_FOUND");
+        assert!(json["message"].is_string());
+    }
+
+    #[tokio::test]
+    async fn test_get_version_history() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None);
+
+        let (status, json) = get_json(&app, "/api/v1/packages/python311/history").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let data = json["data"].as_array().unwrap();
+        assert!(!data.is_empty());
+        assert!(data[0]["version"].is_string());
+        assert!(data[0]["first_seen"].is_string());
+        assert!(data[0]["last_seen"].is_string());
+    }
+
+    #[tokio::test]
+    async fn test_get_version_info() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None);
+
+        let (status, json) = get_json(&app, "/api/v1/packages/python311/versions/3.11.0").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["name"], "python");
+        assert_eq!(json["data"]["version"], "3.11.0");
+    }
+
+    #[tokio::test]
+    async fn test_get_version_not_found() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None);
+
+        let (status, json) = get_json(&app, "/api/v1/packages/python311/versions/9.9.9").await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(json["code"], "NOT_FOUND");
+        assert!(json["message"].is_string());
+    }
+
+    #[tokio::test]
+    async fn test_get_stats() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None);
+
+        let (status, json) = get_json(&app, "/api/v1/stats").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["total_ranges"], 4);
+        assert_eq!(json["data"]["unique_names"], 3); // python, nodejs, hello
+    }
+
+    #[tokio::test]
+    async fn test_first_occurrence() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None);
+
+        let (status, json) =
+            get_json(&app, "/api/v1/packages/python311/versions/3.11.0/first").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["first_commit_hash"], "aaa111");
+    }
+
+    #[tokio::test]
+    async fn test_last_occurrence() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None);
+
+        let (status, json) =
+            get_json(&app, "/api/v1/packages/python311/versions/3.11.0/last").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["last_commit_hash"], "bbb222");
+    }
+
+    #[tokio::test]
+    async fn test_pagination() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None);
+
+        // Request with limit=1
+        let (status, json) = get_json(&app, "/api/v1/search?q=python&limit=1").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let data = json["data"].as_array().unwrap();
+        assert_eq!(data.len(), 1);
+        assert_eq!(json["meta"]["limit"], 1);
+        assert!(json["meta"]["has_more"].as_bool().unwrap());
+
+        // Request with offset
+        let (status, json) = get_json(&app, "/api/v1/search?q=python&limit=1&offset=1").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let data = json["data"].as_array().unwrap();
+        assert_eq!(data.len(), 1);
+        assert_eq!(json["meta"]["offset"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_static_routes() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None);
+
+        // Test homepage
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Test favicon
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/favicon.svg")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Test OpenAPI spec
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/openapi.json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
 }

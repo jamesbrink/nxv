@@ -848,6 +848,12 @@
       // Get vulnerabilities list from package
       const getVulnerabilities = (pkg) => parseVulnerabilities(pkg);
 
+      // Safely get short commit hash (7 chars) with null/undefined handling
+      const getShortHash = (hash) => {
+        if (!hash || typeof hash !== 'string') return '';
+        return hash.substring(0, Math.min(7, hash.length));
+      };
+
       // Format platforms into clean arch badges
       const formatPlatforms = (platforms) => {
         if (!platforms) return [];
@@ -1143,7 +1149,8 @@
       const renderPackageCard = (pkg) => {
         const cardId = `pkg-${pkg.id}`;
         const isLegacy = predatesFlakes(pkg.last_commit_date);
-        const shortHash = pkg.last_commit_hash.substring(0, 7);
+        const shortHash = getShortHash(pkg.last_commit_hash);
+        const hasCommitHash = shortHash.length > 0;
 
         // Use flake syntax for modern packages, legacy fetchTarball for old ones
         // Add NIXPKGS_ALLOW_INSECURE=1 and --impure for insecure packages
@@ -1151,17 +1158,24 @@
         const insecurePrefix = pkgInsecure ? 'NIXPKGS_ALLOW_INSECURE=1 ' : '';
         const impureFlag = pkgInsecure ? ' --impure' : '';
 
-        const nixExpr = isLegacy
-          ? `(import (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/${shortHash}.tar.gz") {}).${pkg.attribute_path}`
-          : `nixpkgs#${pkg.attribute_path}  # or nixpkgs/${shortHash}#${pkg.attribute_path}`;
-        const nixShell = isLegacy
-          ? `${insecurePrefix}nix-shell -p '(import (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/${shortHash}.tar.gz") {}).${pkg.attribute_path}'`
-          : `${insecurePrefix}nix shell${impureFlag} nixpkgs/${shortHash}#${pkg.attribute_path}`;
+        // Only generate expressions if we have a valid commit hash
+        const nixExpr = hasCommitHash
+          ? (isLegacy
+              ? `(import (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/${shortHash}.tar.gz") {}).${pkg.attribute_path}`
+              : `nixpkgs#${pkg.attribute_path}  # or nixpkgs/${shortHash}#${pkg.attribute_path}`)
+          : '';
+        const nixShell = hasCommitHash
+          ? (isLegacy
+              ? `${insecurePrefix}nix-shell -p '(import (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/${shortHash}.tar.gz") {}).${pkg.attribute_path}'`
+              : `${insecurePrefix}nix shell${impureFlag} nixpkgs/${shortHash}#${pkg.attribute_path}`)
+          : '';
 
-        // Store expressions in the map
-        expressionStore.set(`${cardId}-expr`, nixExpr);
-        expressionStore.set(`${cardId}-shell`, nixShell);
-        expressionStore.set(`${cardId}-legacy`, isLegacy);
+        // Store expressions in the map (only if valid)
+        if (hasCommitHash) {
+          expressionStore.set(`${cardId}-expr`, nixExpr);
+          expressionStore.set(`${cardId}-shell`, nixShell);
+          expressionStore.set(`${cardId}-legacy`, isLegacy);
+        }
 
         return `
         <div class="result-card" data-attr="${escapeHtml(pkg.attribute_path)}">
@@ -1215,6 +1229,7 @@
               : ''
           }
           <div class="result-actions">
+            ${hasCommitHash ? `
             <button class="btn copy-expr" data-id="${cardId}-expr">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
               ${isLegacy ? 'Copy Nix Expression' : 'Copy Flake Ref'}
@@ -1223,20 +1238,21 @@
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m4 17 6-6-6-6M12 19h8"/></svg>
               ${isLegacy ? 'Copy nix-shell' : 'Copy nix shell'}
             </button>
+            ` : ''}
             ${
-              pkg.source_path
+              hasCommitHash && pkg.source_path
                 ? `
               <a class="btn" href="https://github.com/NixOS/nixpkgs/blob/${pkg.last_commit_hash}/${escapeHtml(pkg.source_path)}" target="_blank" rel="noopener" title="View source in nixpkgs">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
                 View Source
               </a>
             `
-                : `
+                : hasCommitHash ? `
               <a class="btn" href="https://github.com/NixOS/nixpkgs/tree/${pkg.last_commit_hash}" target="_blank" rel="noopener" title="View nixpkgs at this commit">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
                 View nixpkgs
               </a>
-            `
+            ` : ''
             }
             ${
               pkg.homepage && isSafeUrl(pkg.homepage)

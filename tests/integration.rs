@@ -12,7 +12,21 @@ fn nxv() -> Command {
     Command::cargo_bin("nxv").unwrap()
 }
 
-/// Create a test database with sample data.
+/// Creates a SQLite test database at the given path populated with a schema and sample package rows.
+///
+/// The database will contain `meta` and `package_versions` tables, relevant indexes,
+/// an FTS5 virtual table for full-text search, and sample package/version entries
+/// (e.g., Python, Node.js, Firefox, rustc) useful for integration tests.
+///
+/// # Examples
+///
+/// ```
+/// use tempfile::tempdir;
+/// let tmp = tempdir().unwrap();
+/// let db_path = tmp.path().join("test.db");
+/// create_test_db(&db_path);
+/// assert!(db_path.exists());
+/// ```
 fn create_test_db(path: &std::path::Path) {
     use rusqlite::Connection;
 
@@ -70,17 +84,19 @@ fn create_test_db(path: &std::path::Path) {
             (name, version, first_commit_hash, first_commit_date, last_commit_hash, last_commit_date,
              attribute_path, description, license, homepage)
         VALUES
-            ('python', '3.11.0', 'abc1234567890', 1700000000, 'def1234567890', 1700100000,
+            ('python-3.11.0', '3.11.0', 'abc1234567890', 1700000000, 'def1234567890', 1700100000,
+             'python', 'Python programming language', '["MIT"]', 'https://python.org'),
+            ('python-3.11.0', '3.11.0', 'abc1234567890', 1700000000, 'def1234567890', 1700100000,
              'python311', 'Python programming language', '["MIT"]', 'https://python.org'),
-            ('python', '3.12.0', 'ghi1234567890', 1701000000, 'jkl1234567890', 1701100000,
+            ('python-3.12.0', '3.12.0', 'ghi1234567890', 1701000000, 'jkl1234567890', 1701100000,
              'python312', 'Python programming language', '["MIT"]', 'https://python.org'),
-            ('python2', '2.7.18', 'mno1234567890', 1600000000, 'pqr1234567890', 1600100000,
-             'python27', 'Python 2 interpreter', '["PSF"]', 'https://python.org'),
-            ('nodejs', '20.0.0', 'stu1234567890', 1702000000, 'vwx1234567890', 1702100000,
-             'nodejs_20', 'Node.js JavaScript runtime', '["MIT"]', 'https://nodejs.org'),
-            ('firefox', '120.0', 'aaa1234567890', 1703000000, 'bbb1234567890', 1703100000,
+            ('python2-2.7.18', '2.7.18', 'mno1234567890', 1600000000, 'pqr1234567890', 1600100000,
+             'python2', 'Python 2 interpreter', '["PSF"]', 'https://python.org'),
+            ('nodejs-20.0.0', '20.0.0', 'stu1234567890', 1702000000, 'vwx1234567890', 1702100000,
+             'nodejs', 'Node.js JavaScript runtime', '["MIT"]', 'https://nodejs.org'),
+            ('firefox-120.0', '120.0', 'aaa1234567890', 1703000000, 'bbb1234567890', 1703100000,
              'firefox', 'Mozilla Firefox web browser', '["MPL-2.0"]', 'https://firefox.com'),
-            ('rustc', '1.75.0', 'ccc1234567890', 1704000000, 'ddd1234567890', 1704100000,
+            ('rustc-1.75.0', '1.75.0', 'ccc1234567890', 1704000000, 'ddd1234567890', 1704100000,
              'rustc', 'The Rust compiler', '["MIT", "Apache-2.0"]', 'https://rust-lang.org');
         "#,
     )
@@ -103,6 +119,7 @@ fn test_help_displays() {
         .stdout(predicate::str::contains("search"))
         .stdout(predicate::str::contains("update"))
         .stdout(predicate::str::contains("info"))
+        .stdout(predicate::str::contains("stats"))
         .stdout(predicate::str::contains("history"))
         .stdout(predicate::str::contains("completions"));
 }
@@ -332,17 +349,17 @@ fn test_search_sort_options() {
 }
 
 // ============================================================================
-// Info Command Tests
+// Stats Command Tests
 // ============================================================================
 
 #[test]
-fn test_info_with_database() {
+fn test_stats_with_database() {
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("test.db");
     create_test_db(&db_path);
 
     nxv()
-        .args(["--db-path", db_path.to_str().unwrap(), "info"])
+        .args(["--db-path", db_path.to_str().unwrap(), "stats"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Index Information"))
@@ -351,12 +368,12 @@ fn test_info_with_database() {
 }
 
 #[test]
-fn test_info_no_database() {
+fn test_stats_no_database() {
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("nonexistent.db");
 
     nxv()
-        .args(["--db-path", db_path.to_str().unwrap(), "info"])
+        .args(["--db-path", db_path.to_str().unwrap(), "stats"])
         .assert()
         .success()
         .stdout(predicate::str::contains("No index found"));
@@ -519,7 +536,7 @@ fn test_no_color_option() {
 #[test]
 fn test_verbose_conflicts_with_quiet() {
     nxv()
-        .args(["-v", "-q", "info"])
+        .args(["-v", "-q", "stats"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("cannot be used with"));
@@ -645,7 +662,7 @@ fn test_custom_db_path() {
     create_test_db(&db_path);
 
     nxv()
-        .args(["--db-path", db_path.to_str().unwrap(), "info"])
+        .args(["--db-path", db_path.to_str().unwrap(), "stats"])
         .assert()
         .success()
         .stdout(predicate::str::contains(db_path.to_str().unwrap()));
@@ -694,9 +711,9 @@ fn test_search_version_sort_order() {
         -- Insert versions in random order to test sorting
         INSERT INTO package_versions (name, version, first_commit_hash, first_commit_date, last_commit_hash, last_commit_date, attribute_path, description)
         VALUES
-            ('python', '3.9.0', 'aaa', 1600000000, 'aaa', 1600000000, 'python39', 'Python 3.9'),
-            ('python', '3.11.0', 'ccc', 1602000000, 'ccc', 1602000000, 'python311', 'Python 3.11'),
-            ('python', '3.10.0', 'bbb', 1601000000, 'bbb', 1601000000, 'python310', 'Python 3.10');
+            ('python-3.9.0', '3.9.0', 'aaa', 1600000000, 'aaa', 1600000000, 'python', 'Python 3.9'),
+            ('python-3.11.0', '3.11.0', 'ccc', 1602000000, 'ccc', 1602000000, 'python', 'Python 3.11'),
+            ('python-3.10.0', '3.10.0', 'bbb', 1601000000, 'bbb', 1601000000, 'python', 'Python 3.10');
         "#,
     )
     .unwrap();
@@ -1586,9 +1603,9 @@ fn test_works_offline_after_index_download() {
         .success()
         .stdout(predicate::str::contains("python"));
 
-    // Info should work offline
+    // Stats should work offline
     nxv()
-        .args(["--db-path", db_path.to_str().unwrap(), "info"])
+        .args(["--db-path", db_path.to_str().unwrap(), "stats"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Index Information"));
@@ -2418,12 +2435,12 @@ fn test_index_then_search_workflow() {
                 .assert()
                 .success();
 
-            // Test info command
+            // Test stats command
             nxv()
-                .args(["--db-path", db_path.to_str().unwrap(), "info"])
+                .args(["--db-path", db_path.to_str().unwrap(), "stats"])
                 .assert()
                 .success()
-                .stdout(predicate::str::contains("Package entries"));
+                .stdout(predicate::str::contains("Total version ranges"));
         }
     }
 }

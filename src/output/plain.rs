@@ -2,33 +2,51 @@
 
 use crate::db::queries::PackageVersion;
 
-/// Print search results as plain text (tab-separated, no colors).
+/// Print search results as plain tab-separated text.
+///
+/// Each `PackageVersion` in `results` is printed as one line with the columns:
+/// `PACKAGE` (attribute path), `VERSION`, `COMMIT` (last commit hash), `DATE` (formatted `YYYY-MM-DD`), and `DESCRIPTION`.
+/// If `show_platforms` is `true`, a `PLATFORMS` column is appended.
+/// For `description` and `platforms`, `None` is rendered as `-`. If `results` is empty, prints `No packages found.`.
+///
+/// # Parameters
+///
+/// - `results`: slice of `PackageVersion` entries to print.
+/// - `show_platforms`: when `true`, include a `PLATFORMS` column for each row.
+///
+/// # Examples
+///
+/// ```
+/// // Print nothing but the "No packages found." message.
+/// print_plain(&[], false);
+/// ```
 pub fn print_plain(results: &[PackageVersion], show_platforms: bool) {
     if results.is_empty() {
         println!("No packages found.");
         return;
     }
 
-    // Print header
+    // Print header - PACKAGE (attr path) is what users install with
     if show_platforms {
-        println!("NAME\tVERSION\tCOMMIT\tDATE\tATTR_PATH\tPLATFORMS");
+        println!("PACKAGE\tVERSION\tCOMMIT\tDATE\tDESCRIPTION\tPLATFORMS");
     } else {
-        println!("NAME\tVERSION\tCOMMIT\tDATE\tATTR_PATH");
+        println!("PACKAGE\tVERSION\tCOMMIT\tDATE\tDESCRIPTION");
     }
 
     for pkg in results {
         let date = pkg.last_commit_date.format("%Y-%m-%d").to_string();
+        let description = pkg.description.as_deref().unwrap_or("-");
 
         if show_platforms {
             let platforms = pkg.platforms.as_deref().unwrap_or("-");
             println!(
                 "{}\t{}\t{}\t{}\t{}\t{}",
-                pkg.name, pkg.version, pkg.last_commit_hash, date, pkg.attribute_path, platforms
+                pkg.attribute_path, pkg.version, pkg.last_commit_hash, date, description, platforms
             );
         } else {
             println!(
                 "{}\t{}\t{}\t{}\t{}",
-                pkg.name, pkg.version, pkg.last_commit_hash, date, pkg.attribute_path
+                pkg.attribute_path, pkg.version, pkg.last_commit_hash, date, description
             );
         }
     }
@@ -61,6 +79,7 @@ mod tests {
             homepage: None,
             maintainers: None,
             platforms: None,
+            source_path: None,
         }];
 
         // Should not panic

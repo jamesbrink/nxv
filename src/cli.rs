@@ -2,6 +2,7 @@
 
 use crate::output::OutputFormat;
 use crate::paths;
+use crate::search::SortOrder;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use std::path::PathBuf;
@@ -40,8 +41,11 @@ pub enum Commands {
     /// Download or update the package index.
     Update(UpdateArgs),
 
+    /// Show detailed information about a package.
+    Info(InfoArgs),
+
     /// Show index statistics.
-    Info,
+    Stats,
 
     /// Show version history for a package.
     History(HistoryArgs),
@@ -49,6 +53,17 @@ pub enum Commands {
     /// Build the index from a local nixpkgs repository.
     #[cfg(feature = "indexer")]
     Index(IndexArgs),
+
+    /// Backfill missing metadata (source_path, homepage) from current nixpkgs.
+    #[cfg(feature = "indexer")]
+    Backfill(BackfillArgs),
+
+    /// Reset/clean the nixpkgs repository to a known state.
+    #[cfg(feature = "indexer")]
+    Reset(ResetArgs),
+
+    /// Start the API server.
+    Serve(ServeArgs),
 
     /// Generate shell completions.
     Completions(CompletionsArgs),
@@ -116,6 +131,10 @@ pub struct SearchArgs {
     #[arg(short, long)]
     pub exact: bool,
 
+    /// Show all commits (by default, only most recent per package+version is shown).
+    #[arg(long)]
+    pub full: bool,
+
     /// Use ASCII table borders instead of Unicode.
     #[arg(long)]
     pub ascii: bool,
@@ -145,6 +164,94 @@ pub struct HistoryArgs {
     /// Output format.
     #[arg(short, long, value_enum, default_value_t = OutputFormatArg::Table)]
     pub format: OutputFormatArg,
+
+    /// Show full details (commits, description, license, homepage, etc.).
+    #[arg(long)]
+    pub full: bool,
+
+    /// Use ASCII table borders instead of Unicode.
+    #[arg(long)]
+    pub ascii: bool,
+}
+
+/// Arguments for the info command.
+#[derive(Parser, Debug)]
+pub struct InfoArgs {
+    /// Package name to show info for.
+    pub package: String,
+
+    /// Specific version to show info for (positional).
+    #[arg(conflicts_with = "version_flag")]
+    pub version: Option<String>,
+
+    /// Specific version to show info for (flag).
+    #[arg(short = 'V', long = "version", conflicts_with = "version")]
+    pub version_flag: Option<String>,
+
+    /// Output format.
+    #[arg(short, long, value_enum, default_value_t = OutputFormatArg::Table)]
+    pub format: OutputFormatArg,
+}
+
+impl InfoArgs {
+    /// Selects the version string provided by the positional argument or the version flag.
+    ///
+    /// Prefers the positional `version` field and falls back to `version_flag` if the positional is `None`.
+    ///
+    /// # Returns
+    ///
+    /// `Some(&str)` with the chosen version, or `None` if neither field is set.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let args = InfoArgs {
+    ///     package: "pkg".to_string(),
+    ///     version: Some("1.2.3".to_string()),
+    ///     version_flag: None,
+    ///     format: OutputFormatArg::Table,
+    /// };
+    /// assert_eq!(args.get_version(), Some("1.2.3"));
+    ///
+    /// let args2 = InfoArgs {
+    ///     package: "pkg".to_string(),
+    ///     version: None,
+    ///     version_flag: Some("2.0.0".to_string()),
+    ///     format: OutputFormatArg::Table,
+    /// };
+    /// assert_eq!(args2.get_version(), Some("2.0.0"));
+    ///
+    /// let args3 = InfoArgs {
+    ///     package: "pkg".to_string(),
+    ///     version: None,
+    ///     version_flag: None,
+    ///     format: OutputFormatArg::Table,
+    /// };
+    /// assert_eq!(args3.get_version(), None);
+    /// ```
+    pub fn get_version(&self) -> Option<&str> {
+        self.version.as_deref().or(self.version_flag.as_deref())
+    }
+}
+
+/// Arguments for the serve command.
+#[derive(Parser, Debug)]
+pub struct ServeArgs {
+    /// Host address to bind to.
+    #[arg(short = 'H', long, default_value = "127.0.0.1", env = "NXV_HOST")]
+    pub host: String,
+
+    /// Port to listen on.
+    #[arg(short, long, default_value_t = 8080, env = "NXV_PORT")]
+    pub port: u16,
+
+    /// Enable CORS for all origins.
+    #[arg(long)]
+    pub cors: bool,
+
+    /// Specific CORS origins (comma-separated). Implies --cors.
+    #[arg(long, value_delimiter = ',')]
+    pub cors_origins: Option<Vec<String>>,
 }
 
 /// Arguments for the index command (feature-gated).
@@ -180,6 +287,49 @@ pub struct IndexArgs {
     pub max_commits: Option<usize>,
 }
 
+/// Arguments for the backfill command (feature-gated).
+#[cfg(feature = "indexer")]
+#[derive(Parser, Debug)]
+pub struct BackfillArgs {
+    /// Path to the nixpkgs repository.
+    #[arg(long)]
+    pub nixpkgs_path: PathBuf,
+
+    /// Only backfill these specific fields.
+    #[arg(long, value_delimiter = ',')]
+    pub fields: Option<Vec<String>>,
+
+    /// Limit the number of packages to backfill (for testing).
+    #[arg(long)]
+    pub limit: Option<usize>,
+
+    /// Dry run - show what would be updated without making changes.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Traverse git history to extract metadata from original commits.
+    /// Without this flag, metadata is extracted from current nixpkgs HEAD only.
+    #[arg(long)]
+    pub history: bool,
+}
+
+/// Arguments for the reset command (feature-gated).
+#[cfg(feature = "indexer")]
+#[derive(Parser, Debug)]
+pub struct ResetArgs {
+    /// Path to the nixpkgs repository.
+    #[arg(long)]
+    pub nixpkgs_path: PathBuf,
+
+    /// Reset to a specific commit or ref (default: origin/master).
+    #[arg(long)]
+    pub to: Option<String>,
+
+    /// Also fetch from origin before resetting.
+    #[arg(long)]
+    pub fetch: bool,
+}
+
 /// Output format argument.
 #[derive(ValueEnum, Clone, Copy, Debug, Default)]
 pub enum OutputFormatArg {
@@ -193,6 +343,22 @@ pub enum OutputFormatArg {
 }
 
 impl From<OutputFormatArg> for OutputFormat {
+    /// Convert a CLI-level `OutputFormatArg` into the corresponding internal `OutputFormat`.
+    ///
+    /// # Returns
+    ///
+    /// The matching `OutputFormat` variant for the provided `OutputFormatArg`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use crate::cli::OutputFormatArg;
+    /// use crate::output::OutputFormat;
+    ///
+    /// let arg = OutputFormatArg::Json;
+    /// let fmt: OutputFormat = arg.into();
+    /// assert_eq!(fmt, OutputFormat::Json);
+    /// ```
     fn from(arg: OutputFormatArg) -> Self {
         match arg {
             OutputFormatArg::Table => OutputFormat::Table,
@@ -202,17 +368,7 @@ impl From<OutputFormatArg> for OutputFormat {
     }
 }
 
-/// Sort order for search results.
-#[derive(ValueEnum, Clone, Copy, Debug, Default)]
-pub enum SortOrder {
-    /// Sort by date (newest first).
-    #[default]
-    Date,
-    /// Sort by version (semver-aware).
-    Version,
-    /// Sort by name (alphabetical).
-    Name,
-}
+// SortOrder is imported from crate::search
 
 /// Verbosity level for output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -304,8 +460,32 @@ mod tests {
 
     #[test]
     fn test_info_command() {
-        let args = Cli::try_parse_from(["nxv", "info"]).unwrap();
-        assert!(matches!(args.command, Commands::Info));
+        let args = Cli::try_parse_from(["nxv", "info", "python"]).unwrap();
+        match args.command {
+            Commands::Info(info) => {
+                assert_eq!(info.package, "python");
+                assert!(info.version.is_none());
+            }
+            _ => panic!("Expected Info command"),
+        }
+    }
+
+    #[test]
+    fn test_info_with_version() {
+        let args = Cli::try_parse_from(["nxv", "info", "python", "3.11"]).unwrap();
+        match args.command {
+            Commands::Info(info) => {
+                assert_eq!(info.package, "python");
+                assert_eq!(info.version, Some("3.11".to_string()));
+            }
+            _ => panic!("Expected Info command"),
+        }
+    }
+
+    #[test]
+    fn test_stats_command() {
+        let args = Cli::try_parse_from(["nxv", "stats"]).unwrap();
+        assert!(matches!(args.command, Commands::Stats));
     }
 
     #[test]
@@ -334,14 +514,14 @@ mod tests {
 
     #[test]
     fn test_global_options() {
-        let args = Cli::try_parse_from(["nxv", "-vv", "--no-color", "info"]).unwrap();
+        let args = Cli::try_parse_from(["nxv", "-vv", "--no-color", "stats"]).unwrap();
         assert_eq!(args.verbose, 2);
         assert!(args.no_color);
     }
 
     #[test]
     fn test_quiet_conflicts_with_verbose() {
-        let result = Cli::try_parse_from(["nxv", "-v", "-q", "info"]);
+        let result = Cli::try_parse_from(["nxv", "-v", "-q", "stats"]);
         assert!(result.is_err());
     }
 

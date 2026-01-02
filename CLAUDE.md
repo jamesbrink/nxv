@@ -45,6 +45,9 @@ The `indexer` feature enables building indexes from a local nixpkgs clone:
 - `git.rs`: Walks nixpkgs git history (commits from 2017+)
 - `extractor.rs`: Runs `nix eval` to extract package metadata per commit
 - `mod.rs`: Coordinates indexing with checkpointing for Ctrl+C resilience
+- `backfill.rs`: Updates missing metadata (source_path, homepage) for existing records
+  - HEAD mode: Fast extraction from current nixpkgs (may miss renamed/removed packages)
+  - Historical mode (`--history`): Traverses git to original commits for accuracy
 
 ### Database Schema (`db/mod.rs`)
 
@@ -65,6 +68,16 @@ The `indexer` feature enables building indexes from a local nixpkgs clone:
 ```bash
 cargo search <crate>           # Find latest version
 ```
+
+## Data Paths
+
+The database and bloom filter are stored in platform-specific data directories:
+- **macOS**: `~/Library/Application Support/nxv/`
+- **Linux**: `~/.local/share/nxv/`
+
+Files:
+- `index.db` - SQLite database with package versions
+- `bloom.bin` - Bloom filter for fast negative lookups
 
 ## Testing
 

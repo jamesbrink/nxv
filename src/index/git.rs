@@ -367,13 +367,64 @@ impl NixpkgsRepo {
         Ok(commits)
     }
 
-    /// Checkout a specific commit (detached HEAD) with force.
+    /// Switches the repository to a detached HEAD at the specified commit and updates the working directory.
     ///
-    /// This is used for nix evaluation at a specific commit.
-    /// Note: This modifies the working directory.
-    /// Uses force checkout to handle conflicts when switching between
-    /// commits with very different file structures.
+    /// This will update the repository's HEAD to point to the given commit (detached) and modify the working tree;
+    /// uncommitted changes may be overwritten.
+    ///
+    /// # Parameters
+    ///
+    /// * `hash` - Commit identifier (full or abbreviated) to check out.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the checkout succeeds, `Err(_)` if the operation fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// // Open repository and checkout a commit (example only).
+    /// // let repo = NixpkgsRepo::open("/path/to/nixpkgs").unwrap();
+    /// // repo.checkout_commit("a1b2c3d").unwrap();
+    /// ```
     pub fn checkout_commit(&self, hash: &str) -> Result<()> {
+        // Remove any stale index.lock file that might be left from a crashed process
+        self.remove_index_lock();
+
+        // Try libgit2 first (faster)
+        if let Ok(()) = self.checkout_commit_libgit2(hash) {
+            return Ok(());
+        }
+
+        // Fall back to command-line git (more robust with directory changes)
+        self.checkout_commit_cli(hash)
+    }
+
+    /// Checks out the specified commit into a detached HEAD using libgit2 with aggressive force options.
+    ///
+    /// This operation sets HEAD to the given commit (detached) and updates the working tree using
+    /// a forced checkout that removes untracked and ignored files and recreates missing files. It is
+    /// intended to handle dirty working trees but can fail on complex directory changes where the
+    /// libgit2 checkout cannot reconcile the working directory state.
+    ///
+    /// # Parameters
+    ///
+    /// - `hash`: Hexadecimal commit OID to check out.
+    ///
+    /// # Errors
+    ///
+    /// Returns an `Err` if the provided `hash` is not a valid OID or if any libgit2 operation fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use crate::index::git::NixpkgsRepo;
+    /// # fn example(repo: &NixpkgsRepo) -> Result<(), Box<dyn std::error::Error>> {
+    /// repo.checkout_commit_libgit2("0123456789abcdef0123456789abcdef01234567")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    fn checkout_commit_libgit2(&self, hash: &str) -> Result<()> {
         let oid = Oid::from_str(hash).map_err(|_| {
             NxvError::Git(git2::Error::from_str(&format!(
                 "Invalid commit hash: {}",
@@ -384,10 +435,12 @@ impl NixpkgsRepo {
         let commit = self.repo.find_commit(oid)?;
         let tree = commit.tree()?;
 
-        // Use force checkout to avoid conflicts
+        // Use force checkout with aggressive options to handle dirty state
         let mut checkout_opts = git2::build::CheckoutBuilder::new();
         checkout_opts.force();
         checkout_opts.remove_untracked(true);
+        checkout_opts.remove_ignored(true);
+        checkout_opts.recreate_missing(true);
 
         self.repo
             .checkout_tree(tree.as_object(), Some(&mut checkout_opts))?;
@@ -396,7 +449,100 @@ impl NixpkgsRepo {
         Ok(())
     }
 
-    /// Get the current HEAD commit hash.
+    /// Checkout the repository at the given commit using the system `git` CLI.
+    ///
+    /// This performs a workspace cleanup (`git clean -fdx`) followed by a forced
+    /// checkout of the specified commit (`git checkout -f <hash>`). Returns an
+    /// error if either command fails; failure details include up to three lines of
+    /// stderr from the failing `git` invocation.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use your_crate::index::git::NixpkgsRepo;
+    /// // Open an existing repository and checkout a commit by hash.
+    /// let repo = NixpkgsRepo::open("/path/to/nixpkgs").unwrap();
+    /// repo.checkout_commit_cli("0123456789abcdef0123456789abcdef01234567").unwrap();
+    /// ```
+    fn checkout_commit_cli(&self, hash: &str) -> Result<()> {
+        let repo_path = self.path();
+
+        // Run git clean first to remove any untracked files/directories
+        let clean_output = Command::new("git")
+            .args(["clean", "-fdx"])
+            .current_dir(repo_path)
+            .output()
+            .map_err(|e| {
+                NxvError::Git(git2::Error::from_str(&format!(
+                    "Failed to run git clean: {}",
+                    e
+                )))
+            })?;
+
+        if !clean_output.status.success() {
+            let stderr = String::from_utf8_lossy(&clean_output.stderr);
+            let stdout = String::from_utf8_lossy(&clean_output.stdout);
+            return Err(NxvError::Git(git2::Error::from_str(&format!(
+                "git clean failed with exit code {}: {}{}",
+                clean_output
+                    .status
+                    .code()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                stderr.trim(),
+                if !stdout.is_empty() {
+                    format!(" (stdout: {})", stdout.trim())
+                } else {
+                    String::new()
+                }
+            ))));
+        }
+
+        // Then checkout the commit
+        let output = Command::new("git")
+            .args(["checkout", "-f", hash])
+            .current_dir(repo_path)
+            .output()
+            .map_err(|e| {
+                NxvError::Git(git2::Error::from_str(&format!(
+                    "Failed to run git checkout: {}",
+                    e
+                )))
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(NxvError::Git(git2::Error::from_str(&format!(
+                "git checkout failed: {}",
+                stderr.lines().take(3).collect::<Vec<_>>().join(" ")
+            ))));
+        }
+
+        Ok(())
+    }
+
+    /// Remove stale index.lock file if it exists.
+    fn remove_index_lock(&self) {
+        let git_dir = self.repo.path();
+        let lock_file = git_dir.join("index.lock");
+        if lock_file.exists() {
+            let _ = std::fs::remove_file(&lock_file);
+        }
+    }
+
+    /// Obtain the full commit hash that HEAD points to.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(String)` containing the 40-character commit hash of HEAD.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// let repo = NixpkgsRepo::open("/path/to/nixpkgs").unwrap();
+    /// let head = repo.head_commit().unwrap();
+    /// assert_eq!(head.len(), 40);
+    /// ```
     #[allow(dead_code)]
     pub fn head_commit(&self) -> Result<String> {
         let head = self.repo.head()?;
@@ -404,7 +550,99 @@ impl NixpkgsRepo {
         Ok(commit.id().to_string())
     }
 
-    /// Count the total number of commits (for progress reporting).
+    /// Gets the current HEAD reference name or the detached HEAD commit hash.
+    ///
+    /// If HEAD points to a branch, returns the full reference name (for example, `refs/heads/master`).
+    /// If HEAD is detached, returns the full 40-character commit hash.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let repo = NixpkgsRepo::open("/path/to/repo").unwrap();
+    /// let head_ref = repo.head_ref().unwrap();
+    /// // either a ref like "refs/heads/main" or a 40-char commit hash
+    /// assert!(head_ref.starts_with("refs/heads/") || head_ref.len() == 40);
+    /// ```
+    pub fn head_ref(&self) -> Result<String> {
+        let head = self.repo.head()?;
+        if head.is_branch() {
+            // Return the full reference name
+            Ok(head
+                .name()
+                .ok_or_else(|| NxvError::Git(git2::Error::from_str("HEAD has no name")))?
+                .to_string())
+        } else {
+            // Detached HEAD - return commit hash
+            let commit = head.peel_to_commit()?;
+            Ok(commit.id().to_string())
+        }
+    }
+
+    /// Restore the repository's HEAD to a given branch reference or commit.
+    ///
+    /// If `ref_name` starts with `"refs/"` the corresponding branch reference is checked out
+    /// and HEAD is updated to that ref. Otherwise `ref_name` is treated as a commit hash and
+    /// the repository is checked out in detached HEAD at that commit.
+    ///
+    /// # Parameters
+    ///
+    /// - `ref_name`: a branch reference name (e.g., `"refs/heads/main"`) or a commit hash (e.g., `"a1b2c3..."`).
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success, or an error if any git operation (lookup, checkout, or setting HEAD) fails.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::path::Path;
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let repo = NixpkgsRepo::open(Path::new("/path/to/nixpkgs"))?;
+    /// // Restore to branch:
+    /// repo.restore_ref("refs/heads/main")?;
+    /// // Or restore to a specific commit:
+    /// repo.restore_ref("0123456789abcdef0123456789abcdef01234567")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn restore_ref(&self, ref_name: &str) -> Result<()> {
+        if ref_name.starts_with("refs/") {
+            // It's a branch reference - checkout the branch
+            let reference = self.repo.find_reference(ref_name)?;
+            let commit = reference.peel_to_commit()?;
+            let tree = commit.tree()?;
+
+            let mut checkout_opts = git2::build::CheckoutBuilder::new();
+            checkout_opts.force();
+
+            self.repo
+                .checkout_tree(tree.as_object(), Some(&mut checkout_opts))?;
+            self.repo.set_head(ref_name)?;
+        } else {
+            // It's a commit hash - checkout detached
+            self.checkout_commit(ref_name)?;
+        }
+
+        Ok(())
+    }
+
+    /// Return the number of commits reachable from HEAD following the first-parent chain.
+    ///
+    /// Counts commits reachable from HEAD using first-parent simplification (mainline),
+    /// suitable for progress reporting.
+    ///
+    /// # Returns
+    ///
+    /// The total number of commits reachable from HEAD.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Open a repository and count commits reachable from HEAD.
+    /// let repo = NixpkgsRepo::open("/path/to/repo").unwrap();
+    /// let total = repo.count_commits().unwrap();
+    /// assert!(total >= 0);
+    /// ```
     #[allow(dead_code)]
     pub fn count_commits(&self) -> Result<usize> {
         let head = self.repo.head()?;
@@ -424,10 +662,61 @@ impl NixpkgsRepo {
         Ok(commits.len())
     }
 
-    /// Get the path to the repository.
+    /// Accesses the repository's filesystem path.
+    ///
+    /// Returns a reference to the repository root directory as a `Path`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// // given a `repo: NixpkgsRepo`
+    /// let repo_path = repo.path();
+    /// println!("repo path: {}", repo_path.display());
+    /// ```
     #[allow(dead_code)]
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Determines whether one commit is an ancestor of another.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the commit identified by `ancestor_hash` is reachable from the commit identified by `descendant_hash`, `false` otherwise.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// let repo = NixpkgsRepo::open("/path/to/nixpkgs").unwrap();
+    /// let ancestor = "0123456789abcdef0123456789abcdef01234567";
+    /// let descendant = "89abcdef0123456789abcdef0123456789abcdef";
+    /// let is_anc = repo.is_ancestor(ancestor, descendant).unwrap();
+    /// ```
+    pub fn is_ancestor(&self, ancestor_hash: &str, descendant_hash: &str) -> Result<bool> {
+        let output = Command::new("git")
+            .current_dir(&self.path)
+            .args([
+                "merge-base",
+                "--is-ancestor",
+                ancestor_hash,
+                descendant_hash,
+            ])
+            .output()?;
+
+        // Exit code 0 means ancestor_hash IS an ancestor of descendant_hash
+        // Exit code 1 means it is NOT an ancestor
+        // Other exit codes indicate an error
+        match output.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                Err(NxvError::Git(git2::Error::from_str(&format!(
+                    "Failed to check ancestry: {}",
+                    stderr.trim()
+                ))))
+            }
+        }
     }
 
     /// Create a new worktree at the specified path, checked out to a specific commit.
@@ -498,7 +787,17 @@ impl NixpkgsRepo {
         Ok(())
     }
 
-    /// Clean up all nxv worktrees.
+    /// Removes all worktrees whose names start with "nxv-worktree-" from the repository.
+    ///
+    /// Returns an error if listing repository worktrees fails. Failures while removing
+    /// individual worktrees are ignored and do not stop the cleanup of other worktrees.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let repo = NixpkgsRepo::open("/path/to/nixpkgs").unwrap();
+    /// repo.cleanup_worktrees().unwrap();
+    /// ```
     #[allow(dead_code)]
     pub fn cleanup_worktrees(&self) -> Result<()> {
         // List all worktrees and remove ones starting with "nxv-worktree-"
@@ -512,6 +811,125 @@ impl NixpkgsRepo {
 
         for name in worktrees {
             let _ = self.remove_worktree(&name);
+        }
+
+        Ok(())
+    }
+
+    /// Fetches updates from the `origin` remote.
+    ///
+    /// Attempts to run `git fetch origin` in the repository working directory.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the fetch completes successfully; `Err(NxvError::Git)` if the git command fails to run or returns a non-zero exit status. The error will include up to three lines of stderr from the git process.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::env::temp_dir;
+    /// # // assume `repo` is a prepared `NixpkgsRepo` opened for a test
+    /// # let repo = { let p = temp_dir(); crate::index::git::NixpkgsRepo::open(&p).unwrap() };
+    /// repo.fetch_origin().unwrap();
+    /// ```
+    pub fn fetch_origin(&self) -> Result<()> {
+        let output = Command::new("git")
+            .args(["fetch", "origin"])
+            .current_dir(&self.path)
+            .output()
+            .map_err(|e| {
+                NxvError::Git(git2::Error::from_str(&format!(
+                    "Failed to run git fetch: {}",
+                    e
+                )))
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(NxvError::Git(git2::Error::from_str(&format!(
+                "git fetch failed: {}",
+                stderr.lines().take(3).collect::<Vec<_>>().join(" ")
+            ))));
+        }
+
+        Ok(())
+    }
+
+    /// Reset the repository to a clean state by hard-resetting to `target` (default `origin/master`)
+    /// and removing all untracked files and directories.
+    ///
+    /// If `target` is `None`, `origin/master` is used.
+    ///
+    /// # Errors
+    /// Returns an `Err` if the underlying git commands (`reset` or `clean`) fail or cannot be executed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Reset to origin/master
+    /// repo.reset_hard(None).unwrap();
+    ///
+    /// // Reset to a specific ref
+    /// repo.reset_hard(Some("refs/heads/main")).unwrap();
+    /// ```
+    pub fn reset_hard(&self, target: Option<&str>) -> Result<()> {
+        // Remove any stale lock files
+        self.remove_index_lock();
+
+        let target_ref = target.unwrap_or("origin/master");
+
+        // First, try to abort any in-progress operations
+        let _ = Command::new("git")
+            .args(["merge", "--abort"])
+            .current_dir(&self.path)
+            .output();
+        let _ = Command::new("git")
+            .args(["rebase", "--abort"])
+            .current_dir(&self.path)
+            .output();
+        let _ = Command::new("git")
+            .args(["cherry-pick", "--abort"])
+            .current_dir(&self.path)
+            .output();
+
+        // Reset to target ref
+        let output = Command::new("git")
+            .args(["reset", "--hard", target_ref])
+            .current_dir(&self.path)
+            .output()
+            .map_err(|e| {
+                NxvError::Git(git2::Error::from_str(&format!(
+                    "Failed to run git reset: {}",
+                    e
+                )))
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(NxvError::Git(git2::Error::from_str(&format!(
+                "git reset failed: {}",
+                stderr.lines().take(3).collect::<Vec<_>>().join(" ")
+            ))));
+        }
+
+        // Clean untracked files and directories
+        let output = Command::new("git")
+            .args(["clean", "-fdx"])
+            .current_dir(&self.path)
+            .output()
+            .map_err(|e| {
+                NxvError::Git(git2::Error::from_str(&format!(
+                    "Failed to run git clean: {}",
+                    e
+                )))
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(NxvError::Git(git2::Error::from_str(&format!(
+                "git clean failed: {}",
+                stderr.lines().take(3).collect::<Vec<_>>().join(" ")
+            ))));
         }
 
         Ok(())
@@ -718,11 +1136,15 @@ mod tests {
         // This test uses the real nixpkgs submodule if it exists
         let nixpkgs_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("nixpkgs");
 
-        if !nixpkgs_path.exists() || !nixpkgs_path.join("pkgs").exists() {
-            // Skip if nixpkgs submodule isn't present
+        // Check if nixpkgs submodule is properly initialized (has .git file/dir and pkgs/)
+        let has_git = nixpkgs_path.join(".git").exists();
+        let has_pkgs = nixpkgs_path.join("pkgs").exists();
+
+        if !has_git || !has_pkgs {
+            // Skip if nixpkgs submodule isn't properly initialized
             eprintln!(
-                "Skipping: nixpkgs submodule not present at {:?}",
-                nixpkgs_path
+                "Skipping: nixpkgs submodule not properly initialized at {:?} (has_git={}, has_pkgs={})",
+                nixpkgs_path, has_git, has_pkgs
             );
             return;
         }
@@ -734,6 +1156,31 @@ mod tests {
         // Should be able to count commits (just verify it doesn't error)
         let count = repo.count_commits().unwrap();
         assert!(count > 0);
+    }
+
+    #[test]
+    fn test_is_ancestor() {
+        let (_dir, path) = create_test_repo();
+        let repo = NixpkgsRepo::open(&path).unwrap();
+
+        let commits = repo.get_all_commits().unwrap();
+        assert_eq!(commits.len(), 3);
+
+        let first = &commits[0].hash;
+        let second = &commits[1].hash;
+        let third = &commits[2].hash;
+
+        // First commit is an ancestor of third
+        assert!(repo.is_ancestor(first, third).unwrap());
+
+        // First commit is an ancestor of second
+        assert!(repo.is_ancestor(first, second).unwrap());
+
+        // Third commit is NOT an ancestor of first (it's newer)
+        assert!(!repo.is_ancestor(third, first).unwrap());
+
+        // A commit is an ancestor of itself
+        assert!(repo.is_ancestor(first, first).unwrap());
     }
 
     #[test]

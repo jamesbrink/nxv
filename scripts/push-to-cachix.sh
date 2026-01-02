@@ -1,0 +1,235 @@
+#!/usr/bin/env bash
+#
+# Push Nix build artifacts to Cachix
+#
+# Usage:
+#   ./scripts/push-to-cachix.sh [OPTIONS] [result-path]
+#
+# Examples:
+#   ./scripts/push-to-cachix.sh                      # Push ./result to default cache
+#   ./scripts/push-to-cachix.sh ./result-static      # Push specific result
+#   ./scripts/push-to-cachix.sh --build-deps         # Include build-time dependencies
+#   ./scripts/push-to-cachix.sh --dry-run            # Show what would be pushed
+#
+
+set -euo pipefail
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m' # No Color
+
+info() { echo -e "${BLUE}[INFO]${NC} $1"; }
+success() { echo -e "${GREEN}[OK]${NC} $1"; }
+warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+
+# Default values
+CACHE_NAME="nxv"
+RESULT_PATH="./result"
+PUSH_BUILD_DEPS=false
+DRY_RUN=false
+
+# Show usage/help
+show_help() {
+    echo "Push Nix build artifacts to Cachix"
+    echo ""
+    echo "Usage: $0 [OPTIONS] [result-path]"
+    echo ""
+    echo "Options:"
+    echo "  -h, --help        Show this help message and exit"
+    echo "  -c, --cache NAME  Cachix cache name (default: nxv)"
+    echo "  -b, --build-deps  Also push build-time dependencies"
+    echo "  -n, --dry-run     Show what would be pushed without pushing"
+    echo ""
+    echo "Arguments:"
+    echo "  result-path       Path to Nix build result (default: ./result)"
+    echo ""
+    echo "Examples:"
+    echo "  $0                              # Push runtime closure"
+    echo "  $0 --build-deps                 # Push runtime + build deps"
+    echo "  $0 --dry-run ./result-static    # Preview static build push"
+    echo "  $0 -c my-cache -b               # Custom cache with build deps"
+    echo ""
+    echo "What gets pushed:"
+    echo "  Runtime closure:  All packages needed to RUN the application"
+    echo "  Build deps (-b):  All packages needed to BUILD from source"
+    echo "                    (includes dev outputs, Rust toolchain, etc.)"
+    echo ""
+    exit 0
+}
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help)
+            show_help
+            ;;
+        -c|--cache)
+            CACHE_NAME="$2"
+            shift 2
+            ;;
+        -b|--build-deps)
+            PUSH_BUILD_DEPS=true
+            shift
+            ;;
+        -n|--dry-run)
+            DRY_RUN=true
+            shift
+            ;;
+        -*)
+            error "Unknown option: $1"
+            ;;
+        *)
+            RESULT_PATH="$1"
+            shift
+            ;;
+    esac
+done
+
+echo ""
+echo "================================================"
+echo "  Cachix Push Script"
+echo "================================================"
+echo ""
+
+# Validate result path
+if [[ ! -e "$RESULT_PATH" ]]; then
+    error "Result path does not exist: $RESULT_PATH"
+fi
+
+# Resolve the actual store path
+STORE_PATH=$(readlink -f "$RESULT_PATH")
+if [[ ! "$STORE_PATH" =~ ^/nix/store/ ]]; then
+    error "Result does not point to Nix store: $STORE_PATH"
+fi
+
+info "Cache:       ${CYAN}$CACHE_NAME${NC}"
+info "Result:      $RESULT_PATH"
+info "Store path:  $STORE_PATH"
+info "Build deps:  $PUSH_BUILD_DEPS"
+info "Dry run:     $DRY_RUN"
+echo ""
+
+# Check for cachix
+if ! command -v cachix &> /dev/null; then
+    error "cachix is required but not installed. Install with: nix profile install nixpkgs#cachix"
+fi
+
+# Check for nix-store
+if ! command -v nix-store &> /dev/null; then
+    error "nix-store is required but not installed"
+fi
+
+# Get runtime closure
+info "Calculating runtime closure..."
+RUNTIME_PATHS=$(nix path-info -r "$RESULT_PATH" 2>/dev/null)
+RUNTIME_COUNT=$(echo "$RUNTIME_PATHS" | wc -l)
+RUNTIME_SIZE=$(nix path-info -rS "$RESULT_PATH" 2>/dev/null | tail -1 | awk '{print $2}' | numfmt --to=iec-i --suffix=B 2>/dev/null || echo "unknown")
+success "Runtime closure: ${BOLD}$RUNTIME_COUNT${NC} paths (${BOLD}$RUNTIME_SIZE${NC})"
+
+# Get build closure if requested
+BUILD_PATHS=""
+BUILD_COUNT=0
+if [[ "$PUSH_BUILD_DEPS" == true ]]; then
+    info "Calculating build closure..."
+    DRV_PATH=$(nix path-info --derivation "$RESULT_PATH" 2>/dev/null)
+    BUILD_PATHS=$(nix-store -qR --include-outputs "$DRV_PATH" 2>/dev/null | grep -v '\.drv$' || true)
+    BUILD_COUNT=$(echo "$BUILD_PATHS" | grep -c '^' || echo 0)
+    success "Build closure: ${BOLD}$BUILD_COUNT${NC} paths"
+fi
+
+# Combine and deduplicate paths
+if [[ "$PUSH_BUILD_DEPS" == true ]]; then
+    ALL_PATHS=$(echo -e "${RUNTIME_PATHS}\n${BUILD_PATHS}" | sort -u | grep -v '^$')
+else
+    ALL_PATHS="$RUNTIME_PATHS"
+fi
+
+# Filter out Rust/Cargo build artifacts that aren't useful for consumers
+# These are intermediate files that cause upload issues and aren't needed
+ALL_PATHS=$(echo "$ALL_PATHS" | grep -vE '(Cargo\.lock|Cargo\.toml|\.cargo-checksum\.json)$')
+TOTAL_COUNT=$(echo "$ALL_PATHS" | grep -c '^' || echo 0)
+
+echo ""
+info "Total unique paths to push: ${BOLD}$TOTAL_COUNT${NC}"
+
+# Show notable packages being pushed (relevant for nxv)
+echo ""
+info "Notable packages:"
+NOTABLE=$(echo "$ALL_PATHS" | grep -E '(rust|openssl|sqlite|libgit2|zstd|libiconv)' | head -15 || true)
+if [[ -n "$NOTABLE" ]]; then
+    while read -r path; do
+        pkg_name=$(basename "$path")
+        pkg_size=$(nix path-info -S "$path" 2>/dev/null | awk '{print $2}' | numfmt --to=iec-i --suffix=B 2>/dev/null || echo "?")
+        echo "    - $pkg_name ($pkg_size)"
+    done <<< "$NOTABLE"
+fi
+echo ""
+
+# Dry run or actual push
+if [[ "$DRY_RUN" == true ]]; then
+    warn "Dry run mode - not pushing"
+    echo ""
+    info "Would push these paths:"
+    echo "$ALL_PATHS" | head -20
+    if [[ $TOTAL_COUNT -gt 20 ]]; then
+        echo "    ... and $((TOTAL_COUNT - 20)) more"
+    fi
+else
+    info "Pushing to Cachix (cachix push)..."
+    echo ""
+    echo "$ALL_PATHS" | cachix push "$CACHE_NAME"
+    echo ""
+
+    # Verify a sample of paths were actually uploaded
+    info "Verifying uploads..."
+    # Use here-strings to avoid SIGPIPE with pipefail
+    # (echo to pipe causes broken pipe when head closes early)
+    SHUFFLED=$(sort -R <<< "$ALL_PATHS" 2>/dev/null) || SHUFFLED="$ALL_PATHS"
+    SAMPLE_PATHS=$(head -5 <<< "$SHUFFLED")
+    VERIFY_FAILED=0
+    while IFS= read -r path; do
+        [[ -z "$path" ]] && continue
+        HASH=$(basename "$path" | cut -d- -f1)
+        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "https://${CACHE_NAME}.cachix.org/${HASH}.narinfo" 2>/dev/null || echo "000")
+        if [[ "$HTTP_CODE" == "200" ]]; then
+            echo "    ✓ $(basename "$path")"
+        else
+            echo "    ✗ $(basename "$path") (HTTP $HTTP_CODE)"
+            VERIFY_FAILED=$((VERIFY_FAILED + 1))
+        fi
+    done <<< "$SAMPLE_PATHS"
+    echo ""
+
+    if [[ $VERIFY_FAILED -gt 0 ]]; then
+        warn "Some paths may not have been uploaded! Check cache settings on cachix.org"
+        warn "Possible issue: upstream cache filtering (paths in cache.nixos.org are skipped)"
+    else
+        success "Verification passed!"
+    fi
+    echo ""
+    success "Push complete!"
+fi
+
+echo ""
+echo "================================================"
+if [[ "$DRY_RUN" == true ]]; then
+    echo "  Dry Run Complete"
+else
+    echo "  Push Complete!"
+fi
+echo "================================================"
+echo ""
+
+if [[ "$DRY_RUN" != true ]]; then
+    success "Pushed ${BOLD}$TOTAL_COUNT${NC} paths to ${CYAN}$CACHE_NAME${NC}"
+    echo ""
+    info "Users can now pull from cache with:"
+    echo "    cachix use $CACHE_NAME"
+    echo ""
+fi

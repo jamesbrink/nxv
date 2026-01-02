@@ -1,6 +1,8 @@
 //! Bloom filter for fast package name lookups.
 
+use crate::db::Database;
 use crate::error::Result;
+use crate::paths;
 use bloomfilter::Bloom;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
@@ -17,7 +19,6 @@ impl PackageBloomFilter {
     /// # Arguments
     /// * `expected_items` - Expected number of unique package names
     /// * `false_positive_rate` - Desired false positive rate (e.g., 0.01 for 1%)
-    #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
     pub fn new(expected_items: usize, false_positive_rate: f64) -> Self {
         let filter = Bloom::new_for_fp_rate(expected_items, false_positive_rate)
             .expect("Failed to create bloom filter with given parameters");
@@ -25,7 +26,6 @@ impl PackageBloomFilter {
     }
 
     /// Insert a package name into the bloom filter.
-    #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
     pub fn insert(&mut self, name: &str) {
         self.filter.set(name);
     }
@@ -39,7 +39,6 @@ impl PackageBloomFilter {
     }
 
     /// Save the bloom filter to a file.
-    #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<()> {
         let file = File::create(path)?;
         let mut writer = BufWriter::new(file);
@@ -64,6 +63,40 @@ impl PackageBloomFilter {
     #[allow(dead_code)]
     pub fn size_bytes(&self) -> usize {
         self.filter.to_bytes().len()
+    }
+
+    /// Build a bloom filter from all unique attribute paths in the database.
+    ///
+    /// Creates a bloom filter with 1% false positive rate sized for the number
+    /// of unique packages in the database.
+    pub fn build_from_db(db: &Database) -> Result<Self> {
+        use crate::db::queries;
+
+        let attrs = queries::get_all_unique_attrs(db.connection())?;
+        let mut filter = Self::new(attrs.len().max(1000), 0.01);
+
+        for attr in &attrs {
+            filter.insert(attr);
+        }
+
+        Ok(filter)
+    }
+
+    /// Regenerate the bloom filter from the database and save it.
+    ///
+    /// This is useful when the bloom filter is missing but the database exists.
+    /// The filter is saved to the standard bloom filter path.
+    pub fn regenerate_from_db(db: &Database) -> Result<()> {
+        let filter = Self::build_from_db(db)?;
+        let bloom_path = paths::get_bloom_path();
+
+        // Ensure parent directory exists
+        if let Some(parent) = bloom_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        filter.save(&bloom_path)?;
+        Ok(())
     }
 }
 

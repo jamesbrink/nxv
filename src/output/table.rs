@@ -7,7 +7,20 @@ use comfy_table::{
     presets::{ASCII_FULL, UTF8_FULL},
 };
 
-/// Print search results as a colored table.
+/// Render package search results as a colored table to stdout.
+///
+/// The table shows columns for Package (attribute path), Version, Commit, Date,
+/// and Description. If `options.show_platforms` is true, a Platforms column is
+/// appended. The ASCII/UTF-8 drawing preset is selected according to
+/// `options.ascii`.
+///
+/// # Examples
+///
+/// ```
+/// // Render an empty result set (no packages found).
+/// let results: &[crate::db::queries::PackageVersion] = &[];
+/// crate::output::print_table(results, crate::output::TableOptions::default());
+/// ```
 pub fn print_table(results: &[PackageVersion], options: TableOptions) {
     if results.is_empty() {
         println!("No packages found.");
@@ -25,8 +38,8 @@ pub fn print_table(results: &[PackageVersion], options: TableOptions) {
 
     table.set_content_arrangement(ContentArrangement::Dynamic);
 
-    // Set headers
-    let mut headers = vec!["Name", "Version", "Commit", "Date", "Attr Path"];
+    // Set headers - Package (attr path) is what users install with
+    let mut headers = vec!["Package", "Version", "Commit", "Date", "Description"];
     if options.show_platforms {
         headers.push("Platforms");
     }
@@ -34,13 +47,14 @@ pub fn print_table(results: &[PackageVersion], options: TableOptions) {
 
     for pkg in results {
         let date = pkg.last_commit_date.format("%Y-%m-%d").to_string();
+        let description = pkg.description.as_deref().unwrap_or("-");
 
         let mut row = vec![
-            Cell::new(&pkg.name).fg(Color::Cyan),
+            Cell::new(&pkg.attribute_path).fg(Color::Cyan),
             Cell::new(&pkg.version).fg(Color::Green),
             Cell::new(&pkg.last_commit_hash).fg(Color::Yellow),
             Cell::new(&date).fg(Color::White),
-            Cell::new(&pkg.attribute_path),
+            Cell::new(description).fg(Color::White),
         ];
 
         if options.show_platforms {
@@ -81,6 +95,7 @@ mod tests {
             homepage: None,
             maintainers: None,
             platforms: None,
+            source_path: None,
         }];
 
         // Should not panic

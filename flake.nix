@@ -12,7 +12,17 @@
   };
 
   outputs = { self, nixpkgs, flake-utils, rust-overlay, crane }:
-    flake-utils.lib.eachDefaultSystem (system:
+    {
+      # Overlay for use in NixOS/home-manager configs
+      overlays.default = final: prev: {
+        nxv = self.packages.${prev.system}.nxv;
+        nxv-indexer = self.packages.${prev.system}.nxv-indexer;
+      };
+
+      # NixOS module for running nxv as a service
+      nixosModules.default = import ./nix/module.nix;
+      nixosModules.nxv = self.nixosModules.default;
+    } // flake-utils.lib.eachDefaultSystem (system:
       let
         overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs { inherit system overlays; };
@@ -25,8 +35,13 @@
         # Create crane lib with our toolchain
         craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
 
-        # Common source filtering
-        src = craneLib.cleanCargoSource ./.;
+        # Common source filtering - include frontend directory for embedded assets
+        src = pkgs.lib.cleanSourceWith {
+          src = ./.;
+          filter = path: type:
+            (craneLib.filterCargoSources path type) ||
+            (builtins.match ".*frontend.*" path != null);
+        };
 
         # Read crate metadata from Cargo.toml
         crateInfo = craneLib.crateNameFromCargoToml { cargoToml = ./Cargo.toml; };
@@ -46,15 +61,26 @@
 
           nativeBuildInputs = [
             pkgs.pkg-config
+            pkgs.installShellFiles
           ];
         };
 
         # Build dependencies only (for caching)
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
+        # Shell completions install script
+        installCompletions = ''
+          installShellCompletion --cmd nxv \
+            --bash <($out/bin/nxv completions bash) \
+            --zsh <($out/bin/nxv completions zsh) \
+            --fish <($out/bin/nxv completions fish)
+        '';
+
         # Build the main nxv package
         nxv = craneLib.buildPackage (commonArgs // {
           inherit cargoArtifacts;
+
+          postInstall = installCompletions;
 
           meta = {
             description = "CLI tool for finding specific versions of Nix packages";
@@ -77,8 +103,10 @@
 
           nativeBuildInputs = commonArgs.nativeBuildInputs ++ [
             pkgs.cmake
-            pkgs.git  # Required for tests that create git repos
+            pkgs.git
           ];
+
+          postInstall = installCompletions;
 
           meta = {
             description = "CLI tool for finding specific versions of Nix packages (with indexer)";
@@ -89,24 +117,104 @@
           };
         });
 
+        # Static musl build (Linux only)
+        # Uses cross-compilation approach to avoid build script crashes
+        nxv-static = let
+          # Only build static on Linux
+          isLinux = pkgs.stdenv.isLinux;
+          target = if system == "aarch64-linux"
+                   then "aarch64-unknown-linux-musl"
+                   else "x86_64-unknown-linux-musl";
+
+          # musl cross-compilation pkgs
+          pkgsMusl = if system == "aarch64-linux"
+                     then pkgs.pkgsCross.aarch64-multiplatform-musl
+                     else pkgs.pkgsCross.musl64;
+
+          # Get the musl C compiler
+          muslCC = "${pkgsMusl.stdenv.cc}/bin/${pkgsMusl.stdenv.cc.targetPrefix}cc";
+
+          # Toolchain with musl target added
+          rustToolchainMusl = pkgs.rust-bin.stable.latest.default.override {
+            targets = [ target ];
+          };
+
+          # Crane lib with musl toolchain
+          craneLibMusl = (crane.mkLib pkgs).overrideToolchain rustToolchainMusl;
+
+          # Common musl build args
+          muslBuildArgs = {
+            inherit src;
+            inherit (crateInfo) pname version;
+            strictDeps = true;
+
+            CARGO_BUILD_TARGET = target;
+            CARGO_BUILD_RUSTFLAGS = "-C target-feature=+crt-static -C linker=${muslCC}";
+
+            # C compiler configuration for musl
+            # HOST_CC is for build scripts that run on the build machine
+            # TARGET_CC/CC_x86_64_unknown_linux_musl is for code that runs on target
+            HOST_CC = "${pkgs.stdenv.cc}/bin/cc";
+            TARGET_CC = muslCC;
+            CC_x86_64_unknown_linux_musl = muslCC;
+            CC_aarch64_unknown_linux_musl = muslCC;
+
+            # Disable glibc-specific hardening that breaks musl
+            hardeningDisable = [ "fortify" ];
+
+            nativeBuildInputs = [
+              pkgs.pkg-config
+              pkgsMusl.stdenv.cc  # musl cross-compiler
+            ];
+
+            # Add musl libc for static linking
+            buildInputs = [ ];
+          };
+
+          cargoArtifactsMusl = craneLibMusl.buildDepsOnly muslBuildArgs;
+
+        in if isLinux then craneLibMusl.buildPackage (muslBuildArgs // {
+          pname = "nxv-static";
+          cargoArtifacts = cargoArtifactsMusl;
+
+          nativeBuildInputs = muslBuildArgs.nativeBuildInputs ++ [
+            pkgs.installShellFiles
+          ];
+
+          # Shell completions still work - binary runs on host during build
+          postInstall = installCompletions;
+
+          meta = {
+            description = "CLI tool for finding specific versions of Nix packages (static musl binary)";
+            homepage = "https://github.com/jamesbrink/nxv";
+            license = pkgs.lib.licenses.mit;
+            maintainers = [ ];
+            mainProgram = "nxv";
+            platforms = [ "x86_64-linux" "aarch64-linux" ];
+          };
+        }) else pkgs.runCommand "nxv-static-unavailable" {} ''
+          echo "nxv-static is only available on Linux" >&2
+          exit 1
+        '';
+
       in
       {
         # Packages
         packages = {
-          inherit nxv nxv-indexer;
+          inherit nxv nxv-indexer nxv-static;
           default = nxv;
         };
 
         # Development shell
         devShells.default = craneLib.devShell {
-          # Include dependencies from the main package
           inputsFrom = [ nxv ];
 
-          # Extra development tools
           packages = [
             pkgs.rust-analyzer
             pkgs.cargo-watch
             pkgs.cargo-edit
+            pkgs.miniserve  # Simple HTTP server for frontend dev
+            pkgs.nodePackages.prettier  # HTML/JS/CSS formatter
           ];
 
           RUST_BACKTRACE = "1";
@@ -116,18 +224,15 @@
         checks = {
           inherit nxv;
 
-          # Run clippy
           nxv-clippy = craneLib.cargoClippy (commonArgs // {
             inherit cargoArtifacts;
             cargoClippyExtraArgs = "--all-targets -- --deny warnings";
           });
 
-          # Run tests
           nxv-test = craneLib.cargoTest (commonArgs // {
             inherit cargoArtifacts;
           });
 
-          # Check formatting
           nxv-fmt = craneLib.cargoFmt {
             inherit src;
           };

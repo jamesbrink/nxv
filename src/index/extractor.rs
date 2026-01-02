@@ -18,6 +18,9 @@ pub struct PackageInfo {
     pub homepage: Option<String>,
     pub maintainers: Option<Vec<String>>,
     pub platforms: Option<Vec<String>>,
+    /// Source file path relative to nixpkgs root (e.g., "pkgs/development/interpreters/python/default.nix")
+    #[serde(rename = "sourcePath")]
+    pub source_path: Option<String>,
 }
 
 /// Attribute position information for mapping attribute names to files.
@@ -150,12 +153,37 @@ let
     else if builtins.isString x then x
     else builtins.toString x;
 
+  # Get the source file path for a package from meta.position
+  # meta.position format is "/nix/store/.../pkgs/path/file.nix:42" or "/path/to/nixpkgs/pkgs/path/file.nix:42"
+  # We extract the relative path starting from "pkgs/"
+  getSourcePath = meta:
+    let
+      result = builtins.tryEval (
+        let
+          pos = meta.position or null;
+          # Extract file path (remove line number after colon)
+          file = if pos == null then null
+                 else let parts = builtins.split ":" pos;
+                      in if builtins.length parts > 0 then builtins.elemAt parts 0 else null;
+          # Find "pkgs/" in the path and extract from there
+          extractRelative = path:
+            let
+              # Match "pkgs/" and everything after it
+              matches = builtins.match ".*(pkgs/.*)" path;
+            in if matches != null && builtins.length matches > 0
+               then builtins.elemAt matches 0
+               else null;
+        in if file != null then extractRelative file else null
+      );
+    in if result.success then result.value else null;
+
   # Safely extract package info - each field is independently evaluated
   getPackageInfo = attrPath: pkg:
     let
       meta = pkg.meta or {};
       name = tryDeep (toString' (pkg.pname or pkg.name or attrPath));
       version = tryDeep (toString' (pkg.version or "unknown"));
+      sourcePath = getSourcePath meta;
     in {
       name = if name != null then name else attrPath;
       version = if version != null then version else "unknown";
@@ -165,13 +193,16 @@ let
       license = if meta ? license then getLicenses meta.license else null;
       maintainers = if meta ? maintainers then getMaintainers meta.maintainers else null;
       platforms = if meta ? platforms then getPlatforms meta.platforms else null;
+      sourcePath = safeString sourcePath;
     };
 
   # Process each package name with full error isolation
   # The entire result is forced to catch any remaining lazy errors
+  # Use hasAttr first since tryEval doesn't catch missing attribute errors
   processAttr = name:
     let
-      valueResult = builtins.tryEval pkgs.${name};
+      exists = builtins.hasAttr name pkgs;
+      valueResult = if exists then builtins.tryEval pkgs.${name} else { success = false; };
       value = if valueResult.success then valueResult.value else null;
       isDeriv = if value != null then isDerivation value else false;
       info = if isDeriv then getPackageInfo name value else null;
@@ -286,12 +317,27 @@ pub fn extract_packages_for_attrs<P: AsRef<Path>>(
     let nix_file = temp_dir.path().join("extract.nix");
     std::fs::write(&nix_file, EXTRACT_NIX)?;
 
-    // Build the attrNames argument - either null or a list
+    // Build the attrNames argument - write to file if large to avoid "Argument list too long"
+    // OS limit is typically ~2MB for all args + env, so we use a conservative threshold
     let attr_names_arg = if attr_names.is_empty() {
         "null".to_string()
     } else {
-        let items: Vec<String> = attr_names.iter().map(|s| format!("\"{}\"", s)).collect();
-        format!("[ {} ]", items.join(" "))
+        // Estimate the size: each name plus quotes and space
+        let estimated_size: usize = attr_names.iter().map(|s| s.len() + 3).sum();
+
+        if estimated_size > 100_000 {
+            // Write attr names to a JSON file and read in Nix
+            let attr_file = temp_dir.path().join("attrs.json");
+            let json = serde_json::to_string(attr_names)?;
+            std::fs::write(&attr_file, &json)?;
+            format!(
+                "builtins.fromJSON (builtins.readFile {})",
+                attr_file.display()
+            )
+        } else {
+            let items: Vec<String> = attr_names.iter().map(|s| format!("\"{}\"", s)).collect();
+            format!("[ {} ]", items.join(" "))
+        }
     };
 
     // Build an expression that imports and calls the extract file
@@ -454,6 +500,7 @@ mod tests {
             homepage: Some("https://example.com".to_string()),
             maintainers: Some(vec!["user1".to_string(), "user2".to_string()]),
             platforms: Some(vec!["x86_64-linux".to_string()]),
+            source_path: Some("pkgs/test/default.nix".to_string()),
         };
 
         let license_json = pkg.license_json().unwrap();
@@ -835,5 +882,62 @@ mod tests {
         assert!(positions.iter().any(|p| p.attr_path == "goodPkg"));
         assert!(positions.iter().any(|p| p.attr_path == "anotherGoodPkg"));
         // badPkg may or may not have a position depending on when the error occurs
+    }
+
+    /// Test that large attribute lists are written to file to avoid "Argument list too long".
+    /// This tests the fix for OS error 7 (E2BIG) when extracting many packages.
+    #[test]
+    fn test_extract_large_attr_list_uses_file() {
+        let nix_check = Command::new("nix").arg("--version").output();
+        if nix_check.is_err() || !nix_check.unwrap().status.success() {
+            eprintln!("Skipping: nix not available");
+            return;
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path();
+        std::fs::create_dir_all(path.join("pkgs")).unwrap();
+
+        // Create a nixpkgs-like structure with many packages
+        let mut default_nix = "{ system, config }:\n{\n".to_string();
+        for i in 0..100 {
+            default_nix.push_str(&format!(
+                r#"  pkg{} = {{ pname = "pkg{}"; version = "1.0.0"; type = "derivation"; }};
+"#,
+                i, i
+            ));
+        }
+        default_nix.push_str("}\n");
+        std::fs::write(path.join("default.nix"), default_nix).unwrap();
+
+        // Generate a large list of attribute names that would exceed the threshold
+        // The threshold is 100,000 bytes, so we need ~10,000 attrs of ~10 chars each
+        let mut large_attr_list: Vec<String> = (0..100).map(|i| format!("pkg{}", i)).collect();
+        // Add many fake attrs to push over the size threshold
+        for i in 100..15000 {
+            large_attr_list.push(format!("nonexistent_package_{}", i));
+        }
+
+        // This should NOT fail with "Argument list too long" because
+        // the attr list is written to a file
+        let result = extract_packages_for_attrs(path, "x86_64-linux", &large_attr_list);
+
+        match result {
+            Ok(packages) => {
+                // Should find some of the real packages
+                assert!(packages.iter().any(|p| p.name == "pkg0"));
+                assert!(packages.iter().any(|p| p.name == "pkg99"));
+            }
+            Err(e) => {
+                // Should NOT be "Argument list too long"
+                let err_str = e.to_string();
+                assert!(
+                    !err_str.contains("Argument list too long"),
+                    "Should not get E2BIG error, but got: {}",
+                    err_str
+                );
+                // Other nix eval errors are acceptable (e.g., evaluation errors)
+            }
+        }
     }
 }

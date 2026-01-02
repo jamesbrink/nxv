@@ -4,7 +4,7 @@
 
 use crate::bloom::PackageBloomFilter;
 use crate::db::Database;
-use crate::db::queries::get_all_unique_names;
+use crate::db::queries::get_all_unique_attrs;
 use crate::error::Result;
 use crate::remote::download::{compress_zstd, file_sha256};
 use crate::remote::manifest::{DeltaFile, IndexFile, Manifest};
@@ -216,11 +216,22 @@ pub fn generate_manifest<P: AsRef<Path>>(
     Ok(())
 }
 
-/// Generate a bloom filter for the index.
+/// Generate a bloom filter file containing all unique attribute paths from the database.
 ///
-/// Creates:
-/// - `nxv-bloom.bin` - Bloom filter file
-/// - Returns the IndexFile with SHA256 hash
+/// The function writes `nxv-bloom.bin` into `output_dir`, populated with every unique
+/// attribute path extracted from `db_path`. It returns an `IndexFile` describing the
+/// bloom file (URL, size in bytes, and SHA-256 hash).
+///
+/// # Examples
+///
+/// ```no_run
+/// use tempfile::tempdir;
+///
+/// let db_path = "path/to/index.db";
+/// let out = tempdir().unwrap();
+/// let index_file = generate_bloom_filter(db_path, out.path()).unwrap();
+/// assert_eq!(index_file.url, "nxv-bloom.bin");
+/// ```
 pub fn generate_bloom_filter<P: AsRef<Path>, Q: AsRef<Path>>(
     db_path: P,
     output_dir: Q,
@@ -233,16 +244,16 @@ pub fn generate_bloom_filter<P: AsRef<Path>, Q: AsRef<Path>>(
     let bloom_name = "nxv-bloom.bin";
     let bloom_path = output_dir.join(bloom_name);
 
-    // Get all unique package names from database
+    // Get all unique attribute paths from database
     let db = Database::open(db_path)?;
-    let names = get_all_unique_names(db.connection())?;
+    let attrs = get_all_unique_attrs(db.connection())?;
 
     // Create bloom filter with 1% FPR
-    let count = names.len();
+    let count = attrs.len();
     let mut filter = PackageBloomFilter::new(count.max(1000), 0.01);
 
-    for name in &names {
-        filter.insert(name);
+    for attr in &attrs {
+        filter.insert(attr);
     }
 
     // Save the filter
@@ -365,10 +376,10 @@ mod tests {
         let bloom_path = output_dir.join("nxv-bloom.bin");
         assert!(bloom_path.exists());
 
-        // Load and verify the bloom filter works
+        // Load and verify the bloom filter works (uses attribute_path, not name)
         let filter = PackageBloomFilter::load(&bloom_path).unwrap();
-        assert!(filter.contains("python"));
-        assert!(filter.contains("nodejs"));
+        assert!(filter.contains("python311"));
+        assert!(filter.contains("nodejs_20"));
         assert!(!filter.contains("nonexistent"));
     }
 

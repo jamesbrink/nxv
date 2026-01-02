@@ -152,9 +152,9 @@ jobs:
             python3 -c 'import json,sys; data=json.load(sys.stdin); print(data["packages"][0]["version"])')
           echo "Local version: ${VERSION}"
           curl -sSf https://crates.io/api/v1/crates/nxv | \
-            python3 - "$VERSION" -c 'import json,sys; version=sys.argv[1]; data=json.load(sys.stdin); published={v["num"] for v in data.get("versions", [])}; \
+            python3 -c 'import json,sys; version=sys.argv[1]; data=json.load(sys.stdin); published={v["num"] for v in data.get("versions", [])}; \
             (print(f"Version {version} is already published on crates.io") or sys.exit(1)) if version in published \
-            else print(f"Version {version} not found on crates.io (ok to publish)")'
+            else print(f"Version {version} not found on crates.io (ok to publish)")' "$VERSION"
 
       - name: Publish to crates.io
         run: nix develop --command cargo publish

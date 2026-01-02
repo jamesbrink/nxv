@@ -12,9 +12,10 @@
 
 nxv indexes the entire nixpkgs git history to help you discover when packages were added, which versions existed, and the exact commit to use with `nix shell nixpkgs/<commit>#package`.
 
-### Why nxv?
+## Why nxv?
 
-Because sometimes you need Python 2.7 for that legacy project nobody wants to touch. Or Ruby 2.6 because the Gemfile hasn't been updated since the Obama administration. Instead of spending your afternoon spelunking through GitHub commits and praying to the Nix gods, just ask nxv. It's indexed 8+ years of nixpkgs history so you don't have to.
+Because sometimes you need Python 2.7 for that legacy project nobody wants to touch. Or Ruby 2.6 because the Gemfile hasn't been updated since the Obama administration.
+Instead of spending your afternoon spelunking through GitHub commits and praying to the Nix gods, just ask nxv. It's indexed 8+ years of nixpkgs history so you don't have to.
 
 <p align="center">
   <img src="./docs/where-is-it.gif" alt="nxv in action" />
@@ -81,6 +82,7 @@ Or add to your flake:
 ```bash
 curl -sSfL https://raw.githubusercontent.com/jamesbrink/nxv/main/install.sh | sh
 ```
+
 For extra safety, download the script first, review it, and verify release checksums from GitHub Releases. You can also set `NXV_VERIFY=1` to enforce checksum verification.
 
 ### Cargo

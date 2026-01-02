@@ -608,16 +608,16 @@ fn cmd_pkg_info(cli: &Cli, args: &cli::InfoArgs) -> Result<()> {
             }
 
             println!("{}", "Usage".bold().underline());
-            println!(
-                "  nix shell nixpkgs/{}#{}",
-                pkg.last_commit_short(),
-                pkg.attribute_path
-            );
-            println!(
-                "  nix run nixpkgs/{}#{}",
-                pkg.last_commit_short(),
-                pkg.attribute_path
-            );
+            println!("  {}", pkg.nix_shell_cmd());
+            println!("  {}", pkg.nix_run_cmd());
+
+            if pkg.predates_flakes() {
+                println!();
+                println!(
+                    "{}",
+                    "Note: Very old nixpkgs (pre-2020) may not build with modern Nix.".yellow()
+                );
+            }
 
             // Show other attribute paths if there are multiple (deduplicated)
             if packages.len() > 1 {
@@ -794,11 +794,7 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
                 );
                 println!();
                 println!("To use this version:");
-                println!(
-                    "  nix run nixpkgs/{}#{}",
-                    last_pkg.last_commit_short(),
-                    last_pkg.attribute_path
-                );
+                println!("  {}", last_pkg.nix_run_cmd());
             }
             _ => {
                 println!("Version {} of {} not found.", version, args.package);

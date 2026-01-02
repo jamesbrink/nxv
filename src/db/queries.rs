@@ -70,6 +70,49 @@ impl PackageVersion {
     pub fn last_commit_short(&self) -> &str {
         &self.last_commit_hash[..7.min(self.last_commit_hash.len())]
     }
+
+    /// Check if the last commit predates flake.nix in nixpkgs.
+    /// flake.nix was added on 2020-02-10 via PR #68897.
+    pub fn predates_flakes(&self) -> bool {
+        // 2020-02-10 00:00:00 UTC
+        const FLAKE_EPOCH: i64 = 1581292800;
+        self.last_commit_date.timestamp() < FLAKE_EPOCH
+    }
+
+    /// Generate the appropriate nix shell command based on commit date.
+    pub fn nix_shell_cmd(&self) -> String {
+        if self.predates_flakes() {
+            format!(
+                "nix-shell -p '(import (fetchTarball \"https://github.com/NixOS/nixpkgs/archive/{}.tar.gz\") {{}}).{}'",
+                self.last_commit_short(),
+                self.attribute_path
+            )
+        } else {
+            format!(
+                "nix shell nixpkgs/{}#{}",
+                self.last_commit_short(),
+                self.attribute_path
+            )
+        }
+    }
+
+    /// Generate the appropriate nix run command based on commit date.
+    pub fn nix_run_cmd(&self) -> String {
+        if self.predates_flakes() {
+            format!(
+                "nix-shell -p '(import (fetchTarball \"https://github.com/NixOS/nixpkgs/archive/{}.tar.gz\") {{}}).{}' --run {}",
+                self.last_commit_short(),
+                self.attribute_path,
+                self.attribute_path
+            )
+        } else {
+            format!(
+                "nix run nixpkgs/{}#{}",
+                self.last_commit_short(),
+                self.attribute_path
+            )
+        }
+    }
 }
 
 /// Index statistics.

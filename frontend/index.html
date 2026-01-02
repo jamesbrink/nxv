@@ -493,6 +493,23 @@
         opacity: 1;
       }
 
+      .legacy-warning {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        background: rgba(210, 153, 34, 0.15);
+        border: 1px solid var(--warning);
+        color: var(--warning);
+        padding: 0.5rem 0.75rem;
+        border-radius: 6px;
+        font-size: 0.8rem;
+        margin: 0.75rem 0;
+      }
+
+      .legacy-warning svg {
+        flex-shrink: 0;
+      }
+
       .code-block {
         background: var(--bg);
         border: 1px solid var(--border);
@@ -773,6 +790,10 @@
         const d = new Date(dateStr);
         return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
       };
+
+      // Check if a date predates flake.nix in nixpkgs (Feb 10, 2020)
+      const FLAKE_EPOCH = new Date('2020-02-10T00:00:00Z');
+      const predatesFlakes = (dateStr) => new Date(dateStr) < FLAKE_EPOCH;
 
       // Format platforms into clean arch badges
       const formatPlatforms = (platforms) => {
@@ -1071,12 +1092,21 @@
       // Render a package card
       const renderPackageCard = (pkg) => {
         const cardId = `pkg-${pkg.id}`;
-        const nixExpr = `(import (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/${pkg.last_commit_hash}.tar.gz") {}).${pkg.attribute_path}`;
-        const nixShell = `nix-shell -p '(import (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/${pkg.last_commit_hash}.tar.gz") {}).${pkg.attribute_path}'`;
+        const isLegacy = predatesFlakes(pkg.last_commit_date);
+        const shortHash = pkg.last_commit_hash.substring(0, 7);
+
+        // Use flake syntax for modern packages, legacy fetchTarball for old ones
+        const nixExpr = isLegacy
+          ? `(import (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/${pkg.last_commit_hash}.tar.gz") {}).${pkg.attribute_path}`
+          : `nixpkgs#${pkg.attribute_path}  # or nixpkgs/${shortHash}#${pkg.attribute_path}`;
+        const nixShell = isLegacy
+          ? `nix-shell -p '(import (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/${pkg.last_commit_hash}.tar.gz") {}).${pkg.attribute_path}'`
+          : `nix shell nixpkgs/${shortHash}#${pkg.attribute_path}`;
 
         // Store expressions in the map
         expressionStore.set(`${cardId}-expr`, nixExpr);
         expressionStore.set(`${cardId}-shell`, nixShell);
+        expressionStore.set(`${cardId}-legacy`, isLegacy);
 
         return `
         <div class="result-card" data-attr="${escapeHtml(pkg.attribute_path)}">
@@ -1104,14 +1134,20 @@
               })
               .join('')}</div>`;
           })()}
+          ${predatesFlakes(pkg.last_commit_date) ? `
+          <div class="legacy-warning">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+            Very old nixpkgs (pre-2020) may not build with modern Nix
+          </div>
+          ` : ''}
           <div class="result-actions">
             <button class="btn copy-expr" data-id="${cardId}-expr">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-              Copy Nix Expression
+              ${isLegacy ? 'Copy Nix Expression' : 'Copy Flake Ref'}
             </button>
             <button class="btn copy-shell" data-id="${cardId}-shell">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m4 17 6-6-6-6M12 19h8"/></svg>
-              Copy nix-shell
+              ${isLegacy ? 'Copy nix-shell' : 'Copy nix shell'}
             </button>
             ${
               pkg.source_path
@@ -1239,7 +1275,11 @@
           const escapedAttr = escapeHtml(attr);
           versionsWithHashes.forEach((v) => {
             if (v.commit_hash) {
-              const nixExpr = `(import (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/${v.commit_hash}.tar.gz") {}).${attr}`;
+              const isLegacy = predatesFlakes(v.last_seen);
+              const shortHash = v.commit_hash.substring(0, 7);
+              const nixExpr = isLegacy
+                ? `(import (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/${v.commit_hash}.tar.gz") {}).${attr}`
+                : `nix shell nixpkgs/${shortHash}#${attr}`;
               expressionStore.set(`history-${escapedAttr}-${v.idx}`, nixExpr);
             }
           });
@@ -1249,10 +1289,11 @@
             ${versionsWithHashes
               .map((v) => {
                 const hasCommit = v.commit_hash;
+                const isLegacy = predatesFlakes(v.last_seen);
                 return `
                 <div class="version-item">
                   <div class="version-info">
-                    <div class="version-number">${escapeHtml(v.version)}</div>
+                    <div class="version-number">${escapeHtml(v.version)}${isLegacy ? ' <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--warning)" stroke-width="2" style="vertical-align: middle" title="May not build with modern Nix"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>' : ''}</div>
                     <div class="version-dates">${formatDate(v.first_seen)} - ${formatDate(v.last_seen)}</div>
                     ${hasCommit ? `<div class="version-commit">${v.commit_hash.substring(0, 12)}</div>` : ''}
                   </div>

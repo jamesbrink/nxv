@@ -1,24 +1,58 @@
 # nxv
 
-CLI tool to find specific versions of Nix packages across nixpkgs history.
+[![CI](https://github.com/jamesbrink/nxv/actions/workflows/ci.yml/badge.svg)](https://github.com/jamesbrink/nxv/actions/workflows/ci.yml)
+[![Release](https://github.com/jamesbrink/nxv/actions/workflows/release.yml/badge.svg)](https://github.com/jamesbrink/nxv/actions/workflows/release.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
+[![Nix Flake](https://img.shields.io/badge/nix-flake-blue?logo=nixos)](https://nixos.wiki/wiki/Flakes)
+[![Built with Claude](https://img.shields.io/badge/Built%20with-Claude-D97757?logo=claude&logoColor=white)](https://claude.ai)
 
-> **Early Development** - No public index available yet. Building your own index requires a local nixpkgs clone.
+**Find any version of any Nix package, instantly.**
+
+nxv indexes the entire nixpkgs git history to help you discover when packages were added, which versions existed, and the exact commit to use with `nix shell nixpkgs/<commit>#package`.
+
+> **Early Development** — No public index available yet. Building your own index requires a local nixpkgs clone.
+
+## Features
+
+- **Fast search** — Bloom filter for instant "not found" responses, SQLite FTS5 for full-text search
+- **Version history** — See when each version was introduced and when it was superseded
+- **Multiple interfaces** — CLI tool, HTTP API server with web UI, or use as a library
+- **NixOS module** — Run as a systemd service with automatic index updates
+- **Lightweight** — ~10MB static binary, ~150MB compressed index
+
+## How It Works
+
+```text
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│    nixpkgs      │────▶│     Indexer     │────▶│  SQLite Index   │
+│   git history   │     │  (nix eval per  │     │  + Bloom Filter │
+│                 │     │    commit)      │     │                 │
+└─────────────────┘     └─────────────────┘     └─────────────────┘
+                                                        │
+                                                        ▼
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│   nxv search    │◀────│   Query Engine  │◀────│  Download from  │
+│   nxv serve     │     │  (bloom + FTS5) │     │  remote/local   │
+└─────────────────┘     └─────────────────┘     └─────────────────┘
+```
+
+The indexer walks nixpkgs commits (from 2017+), runs `nix eval` to extract package metadata, and stores version ranges in SQLite. Users download a pre-built compressed index (~150MB) and query it locally or via the API server.
 
 ## Installation
 
 ```bash
-# Run directly
+# Run directly with Nix
 nix run github:jamesbrink/nxv -- search python
 
 # Install to profile
 nix profile install github:jamesbrink/nxv
 
-# Or use the overlay in your flake
+# Or add to your flake
 {
   inputs.nxv.url = "github:jamesbrink/nxv";
 
   outputs = { nixpkgs, nxv, ... }: {
-    # NixOS
     nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
       modules = [{
         nixpkgs.overlays = [ nxv.overlays.default ];
@@ -29,44 +63,90 @@ nix profile install github:jamesbrink/nxv
 }
 ```
 
-Shell completions for bash, zsh, and fish are included.
+### Pre-built Binaries
+
+Download from [GitHub Releases](https://github.com/jamesbrink/nxv/releases):
+
+| Platform | Binary |
+| -------- | ------ |
+| Linux x86_64 | `nxv-x86_64-linux-musl` (static) |
+| Linux aarch64 | `nxv-aarch64-linux-musl` (static) |
+| macOS x86_64 | `nxv-x86_64-apple-darwin` |
+| macOS Apple Silicon | `nxv-aarch64-apple-darwin` |
+
+Shell completions for bash, zsh, and fish are included via `nxv completions <shell>`.
 
 ## Usage
 
+### Search for Packages
+
 ```bash
-# Search for packages
-nxv search python
-nxv search python --version 3.11
-nxv search --desc "json parser"
-
-# Package info and history
-nxv info python
-nxv history python
-
-# Index stats
-nxv stats
-
-# Output formats
-nxv search python --format json
+nxv search python                    # Find all python packages
+nxv search python --version 3.11     # Filter by version prefix
+nxv search python --exact            # Exact name match only
+nxv search --desc "json parser"      # Search descriptions (FTS)
+nxv search python --format json      # JSON output
 ```
 
-Use a found version with Nix:
+### Package Info & History
+
 ```bash
-nix shell nixpkgs/<commit>#python
+nxv info python              # Detailed package information
+nxv info python 3.11.0       # Info for specific version
+nxv history python           # Version timeline
+nxv history python 3.11.0    # When was 3.11.0 available?
+```
+
+### Use a Found Version
+
+```bash
+# After finding a commit hash from search results:
+nix shell nixpkgs/e4a45f9#python
+nix run nixpkgs/e4a45f9#python
+```
+
+### Index Management
+
+```bash
+nxv update           # Download/update the index
+nxv update --force   # Force full re-download
+nxv stats            # Show index statistics
 ```
 
 ## API Server
 
+Run nxv as an HTTP API server with a built-in web interface:
+
 ```bash
-nxv serve                          # localhost:8080
-nxv serve --host 0.0.0.0 --port 3000 --cors
+nxv serve                                    # localhost:8080
+nxv serve --host 0.0.0.0 --port 3000 --cors  # Public with CORS
 ```
 
-Endpoints: `/api/v1/search`, `/api/v1/packages/{attr}`, `/api/v1/stats`, `/docs`
+**Endpoints:**
 
-### NixOS Module
+| Endpoint | Description |
+| -------- | ----------- |
+| `GET /` | Web UI |
+| `GET /docs` | OpenAPI documentation (Scalar) |
+| `GET /api/v1/search?q=python` | Search packages |
+| `GET /api/v1/search/description?q=json` | Search descriptions |
+| `GET /api/v1/packages/{attr}` | Package details |
+| `GET /api/v1/packages/{attr}/history` | Version history |
+| `GET /api/v1/stats` | Index statistics |
+| `GET /api/v1/health` | Health check |
 
-Run the API server as a systemd service:
+### Remote API Mode
+
+Point the CLI at a remote server instead of using a local database:
+
+```bash
+export NXV_API_URL=http://your-server:8080
+nxv search python  # Uses remote API transparently
+```
+
+## NixOS Module
+
+Run the API server as a systemd service with automatic updates:
 
 ```nix
 {
@@ -81,10 +161,10 @@ Run the API server as a systemd service:
             enable = true;
             host = "0.0.0.0";
             port = 8080;
-            dataDir = "/var/lib/nxv";   # database location (index.db)
+            dataDir = "/var/lib/nxv";
             cors.enable = true;
             openFirewall = true;
-            autoUpdate.enable = true;   # daily index updates
+            autoUpdate.enable = true;   # Daily index updates
           };
         }
       ];
@@ -93,8 +173,11 @@ Run the API server as a systemd service:
 }
 ```
 
+<details>
+<summary>All module options</summary>
+
 | Option | Default | Description |
-|--------|---------|-------------|
+| ------ | ------- | ----------- |
 | `enable` | `false` | Enable the nxv API service |
 | `host` | `127.0.0.1` | Address to bind to |
 | `port` | `8080` | Port to listen on |
@@ -106,48 +189,30 @@ Run the API server as a systemd service:
 | `autoUpdate.enable` | `false` | Enable automatic index updates |
 | `autoUpdate.interval` | `daily` | Update frequency (systemd calendar syntax) |
 
-The module creates a dedicated user, applies systemd hardening, downloads the index on first start, and optionally manages automatic updates.
+</details>
 
-## Remote API
-
-Point the CLI at a remote server instead of local database:
-
-```bash
-export NXV_API_URL=http://your-server:8080
-nxv search python  # uses remote API transparently
-```
-
-## Environment Variables
-
-| Variable | Description |
-|----------|-------------|
-| `NXV_DB_PATH` | Path to the index database. The bloom filter is stored as a sibling file (`.bloom` extension). |
-| `NXV_API_URL` | Remote API server URL. When set, CLI uses remote API instead of local database. |
-| `NXV_MANIFEST_URL` | Custom manifest URL for index downloads. |
-| `NO_COLOR` | Disable colored output. |
-
-Example for service deployments:
-
-```bash
-export NXV_DB_PATH=/var/lib/nxv/index.db
-nxv serve  # bloom filter at /var/lib/nxv/index.bloom
-```
-
-## Building an Index
+## Building Your Own Index
 
 Requires the `indexer` feature and a local nixpkgs clone:
 
 ```bash
+# Build with indexer support
 nix build .#nxv-indexer
-# or
-cargo build --release --features indexer
+# or: cargo build --release --features indexer
 
+# Clone nixpkgs
+git clone --depth 1000 https://github.com/NixOS/nixpkgs.git
+
+# Build the index (takes hours for full history)
 nxv index --nixpkgs-path ./nixpkgs --full
+
+# Incremental update (much faster)
+nxv index --nixpkgs-path ./nixpkgs
 ```
 
 ### Backfilling Metadata
 
-Update missing `source_path` and `homepage` fields without rebuilding:
+Update missing fields without full rebuild:
 
 ```bash
 # Fast: extract from current nixpkgs HEAD
@@ -157,24 +222,12 @@ nxv backfill --nixpkgs-path ./nixpkgs
 nxv backfill --nixpkgs-path ./nixpkgs --history
 ```
 
-### Resetting nixpkgs Repository
-
-If the nixpkgs repository gets into a messy state (e.g., after an interrupted operation), reset it:
-
-```bash
-# Reset to origin/master
-nxv reset --nixpkgs-path ./nixpkgs
-
-# Fetch and reset to latest
-nxv reset --nixpkgs-path ./nixpkgs --fetch
-
-# Reset to a specific commit
-nxv reset --nixpkgs-path ./nixpkgs --to abc1234
-```
-
 ### Hosting Your Own Index
 
-To host your own index, create a `manifest.json` with the following format:
+<details>
+<summary>Manifest format</summary>
+
+Create a `manifest.json`:
 
 ```json
 {
@@ -191,45 +244,56 @@ To host your own index, create a `manifest.json` with the following format:
     "size_bytes": 150000,
     "sha256": "d7a8fbb307d7809469ca9abcb0082e4f8d5651e46d3cdb762d02d0bf37c9e592"
   },
-  "deltas": [
-    {
-      "from_commit": "previouscommit123...",
-      "to_commit": "abc123def456789...",
-      "url": "https://your-server.com/delta-prev-to-current.sql.zst",
-      "size_bytes": 50000,
-      "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
-    }
-  ]
+  "deltas": []
 }
 ```
 
-| Field | Description |
-|-------|-------------|
-| `version` | Manifest format version (currently `2`) |
-| `latest_commit` | Full nixpkgs commit hash of the index |
-| `latest_commit_date` | ISO 8601 timestamp of the commit |
-| `full_index.url` | URL to zstd-compressed SQLite database |
-| `full_index.size_bytes` | Compressed file size |
-| `full_index.sha256` | SHA-256 hash of compressed file |
-| `bloom_filter.*` | Same structure for the bloom filter file |
-| `deltas` | Optional array of incremental updates |
-
-Point CLI or module at your manifest:
+Point clients at your manifest:
 
 ```bash
 nxv update --manifest-url https://your-server.com/manifest.json
+# or
+export NXV_MANIFEST_URL=https://your-server.com/manifest.json
 ```
 
-```nix
-services.nxv.manifestUrl = "https://your-server.com/manifest.json";
-```
+</details>
+
+## Environment Variables
+
+| Variable | Description |
+| -------- | ----------- |
+| `NXV_DB_PATH` | Path to index database (bloom filter stored as sibling `.bloom` file) |
+| `NXV_API_URL` | Remote API URL (CLI uses remote instead of local DB when set) |
+| `NXV_MANIFEST_URL` | Custom manifest URL for index downloads |
+| `NO_COLOR` | Disable colored output |
 
 ## Development
 
 ```bash
-nix develop
-cargo test
-nix flake check
+nix develop                         # Enter dev shell
+cargo build                         # Debug build
+cargo build --features indexer      # With indexer
+cargo test                          # Run tests
+cargo test --features indexer       # All tests including indexer
+cargo clippy -- -D warnings         # Lint
+nix flake check                     # Full Nix CI checks
+```
+
+### Project Structure
+
+```text
+src/
+├── main.rs          # Entry point, command dispatch
+├── cli.rs           # Clap command definitions
+├── db/              # SQLite database layer
+├── remote/          # Index download/update
+├── server/          # HTTP API (axum)
+├── output/          # Table/JSON/plain formatters
+├── bloom.rs         # Bloom filter
+└── index/           # Indexer (feature-gated)
+    ├── git.rs       # Git history traversal
+    ├── extractor.rs # Nix evaluation
+    └── backfill.rs  # Metadata backfill
 ```
 
 ## License

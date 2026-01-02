@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-nxv (Nix Versions) is a Rust CLI tool for quickly finding specific versions of Nix packages across nixpkgs history. It uses a pre-built SQLite index with bloom filters for fast lookups.
+nxv (Nix Versions) is a Rust CLI tool for quickly finding specific versions of Nix packages across nixpkgs history. It uses a pre-built SQLite index with bloom filters for fast lookups. Also provides an HTTP API server with web frontend.
 
 ## Development Environment
 
@@ -31,6 +31,16 @@ cargo fmt                        # Format code
 nix flake check                  # Run all Nix checks (build, clippy, fmt, tests)
 ```
 
+## Nix Flake Outputs
+
+```bash
+nix build                        # Build nxv (user binary)
+nix build .#nxv-indexer          # Build with indexer feature
+nix build .#nxv-static           # Static musl build (Linux only)
+nix run                          # Run nxv directly
+nix run .#nxv-indexer            # Run with indexer feature
+```
+
 ## Architecture
 
 ### Data Flow
@@ -38,6 +48,14 @@ nix flake check                  # Run all Nix checks (build, clippy, fmt, tests
 1. **Index Download** (`remote/`): User runs `nxv update` → downloads compressed SQLite DB + bloom filter from remote manifest
 2. **Search** (`db/queries.rs`): Queries go through bloom filter first (fast negative lookup), then SQLite with FTS5
 3. **Output** (`output/`): Results formatted as table (default), JSON, or plain text
+
+### API Server (`server/`)
+
+The `nxv serve` command runs an HTTP API server with:
+- REST API at `/api/v1/*` (search, package info, version history, stats)
+- Web frontend at `/` (embedded HTML/JS)
+- OpenAPI documentation at `/docs`
+- Configurable CORS support
 
 ### Indexer (feature-gated)
 
@@ -48,6 +66,7 @@ The `indexer` feature enables building indexes from a local nixpkgs clone:
 - `backfill.rs`: Updates missing metadata (source_path, homepage) for existing records
   - HEAD mode: Fast extraction from current nixpkgs (may miss renamed/removed packages)
   - Historical mode (`--history`): Traverses git to original commits for accuracy
+- `publisher.rs`: Generates compressed index files and manifest for distribution
 
 ### Database Schema (`db/mod.rs`)
 
@@ -85,3 +104,18 @@ Files:
 - Integration tests in `tests/integration.rs` use `assert_cmd` to test CLI behavior
 - Tests create temporary databases using `tempfile`
 - Some indexer tests require `nix` to be installed (marked `#[ignore]`)
+
+## NixOS Module
+
+A NixOS module is provided for running nxv as a systemd service:
+
+```nix
+{
+  imports = [ inputs.nxv.nixosModules.default ];
+  services.nxv = {
+    enable = true;
+    port = 8080;
+    # indexPath = "/path/to/index.db";  # Optional custom path
+  };
+}
+```

@@ -1124,12 +1124,17 @@ fn cmd_backfill(cli: &Cli, args: &cli::BackfillArgs) -> Result<()> {
             "Backfilling metadata from {:?} (historical mode)",
             args.nixpkgs_path
         );
+        eprintln!("  This will check out each package's original commit to extract metadata.");
+        eprintln!("  Slower but can update old/removed packages.");
     } else {
         eprintln!(
             "Backfilling metadata from {:?} (HEAD mode)",
             args.nixpkgs_path
         );
+        eprintln!("  This extracts metadata from the current nixpkgs checkout only.");
+        eprintln!("  Fast, but packages not in this checkout won't be updated.");
     }
+    eprintln!();
 
     let config = BackfillConfig {
         fields: args.fields.clone().unwrap_or_default(),
@@ -1165,10 +1170,26 @@ fn cmd_backfill(cli: &Cli, args: &cli::BackfillArgs) -> Result<()> {
         result.source_paths_filled
     );
     eprintln!("  homepage fields filled: {}", result.homepages_filled);
+    eprintln!(
+        "  known_vulnerabilities fields filled: {}",
+        result.vulnerabilities_filled
+    );
 
+    // Show helpful tips based on results
     if result.was_interrupted {
         eprintln!();
         eprintln!("Note: Backfill was interrupted. Run again to continue.");
+    } else if !args.history
+        && result.records_updated == 0
+        && result.packages_checked > 0
+    {
+        eprintln!();
+        eprintln!("Tip: No records were updated. This can happen if:");
+        eprintln!("  - All packages already have the requested metadata, or");
+        eprintln!("  - The packages no longer exist in your nixpkgs checkout.");
+        eprintln!();
+        eprintln!("To update old/removed packages, use historical mode:");
+        eprintln!("  nxv backfill --nixpkgs-path {:?} --history", args.nixpkgs_path);
     }
 
     Ok(())

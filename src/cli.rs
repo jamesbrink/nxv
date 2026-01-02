@@ -62,6 +62,10 @@ pub enum Commands {
     #[cfg(feature = "indexer")]
     Reset(ResetArgs),
 
+    /// Generate publishable index artifacts (compressed DB, bloom filter, manifest).
+    #[cfg(feature = "indexer")]
+    Publish(PublishArgs),
+
     /// Start the API server.
     Serve(ServeArgs),
 
@@ -328,6 +332,19 @@ pub struct ResetArgs {
     /// Also fetch from origin before resetting.
     #[arg(long)]
     pub fetch: bool,
+}
+
+/// Arguments for the publish command (feature-gated).
+#[cfg(feature = "indexer")]
+#[derive(Parser, Debug)]
+pub struct PublishArgs {
+    /// Output directory for generated artifacts.
+    #[arg(short, long, default_value = "./publish")]
+    pub output: PathBuf,
+
+    /// Base URL prefix for manifest URLs (e.g., https://github.com/user/repo/releases/download/index-latest).
+    #[arg(long)]
+    pub url_prefix: Option<String>,
 }
 
 /// Output format argument.

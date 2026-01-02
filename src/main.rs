@@ -60,6 +60,8 @@ fn main() {
         Commands::Backfill(args) => cmd_backfill(&cli, args),
         #[cfg(feature = "indexer")]
         Commands::Reset(args) => cmd_reset(&cli, args),
+        #[cfg(feature = "indexer")]
+        Commands::Publish(args) => cmd_publish(&cli, args),
         Commands::Serve(args) => cmd_serve(&cli, args),
     };
 
@@ -1159,6 +1161,35 @@ fn cmd_reset(_cli: &Cli, args: &cli::ResetArgs) -> Result<()> {
     if let Ok(head) = repo.head_commit() {
         eprintln!("  HEAD: {}", &head[..12.min(head.len())]);
     }
+
+    Ok(())
+}
+
+/// Generates publishable index artifacts (compressed database, bloom filter, manifest).
+///
+/// Creates distribution-ready files in the specified output directory:
+/// - `index.db.zst` - zstd-compressed SQLite database
+/// - `bloom.bin` - Bloom filter for fast negative lookups
+/// - `manifest.json` - Manifest with URLs and checksums
+///
+/// The `--url-prefix` option sets the base URL for manifest download URLs.
+///
+/// # Examples
+///
+/// ```no_run
+/// // Generate artifacts with custom URL prefix:
+/// // nxv publish --output ./publish --url-prefix https://example.com/releases
+/// ```
+#[cfg(feature = "indexer")]
+fn cmd_publish(cli: &Cli, args: &cli::PublishArgs) -> Result<()> {
+    use crate::index::publisher::publish_index;
+
+    publish_index(
+        &cli.db_path,
+        &args.output,
+        args.url_prefix.as_deref(),
+        !cli.quiet,
+    )?;
 
     Ok(())
 }

@@ -1,7 +1,5 @@
 //! Index publishing utilities for generating distributable artifacts.
 
-#![allow(dead_code)]
-
 use crate::bloom::PackageBloomFilter;
 use crate::db::Database;
 use crate::db::queries::get_all_unique_attrs;
@@ -15,22 +13,27 @@ use std::path::Path;
 /// Compression level for zstd (higher = better compression, slower).
 const COMPRESSION_LEVEL: i32 = 19;
 
+/// Default file names for published artifacts.
+pub const INDEX_DB_NAME: &str = "index.db.zst";
+pub const BLOOM_FILTER_NAME: &str = "bloom.bin";
+pub const MANIFEST_NAME: &str = "manifest.json";
+
 /// Generate a compressed full index for distribution.
 ///
 /// Creates:
-/// - `nxv-index-full.db.zst` - Compressed database
+/// - `index.db.zst` - Compressed database
 /// - Returns the IndexFile with hash and size info
 pub fn generate_full_index<P: AsRef<Path>, Q: AsRef<Path>>(
     db_path: P,
     output_dir: Q,
+    url_prefix: Option<&str>,
 ) -> Result<(IndexFile, String)> {
     let db_path = db_path.as_ref();
     let output_dir = output_dir.as_ref();
 
     fs::create_dir_all(output_dir)?;
 
-    let compressed_name = "nxv-index-full.db.zst";
-    let compressed_path = output_dir.join(compressed_name);
+    let compressed_path = output_dir.join(INDEX_DB_NAME);
 
     // Get database info
     let db = Database::open(db_path)?;
@@ -43,8 +46,13 @@ pub fn generate_full_index<P: AsRef<Path>, Q: AsRef<Path>>(
     let sha256 = file_sha256(&compressed_path)?;
     let size = fs::metadata(&compressed_path)?.len();
 
+    let url = match url_prefix {
+        Some(prefix) => format!("{}/{}", prefix.trim_end_matches('/'), INDEX_DB_NAME),
+        None => INDEX_DB_NAME.to_string(),
+    };
+
     let index_file = IndexFile {
-        url: compressed_name.to_string(),
+        url,
         size_bytes: size,
         sha256,
     };
@@ -56,6 +64,7 @@ pub fn generate_full_index<P: AsRef<Path>, Q: AsRef<Path>>(
 ///
 /// Creates a compressed SQL file with INSERT/UPDATE statements for changes
 /// between from_commit and to_commit.
+#[allow(dead_code)]
 pub fn generate_delta_pack<P: AsRef<Path>, Q: AsRef<Path>>(
     db_path: P,
     from_commit: &str,
@@ -218,31 +227,20 @@ pub fn generate_manifest<P: AsRef<Path>>(
 
 /// Generate a bloom filter file containing all unique attribute paths from the database.
 ///
-/// The function writes `nxv-bloom.bin` into `output_dir`, populated with every unique
+/// The function writes `bloom.bin` into `output_dir`, populated with every unique
 /// attribute path extracted from `db_path`. It returns an `IndexFile` describing the
 /// bloom file (URL, size in bytes, and SHA-256 hash).
-///
-/// # Examples
-///
-/// ```no_run
-/// use tempfile::tempdir;
-///
-/// let db_path = "path/to/index.db";
-/// let out = tempdir().unwrap();
-/// let index_file = generate_bloom_filter(db_path, out.path()).unwrap();
-/// assert_eq!(index_file.url, "nxv-bloom.bin");
-/// ```
 pub fn generate_bloom_filter<P: AsRef<Path>, Q: AsRef<Path>>(
     db_path: P,
     output_dir: Q,
+    url_prefix: Option<&str>,
 ) -> Result<IndexFile> {
     let db_path = db_path.as_ref();
     let output_dir = output_dir.as_ref();
 
     fs::create_dir_all(output_dir)?;
 
-    let bloom_name = "nxv-bloom.bin";
-    let bloom_path = output_dir.join(bloom_name);
+    let bloom_path = output_dir.join(BLOOM_FILTER_NAME);
 
     // Get all unique attribute paths from database
     let db = Database::open(db_path)?;
@@ -263,11 +261,75 @@ pub fn generate_bloom_filter<P: AsRef<Path>, Q: AsRef<Path>>(
     let sha256 = file_sha256(&bloom_path)?;
     let size = fs::metadata(&bloom_path)?.len();
 
+    let url = match url_prefix {
+        Some(prefix) => format!("{}/{}", prefix.trim_end_matches('/'), BLOOM_FILTER_NAME),
+        None => BLOOM_FILTER_NAME.to_string(),
+    };
+
     Ok(IndexFile {
-        url: bloom_name.to_string(),
+        url,
         size_bytes: size,
         sha256,
     })
+}
+
+/// Generate all publishable artifacts for an index.
+///
+/// Creates:
+/// - `index.db.zst` - Compressed database
+/// - `bloom.bin` - Bloom filter for fast lookups
+/// - `manifest.json` - Manifest with URLs and checksums
+///
+/// Returns the path to the output directory.
+pub fn publish_index<P: AsRef<Path>, Q: AsRef<Path>>(
+    db_path: P,
+    output_dir: Q,
+    url_prefix: Option<&str>,
+    show_progress: bool,
+) -> Result<()> {
+    let db_path = db_path.as_ref();
+    let output_dir = output_dir.as_ref();
+
+    fs::create_dir_all(output_dir)?;
+
+    if show_progress {
+        eprintln!("Generating compressed index...");
+    }
+    let (full_index, last_commit) = generate_full_index(db_path, output_dir, url_prefix)?;
+
+    if show_progress {
+        eprintln!("Generating bloom filter...");
+    }
+    let bloom_filter = generate_bloom_filter(db_path, output_dir, url_prefix)?;
+
+    if show_progress {
+        eprintln!("Generating manifest...");
+    }
+    generate_manifest(
+        output_dir,
+        full_index.clone(),
+        &last_commit,
+        vec![],
+        bloom_filter.clone(),
+    )?;
+
+    if show_progress {
+        eprintln!();
+        eprintln!("Published artifacts to: {}", output_dir.display());
+        eprintln!("  - {} ({} bytes)", INDEX_DB_NAME, full_index.size_bytes);
+        eprintln!(
+            "  - {} ({} bytes)",
+            BLOOM_FILTER_NAME, bloom_filter.size_bytes
+        );
+        eprintln!("  - {}", MANIFEST_NAME);
+        eprintln!();
+        eprintln!(
+            "Last indexed commit: {}",
+            &last_commit[..12.min(last_commit.len())]
+        );
+    }
+
+    Ok(())
 }
 
 /// Sign the manifest file using minisign.
@@ -275,6 +337,7 @@ pub fn generate_bloom_filter<P: AsRef<Path>, Q: AsRef<Path>>(
 /// This requires a secret key to be available.
 /// For now, this is a placeholder that would be implemented
 /// when setting up the signing infrastructure.
+#[allow(dead_code)]
 pub fn sign_manifest<P: AsRef<Path>>(_output_dir: P, _secret_key_path: &str) -> Result<()> {
     // Signing would be done with minisign CLI or library
     // For now, this is a placeholder
@@ -286,11 +349,13 @@ pub fn sign_manifest<P: AsRef<Path>>(_output_dir: P, _secret_key_path: &str) -> 
 }
 
 /// Helper to quote a string for SQL.
+#[allow(dead_code)]
 fn sql_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
 /// Helper to quote an optional string for SQL.
+#[allow(dead_code)]
 fn sql_quote_opt(s: &Option<String>) -> String {
     match s {
         Some(v) => sql_quote(v),
@@ -348,15 +413,30 @@ mod tests {
 
         create_test_db(&db_path);
 
-        let (index_file, last_commit) = generate_full_index(&db_path, &output_dir).unwrap();
+        let (index_file, last_commit) = generate_full_index(&db_path, &output_dir, None).unwrap();
 
         assert!(!index_file.sha256.is_empty());
         assert!(index_file.size_bytes > 0);
+        assert_eq!(index_file.url, INDEX_DB_NAME);
         assert_eq!(last_commit, "abc1234567890def");
 
         // Verify the compressed file exists
-        let compressed_path = output_dir.join("nxv-index-full.db.zst");
+        let compressed_path = output_dir.join(INDEX_DB_NAME);
         assert!(compressed_path.exists());
+    }
+
+    #[test]
+    fn test_generate_full_index_with_url_prefix() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let output_dir = dir.path().join("output");
+
+        create_test_db(&db_path);
+
+        let url_prefix = "https://example.com/releases";
+        let (index_file, _) = generate_full_index(&db_path, &output_dir, Some(url_prefix)).unwrap();
+
+        assert_eq!(index_file.url, format!("{}/{}", url_prefix, INDEX_DB_NAME));
     }
 
     #[test]
@@ -367,13 +447,13 @@ mod tests {
 
         create_test_db(&db_path);
 
-        let bloom_file = generate_bloom_filter(&db_path, &output_dir).unwrap();
+        let bloom_file = generate_bloom_filter(&db_path, &output_dir, None).unwrap();
 
-        assert_eq!(bloom_file.url, "nxv-bloom.bin");
+        assert_eq!(bloom_file.url, BLOOM_FILTER_NAME);
         assert!(!bloom_file.sha256.is_empty());
 
         // Verify the bloom filter file exists
-        let bloom_path = output_dir.join("nxv-bloom.bin");
+        let bloom_path = output_dir.join(BLOOM_FILTER_NAME);
         assert!(bloom_path.exists());
 
         // Load and verify the bloom filter works (uses attribute_path, not name)

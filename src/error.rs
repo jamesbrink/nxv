@@ -30,8 +30,8 @@ pub enum NxvError {
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
-    #[error("API error: {0}")]
-    ApiError(String),
+    #[error("API error: HTTP {status} at {url}")]
+    ApiError { status: u16, url: String },
 
     #[error("Invalid manifest version: {0}. Please update nxv to the latest version.")]
     InvalidManifestVersion(u32),
@@ -89,9 +89,13 @@ mod tests {
 
     #[test]
     fn test_api_error_message() {
-        let err = NxvError::ApiError("connection refused".to_string());
+        let err = NxvError::ApiError {
+            status: 500,
+            url: "https://example.com/api".to_string(),
+        };
         let msg = err.to_string();
-        assert!(msg.contains("connection refused"));
+        assert!(msg.contains("500"));
+        assert!(msg.contains("https://example.com/api"));
     }
 
     #[test]

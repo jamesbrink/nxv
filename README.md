@@ -108,7 +108,7 @@ Shell completions for bash, zsh, and fish are included via `nxv completions <she
 
 ```bash
 nxv search python                    # Find all python packages
-nxv search python --version 3.11     # Filter by version prefix
+nxv search python 3.11               # Filter by version prefix
 nxv search python --exact            # Exact name match only
 nxv search --desc "json parser"      # Search descriptions (FTS)
 nxv search python --format json      # JSON output

@@ -99,9 +99,13 @@ pub struct SearchArgs {
     /// Package name or attribute path to search for.
     pub package: String,
 
-    /// Filter by version (prefix match).
-    #[arg(short = 'V', long)]
+    /// Version to filter by (positional, prefix match).
+    #[arg(conflicts_with = "version_flag")]
     pub version: Option<String>,
+
+    /// Filter by version (prefix match).
+    #[arg(short = 'V', long = "version", conflicts_with = "version")]
+    pub version_flag: Option<String>,
 
     /// Search in package descriptions (FTS).
     #[arg(long)]
@@ -142,6 +146,13 @@ pub struct SearchArgs {
     /// Use ASCII table borders instead of Unicode.
     #[arg(long)]
     pub ascii: bool,
+}
+
+impl SearchArgs {
+    /// Get the version filter from either positional or flag argument.
+    pub fn get_version(&self) -> Option<&str> {
+        self.version.as_deref().or(self.version_flag.as_deref())
+    }
 }
 
 /// Arguments for the update command.
@@ -440,17 +451,36 @@ mod tests {
     }
 
     #[test]
-    fn test_search_with_options() {
+    fn test_search_with_version_flag() {
         let args = Cli::try_parse_from(["nxv", "search", "python", "--version", "3.11", "--exact"])
             .unwrap();
         match args.command {
             Commands::Search(search) => {
                 assert_eq!(search.package, "python");
-                assert_eq!(search.version, Some("3.11".to_string()));
+                assert_eq!(search.get_version(), Some("3.11"));
                 assert!(search.exact);
             }
             _ => panic!("Expected Search command"),
         }
+    }
+
+    #[test]
+    fn test_search_with_version_positional() {
+        let args = Cli::try_parse_from(["nxv", "search", "python", "2.7"]).unwrap();
+        match args.command {
+            Commands::Search(search) => {
+                assert_eq!(search.package, "python");
+                assert_eq!(search.get_version(), Some("2.7"));
+            }
+            _ => panic!("Expected Search command"),
+        }
+    }
+
+    #[test]
+    fn test_search_version_flag_and_positional_conflict() {
+        // Cannot use both positional version and -V flag
+        let result = Cli::try_parse_from(["nxv", "search", "python", "2.7", "-V", "3.11"]);
+        assert!(result.is_err());
     }
 
     #[test]

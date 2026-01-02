@@ -221,7 +221,7 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
     if verbosity >= Verbosity::Debug {
         eprintln!("[debug] Search parameters:");
         eprintln!("[debug]   package: {:?}", args.package);
-        eprintln!("[debug]   version: {:?}", args.version);
+        eprintln!("[debug]   version: {:?}", args.get_version());
         eprintln!("[debug]   exact: {}", args.exact);
         eprintln!("[debug]   desc: {}", args.desc);
         eprintln!("[debug]   license: {:?}", args.license);
@@ -272,7 +272,7 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
     // Build search options from CLI args
     let opts = SearchOptions {
         query: args.package.clone(),
-        version: args.version.clone(),
+        version: args.get_version().map(|s| s.to_string()),
         exact: args.exact,
         desc: args.desc,
         license: args.license.clone(),
@@ -286,7 +286,7 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
     // Determine query type for logging
     let query_type = if args.desc {
         "FTS description search"
-    } else if args.version.is_some() {
+    } else if args.get_version().is_some() {
         "package+version search"
     } else if args.exact {
         "exact package search"

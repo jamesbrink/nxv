@@ -828,22 +828,8 @@
       const FLAKE_EPOCH = new Date('2020-02-10T00:00:00Z');
       const predatesFlakes = (dateStr) => new Date(dateStr) < FLAKE_EPOCH;
 
-      // Check if package has known vulnerabilities (is insecure)
-      const isInsecure = (pkg) => {
-        if (!pkg.known_vulnerabilities) return false;
-        try {
-          const vulns =
-            typeof pkg.known_vulnerabilities === 'string'
-              ? JSON.parse(pkg.known_vulnerabilities)
-              : pkg.known_vulnerabilities;
-          return Array.isArray(vulns) && vulns.length > 0;
-        } catch {
-          return false;
-        }
-      };
-
-      // Get vulnerabilities list from package
-      const getVulnerabilities = (pkg) => {
+      // Parse known_vulnerabilities field into an array (handles JSON string or array)
+      const parseVulnerabilities = (pkg) => {
         if (!pkg.known_vulnerabilities) return [];
         try {
           const vulns =
@@ -855,6 +841,12 @@
           return [];
         }
       };
+
+      // Check if package has known vulnerabilities (is insecure)
+      const isInsecure = (pkg) => parseVulnerabilities(pkg).length > 0;
+
+      // Get vulnerabilities list from package
+      const getVulnerabilities = (pkg) => parseVulnerabilities(pkg);
 
       // Format platforms into clean arch badges
       const formatPlatforms = (platforms) => {

@@ -4,6 +4,11 @@ use crate::error::Result;
 use chrono::{DateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Unix timestamp for when flake.nix was added to nixpkgs (2020-02-10 00:00:00 UTC).
+/// Commits before this date require legacy nix-shell syntax instead of flake references.
+/// See: https://github.com/NixOS/nixpkgs/pull/68897
+const FLAKE_EPOCH_TIMESTAMP: i64 = 1581292800;
+
 /// Represents a package version entry from the database.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackageVersion {
@@ -75,11 +80,8 @@ impl PackageVersion {
     }
 
     /// Check if the last commit predates flake.nix in nixpkgs.
-    /// flake.nix was added on 2020-02-10 via PR #68897.
     pub fn predates_flakes(&self) -> bool {
-        // 2020-02-10 00:00:00 UTC
-        const FLAKE_EPOCH: i64 = 1581292800;
-        self.last_commit_date.timestamp() < FLAKE_EPOCH
+        self.last_commit_date.timestamp() < FLAKE_EPOCH_TIMESTAMP
     }
 
     /// Generate the appropriate nix shell command based on commit date and security status.
@@ -110,6 +112,12 @@ impl PackageVersion {
     }
 
     /// Generate the appropriate nix run command based on commit date and security status.
+    ///
+    /// Note: For legacy (pre-flake) packages, this uses `nix-shell --run` with the
+    /// attribute path as the command. This works when the binary name matches the
+    /// attribute path (e.g., `python`), but may fail for packages where they differ
+    /// (e.g., `python27` attribute but `python` binary). Users may need to adjust
+    /// the command for such cases.
     pub fn nix_run_cmd(&self) -> String {
         let insecure_prefix = if self.is_insecure() {
             "NIXPKGS_ALLOW_INSECURE=1 "
@@ -358,19 +366,25 @@ pub fn get_version_history(
     // with the same version has vulnerabilities (since insecurity is about the
     // version, not the attribute path - e.g., Python 2.7 is EOL regardless of
     // whether it's called "python" or "python27")
+    //
+    // Uses a CTE to pre-compute insecure versions once, avoiding a correlated
+    // subquery that would run for each row in the result set.
     let mut stmt = conn.prepare(
         r#"
+        WITH insecure_versions AS (
+            SELECT DISTINCT version
+            FROM package_versions
+            WHERE known_vulnerabilities IS NOT NULL
+              AND known_vulnerabilities != ''
+              AND known_vulnerabilities != '[]'
+              AND known_vulnerabilities != 'null'
+        )
         SELECT pv.version,
                MIN(pv.first_commit_date) as first_seen,
                MAX(pv.last_commit_date) as last_seen,
-               COALESCE((SELECT 1 FROM package_versions pv2
-                         WHERE pv2.version = pv.version
-                         AND pv2.known_vulnerabilities IS NOT NULL
-                         AND pv2.known_vulnerabilities != ''
-                         AND pv2.known_vulnerabilities != '[]'
-                         AND pv2.known_vulnerabilities != 'null'
-                         LIMIT 1), 0) as is_insecure
+               CASE WHEN iv.version IS NOT NULL THEN 1 ELSE 0 END as is_insecure
         FROM package_versions pv
+        LEFT JOIN insecure_versions iv ON pv.version = iv.version
         WHERE pv.attribute_path = ?
         GROUP BY pv.version
         ORDER BY first_seen DESC

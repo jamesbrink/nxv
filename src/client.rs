@@ -30,11 +30,17 @@ struct PaginationMeta {
 }
 
 /// Version history entry from API (for deserialization).
+///
+/// Note: `is_insecure` uses `#[serde(default)]` to default to `false` when
+/// connecting to older API versions that don't include this field. This ensures
+/// backwards compatibility - older servers simply report all versions as secure.
 #[derive(Debug, Deserialize)]
 struct ApiVersionHistoryEntry {
     version: String,
     first_seen: DateTime<Utc>,
     last_seen: DateTime<Utc>,
+    /// Whether this version has known vulnerabilities. Defaults to `false`
+    /// for backwards compatibility with older API versions.
     #[serde(default)]
     is_insecure: bool,
 }
@@ -231,6 +237,9 @@ impl ApiClient {
 
     /// Retrieves the first observed package version for the given package attribute and version.
     ///
+    /// This method calls the `/api/v1/packages/{attr}/versions/{version}/first` endpoint.
+    /// Not currently used by the CLI but provided for API completeness as a library method.
+    ///
     /// # Parameters
     /// - `attr`: package attribute path (for example `"namespace/name"`).
     /// - `version`: version string to query (for example `"1.2.3"`).
@@ -268,6 +277,9 @@ impl ApiClient {
     }
 
     /// Fetches the last observed occurrence of a package version from the remote API.
+    ///
+    /// This method calls the `/api/v1/packages/{attr}/versions/{version}/last` endpoint.
+    /// Not currently used by the CLI but provided for API completeness as a library method.
     ///
     /// Returns `Ok(Some(PackageVersion))` when the version was found, `Ok(None)` when the package or version is not present (404), and `Err(NxvError)` for other errors.
     ///

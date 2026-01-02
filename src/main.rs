@@ -1179,17 +1179,17 @@ fn cmd_backfill(cli: &Cli, args: &cli::BackfillArgs) -> Result<()> {
     if result.was_interrupted {
         eprintln!();
         eprintln!("Note: Backfill was interrupted. Run again to continue.");
-    } else if !args.history
-        && result.records_updated == 0
-        && result.packages_checked > 0
-    {
+    } else if !args.history && result.records_updated == 0 && result.packages_checked > 0 {
         eprintln!();
         eprintln!("Tip: No records were updated. This can happen if:");
         eprintln!("  - All packages already have the requested metadata, or");
         eprintln!("  - The packages no longer exist in your nixpkgs checkout.");
         eprintln!();
         eprintln!("To update old/removed packages, use historical mode:");
-        eprintln!("  nxv backfill --nixpkgs-path {:?} --history", args.nixpkgs_path);
+        eprintln!(
+            "  nxv backfill --nixpkgs-path {:?} --history",
+            args.nixpkgs_path
+        );
     }
 
     Ok(())

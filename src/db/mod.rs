@@ -149,6 +149,24 @@ impl Database {
             )?;
         }
 
+        // Create vulnerability index if column exists (for new databases)
+        // This index is conditional because old databases being migrated won't have the column yet
+        let has_known_vulns: bool = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('package_versions') WHERE name='known_vulnerabilities'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+
+        if has_known_vulns {
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_version_vulnerabilities ON package_versions(version) WHERE known_vulnerabilities IS NOT NULL AND known_vulnerabilities != '' AND known_vulnerabilities != '[]' AND known_vulnerabilities != 'null'",
+                [],
+            )?;
+        }
+
         // Set schema version if not already set
         let version = self.get_meta("schema_version")?;
         if version.is_none() {
@@ -213,6 +231,12 @@ impl Database {
                     [],
                 )?;
             }
+
+            // Add index for efficient vulnerability lookups in version history queries
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_version_vulnerabilities ON package_versions(version) WHERE known_vulnerabilities IS NOT NULL AND known_vulnerabilities != '' AND known_vulnerabilities != '[]' AND known_vulnerabilities != 'null'",
+                [],
+            )?;
         }
 
         if current_version < SCHEMA_VERSION {

@@ -1364,20 +1364,7 @@
             if (v.commit_hash) {
               const isLegacy = predatesFlakes(v.last_seen);
               const shortHash = v.commit_hash.substring(0, 7);
-              // Check if this version is insecure
-              const versionInsecure =
-                v.known_vulnerabilities &&
-                (() => {
-                  try {
-                    const vulns =
-                      typeof v.known_vulnerabilities === 'string'
-                        ? JSON.parse(v.known_vulnerabilities)
-                        : v.known_vulnerabilities;
-                    return Array.isArray(vulns) && vulns.length > 0;
-                  } catch {
-                    return false;
-                  }
-                })();
+              const versionInsecure = isInsecure(v);
               const insecurePrefix = versionInsecure ? 'NIXPKGS_ALLOW_INSECURE=1 ' : '';
               const impureFlag = versionInsecure ? ' --impure' : '';
               const nixExpr = isLegacy
@@ -1393,26 +1380,13 @@
               .map((v) => {
                 const hasCommit = v.commit_hash;
                 const isLegacy = predatesFlakes(v.last_seen);
-                // Check if this version is insecure
-                const versionInsecure =
-                  v.known_vulnerabilities &&
-                  (() => {
-                    try {
-                      const vulns =
-                        typeof v.known_vulnerabilities === 'string'
-                          ? JSON.parse(v.known_vulnerabilities)
-                          : v.known_vulnerabilities;
-                      return Array.isArray(vulns) && vulns.length > 0;
-                    } catch {
-                      return false;
-                    }
-                  })();
+                const versionInsecure = isInsecure(v);
                 return `
                 <div class="version-item">
                   <div class="version-info">
                     <div class="version-number">${escapeHtml(v.version)}${versionInsecure ? ' <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--error)" stroke-width="2" style="vertical-align: middle" title="Has known vulnerabilities"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>' : ''}${isLegacy ? ' <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--warning)" stroke-width="2" style="vertical-align: middle" title="May not build with modern Nix"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>' : ''}</div>
                     <div class="version-dates">${formatDate(v.first_seen)} - ${formatDate(v.last_seen)}</div>
-                    ${hasCommit ? `<div class="version-commit">${v.commit_hash.substring(0, 12)}</div>` : ''}
+                    ${hasCommit ? `<div class="version-commit">${v.commit_hash.substring(0, 7)}</div>` : ''}
                   </div>
                   ${
                     hasCommit

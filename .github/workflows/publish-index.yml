@@ -20,8 +20,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
   # Index is stored in a GitHub release with this tag
+  # Forks can override INDEX_URL_PREFIX via repository variable (Settings > Secrets and variables > Actions > Variables)
   INDEX_RELEASE_TAG: index-latest
-  INDEX_URL_PREFIX: https://github.com/jamesbrink/nxv/releases/download/index-latest
+  INDEX_URL_PREFIX: ${{ vars.INDEX_URL_PREFIX || format('https://github.com/{0}/releases/download/index-latest', github.repository) }}
 
 jobs:
   update-index:
@@ -130,7 +131,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- **Index size:** $(du -h publish/index.db.zst | cut -f1)" >> $GITHUB_STEP_SUMMARY
           echo "- **Bloom filter size:** $(du -h publish/bloom.bin 2>/dev/null | cut -f1 || echo 'N/A')" >> $GITHUB_STEP_SUMMARY
-          echo "- **Release:** [$INDEX_RELEASE_TAG](https://github.com/jamesbrink/nxv/releases/tag/$INDEX_RELEASE_TAG)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Release:** [$INDEX_RELEASE_TAG](https://github.com/${{ github.repository }}/releases/tag/$INDEX_RELEASE_TAG)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo '```json' >> $GITHUB_STEP_SUMMARY
           cat publish/manifest.json >> $GITHUB_STEP_SUMMARY

@@ -100,12 +100,12 @@ pub struct SearchArgs {
     pub package: String,
 
     /// Version to filter by (positional, prefix match).
-    #[arg(conflicts_with = "version_flag")]
+    #[arg(conflicts_with = "version_opt")]
     pub version: Option<String>,
 
-    /// Filter by version (prefix match).
+    /// Filter by version (prefix match, alternative to positional).
     #[arg(short = 'V', long = "version", conflicts_with = "version")]
-    pub version_flag: Option<String>,
+    pub version_opt: Option<String>,
 
     /// Search in package descriptions (FTS).
     #[arg(long)]
@@ -149,9 +149,9 @@ pub struct SearchArgs {
 }
 
 impl SearchArgs {
-    /// Get the version filter from either positional or flag argument.
+    /// Get the version filter from either positional or option argument.
     pub fn get_version(&self) -> Option<&str> {
-        self.version.as_deref().or(self.version_flag.as_deref())
+        self.version.as_deref().or(self.version_opt.as_deref())
     }
 }
 
@@ -196,12 +196,12 @@ pub struct InfoArgs {
     pub package: String,
 
     /// Specific version to show info for (positional).
-    #[arg(conflicts_with = "version_flag")]
+    #[arg(conflicts_with = "version_opt")]
     pub version: Option<String>,
 
-    /// Specific version to show info for (flag).
+    /// Specific version to show info for (alternative to positional).
     #[arg(short = 'V', long = "version", conflicts_with = "version")]
-    pub version_flag: Option<String>,
+    pub version_opt: Option<String>,
 
     /// Output format.
     #[arg(short, long, value_enum, default_value_t = OutputFormatArg::Table)]
@@ -209,9 +209,9 @@ pub struct InfoArgs {
 }
 
 impl InfoArgs {
-    /// Selects the version string provided by the positional argument or the version flag.
+    /// Selects the version string provided by the positional argument or the version option.
     ///
-    /// Prefers the positional `version` field and falls back to `version_flag` if the positional is `None`.
+    /// Prefers the positional `version` field and falls back to `version_opt` if the positional is `None`.
     ///
     /// # Returns
     ///
@@ -223,7 +223,7 @@ impl InfoArgs {
     /// let args = InfoArgs {
     ///     package: "pkg".to_string(),
     ///     version: Some("1.2.3".to_string()),
-    ///     version_flag: None,
+    ///     version_opt: None,
     ///     format: OutputFormatArg::Table,
     /// };
     /// assert_eq!(args.get_version(), Some("1.2.3"));
@@ -231,7 +231,7 @@ impl InfoArgs {
     /// let args2 = InfoArgs {
     ///     package: "pkg".to_string(),
     ///     version: None,
-    ///     version_flag: Some("2.0.0".to_string()),
+    ///     version_opt: Some("2.0.0".to_string()),
     ///     format: OutputFormatArg::Table,
     /// };
     /// assert_eq!(args2.get_version(), Some("2.0.0"));
@@ -239,13 +239,13 @@ impl InfoArgs {
     /// let args3 = InfoArgs {
     ///     package: "pkg".to_string(),
     ///     version: None,
-    ///     version_flag: None,
+    ///     version_opt: None,
     ///     format: OutputFormatArg::Table,
     /// };
     /// assert_eq!(args3.get_version(), None);
     /// ```
     pub fn get_version(&self) -> Option<&str> {
-        self.version.as_deref().or(self.version_flag.as_deref())
+        self.version.as_deref().or(self.version_opt.as_deref())
     }
 }
 
@@ -451,7 +451,7 @@ mod tests {
     }
 
     #[test]
-    fn test_search_with_version_flag() {
+    fn test_search_with_version_option() {
         let args = Cli::try_parse_from(["nxv", "search", "python", "--version", "3.11", "--exact"])
             .unwrap();
         match args.command {
@@ -477,8 +477,8 @@ mod tests {
     }
 
     #[test]
-    fn test_search_version_flag_and_positional_conflict() {
-        // Cannot use both positional version and -V flag
+    fn test_search_version_option_and_positional_conflict() {
+        // Cannot use both positional version and -V/--version option
         let result = Cli::try_parse_from(["nxv", "search", "python", "2.7", "-V", "3.11"]);
         assert!(result.is_err());
     }

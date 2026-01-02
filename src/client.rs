@@ -547,6 +547,7 @@ mod tests {
 
     mod api_client_tests {
         use super::*;
+        use serial_test::serial;
 
         #[test]
         fn test_new_trims_trailing_slash() {
@@ -595,9 +596,10 @@ mod tests {
         }
 
         #[test]
+        #[serial(env)]
         fn test_timeout_env_var_invalid_ignored() {
             // Invalid values should fall back to default
-            // SAFETY: Test runs in single thread; no other code reads this env var concurrently
+            // SAFETY: Test isolation via #[serial(env)] ensures no concurrent access
             unsafe { std::env::set_var("NXV_API_TIMEOUT", "not_a_number") };
             let client = ApiClient::new("https://example.com").unwrap();
             assert!(!client.base_url.is_empty()); // Client created successfully
@@ -605,8 +607,9 @@ mod tests {
         }
 
         #[test]
+        #[serial(env)]
         fn test_timeout_env_var_valid() {
-            // SAFETY: Test runs in single thread; no other code reads this env var concurrently
+            // SAFETY: Test isolation via #[serial(env)] ensures no concurrent access
             unsafe { std::env::set_var("NXV_API_TIMEOUT", "60") };
             let client = ApiClient::new("https://example.com").unwrap();
             assert!(!client.base_url.is_empty()); // Client created successfully

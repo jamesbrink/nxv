@@ -15,7 +15,8 @@ use std::path::Path;
 
 /// Compression level for zstd (higher = better compression, slower).
 /// Level 19 provides excellent compression ratio at the cost of speed.
-/// For reference: level 3 is default, level 19 is near-max, level 22 is max.
+/// For reference: level 3 is default, level 19 is max normal level,
+/// and levels 20-22 are "ultra" modes requiring significantly more memory.
 const COMPRESSION_LEVEL: i32 = 19;
 
 /// Default file names for published artifacts.
@@ -206,6 +207,9 @@ pub fn generate_full_index<P: AsRef<Path>, Q: AsRef<Path>>(
 ///
 /// Creates a compressed SQL file with INSERT/UPDATE statements for changes
 /// between from_commit and to_commit.
+///
+/// Note: This function is implemented but not yet exposed via CLI. It will be
+/// used for incremental index updates in a future release.
 #[allow(dead_code)]
 pub fn generate_delta_pack<P: AsRef<Path>, Q: AsRef<Path>>(
     db_path: P,
@@ -515,29 +519,13 @@ pub fn publish_index<P: AsRef<Path>, Q: AsRef<Path>>(
     Ok(())
 }
 
-/// Sign the manifest file using minisign.
-///
-/// This requires a secret key to be available.
-/// For now, this is a placeholder that would be implemented
-/// when setting up the signing infrastructure.
-#[allow(dead_code)]
-pub fn sign_manifest<P: AsRef<Path>>(_output_dir: P, _secret_key_path: &str) -> Result<()> {
-    // Signing would be done with minisign CLI or library
-    // For now, this is a placeholder
-    // In production, this would:
-    // 1. Load the secret key from secret_key_path
-    // 2. Sign manifest.json
-    // 3. Write manifest.json.sig
-    Ok(())
-}
-
-/// Helper to quote a string for SQL.
+/// Helper to quote a string for SQL (used by `generate_delta_pack`).
 #[allow(dead_code)]
 fn sql_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
-/// Helper to quote an optional string for SQL.
+/// Helper to quote an optional string for SQL (used by `generate_delta_pack`).
 #[allow(dead_code)]
 fn sql_quote_opt(s: &Option<String>) -> String {
     match s {

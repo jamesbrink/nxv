@@ -484,6 +484,13 @@ fn cmd_pkg_info(cli: &Cli, args: &cli::InfoArgs) -> Result<()> {
                 println!("homepage\t{}", pkg.homepage.as_deref().unwrap_or("-"));
                 println!("maintainers\t{}", pkg.maintainers.as_deref().unwrap_or("-"));
                 println!("platforms\t{}", pkg.platforms.as_deref().unwrap_or("-"));
+                println!("insecure\t{}", if pkg.is_insecure() { "yes" } else { "no" });
+                if pkg.is_insecure() {
+                    println!(
+                        "known_vulnerabilities\t{}",
+                        pkg.known_vulnerabilities.as_deref().unwrap_or("[]")
+                    );
+                }
                 println!();
             }
         }
@@ -603,6 +610,20 @@ fn cmd_pkg_info(cli: &Cli, args: &cli::InfoArgs) -> Result<()> {
                     }
                 } else {
                     println!("  {}", platforms);
+                }
+                println!();
+            }
+
+            // Show security warning if package has known vulnerabilities
+            if pkg.is_insecure() {
+                println!("{}", "Security Warning".bold().underline().red());
+                println!(
+                    "  {}",
+                    "This package has known vulnerabilities!".red().bold()
+                );
+                let vulns = pkg.vulnerabilities();
+                for vuln in &vulns {
+                    println!("  {} {}", "•".red(), vuln);
                 }
                 println!();
             }
@@ -775,30 +796,45 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
 
     if let Some(ref version) = args.version {
         // Show when a specific version was available
-        let first = backend.get_first_occurrence(&args.package, version)?;
-        let last = backend.get_last_occurrence(&args.package, version)?;
+        // Use prefix search (like info command) to find best matching package
+        let packages = backend.search_by_name_version(&args.package, Some(version.as_str()))?;
 
-        match (first, last) {
-            (Some(first_pkg), Some(last_pkg)) => {
-                println!("Package: {} {}", args.package, version);
-                println!();
+        if packages.is_empty() {
+            println!("Version {} of {} not found.", version, args.package);
+        } else {
+            // Use the first (most recent) match
+            let pkg = &packages[0];
+            println!("Package: {} {}", pkg.attribute_path, pkg.version);
+            println!();
+            println!(
+                "First appeared: {} ({})",
+                pkg.first_commit_short(),
+                pkg.first_commit_date.format("%Y-%m-%d")
+            );
+            println!(
+                "Last seen: {} ({})",
+                pkg.last_commit_short(),
+                pkg.last_commit_date.format("%Y-%m-%d")
+            );
+            println!();
+
+            // Show security warning if package has known vulnerabilities
+            if pkg.is_insecure() {
+                use owo_colors::OwoColorize;
+                println!("{}", "Security Warning".bold().underline().red());
                 println!(
-                    "First appeared: {} ({})",
-                    first_pkg.first_commit_short(),
-                    first_pkg.first_commit_date.format("%Y-%m-%d")
+                    "  {}",
+                    "This package has known vulnerabilities!".red().bold()
                 );
-                println!(
-                    "Last seen: {} ({})",
-                    last_pkg.last_commit_short(),
-                    last_pkg.last_commit_date.format("%Y-%m-%d")
-                );
+                let vulns = pkg.vulnerabilities();
+                for vuln in &vulns {
+                    println!("  {} {}", "•".red(), vuln);
+                }
                 println!();
-                println!("To use this version:");
-                println!("  {}", last_pkg.nix_run_cmd());
             }
-            _ => {
-                println!("Version {} of {} not found.", version, args.package);
-            }
+
+            println!("To use this version:");
+            println!("  {}", pkg.nix_run_cmd());
         }
     } else if args.full {
         // Show full details for all versions
@@ -854,8 +890,19 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
 
                 for pkg in packages {
                     let desc = pkg.description.as_deref().unwrap_or("-");
+                    // Add warning indicator and use red for insecure packages
+                    let version_display = if pkg.is_insecure() {
+                        format!("{} ⚠", pkg.version)
+                    } else {
+                        pkg.version.clone()
+                    };
+                    let version_color = if pkg.is_insecure() {
+                        Color::Red
+                    } else {
+                        Color::Green
+                    };
                     table.add_row(vec![
-                        Cell::new(&pkg.version).fg(Color::Green),
+                        Cell::new(&version_display).fg(version_color),
                         Cell::new(&pkg.attribute_path).fg(Color::Cyan),
                         Cell::new(format!(
                             "{} ({})",
@@ -892,24 +939,26 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
             cli::OutputFormatArg::Json => {
                 let json_history: Vec<_> = history
                     .iter()
-                    .map(|(v, first, last)| {
+                    .map(|(v, first, last, is_insecure)| {
                         serde_json::json!({
                             "version": v,
                             "first_seen": first.to_rfc3339(),
                             "last_seen": last.to_rfc3339(),
+                            "is_insecure": is_insecure,
                         })
                     })
                     .collect();
                 println!("{}", serde_json::to_string_pretty(&json_history)?);
             }
             cli::OutputFormatArg::Plain => {
-                println!("VERSION\tFIRST_SEEN\tLAST_SEEN");
-                for (version, first, last) in history {
+                println!("VERSION\tFIRST_SEEN\tLAST_SEEN\tINSECURE");
+                for (version, first, last, is_insecure) in history {
                     println!(
-                        "{}\t{}\t{}",
+                        "{}\t{}\t{}\t{}",
                         version,
                         first.format("%Y-%m-%d"),
-                        last.format("%Y-%m-%d")
+                        last.format("%Y-%m-%d"),
+                        if is_insecure { "yes" } else { "no" }
                     );
                 }
             }
@@ -924,9 +973,19 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
                     .set_content_arrangement(ContentArrangement::Dynamic)
                     .set_header(vec!["Version", "First Seen", "Last Seen"]);
 
-                for (version, first, last) in history {
+                for (version, first, last, is_insecure) in history {
+                    let version_display = if is_insecure {
+                        format!("{} ⚠", version)
+                    } else {
+                        version
+                    };
+                    let version_color = if is_insecure {
+                        Color::Red
+                    } else {
+                        Color::Green
+                    };
                     table.add_row(vec![
-                        Cell::new(&version).fg(Color::Green),
+                        Cell::new(&version_display).fg(version_color),
                         Cell::new(first.format("%Y-%m-%d").to_string()).fg(Color::White),
                         Cell::new(last.format("%Y-%m-%d").to_string()).fg(Color::White),
                     ]);

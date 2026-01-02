@@ -354,6 +354,7 @@ mod tests {
                 maintainers TEXT,
                 platforms TEXT,
                 source_path TEXT,
+                known_vulnerabilities TEXT,
                 UNIQUE(attribute_path, version, first_commit_hash)
             );
             CREATE INDEX idx_packages_name ON package_versions(name);

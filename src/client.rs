@@ -35,6 +35,8 @@ struct ApiVersionHistoryEntry {
     version: String,
     first_seen: DateTime<Utc>,
     last_seen: DateTime<Utc>,
+    #[serde(default)]
+    is_insecure: bool,
 }
 
 /// HTTP client for the nxv API.
@@ -245,6 +247,7 @@ impl ApiClient {
     ///     assert_eq!(pv.version, "1.2.3");
     /// }
     /// ```
+    #[allow(dead_code)]
     pub fn get_first_occurrence(
         &self,
         attr: &str,
@@ -277,6 +280,7 @@ impl ApiClient {
     ///     println!("Last seen at: {}", ver.first_seen);
     /// }
     /// ```
+    #[allow(dead_code)]
     pub fn get_last_occurrence(&self, attr: &str, version: &str) -> Result<Option<PackageVersion>> {
         let url = format!(
             "{}/api/v1/packages/{}/versions/{}/last",
@@ -298,15 +302,15 @@ impl ApiClient {
     ///
     /// # Returns
     ///
-    /// A vector of `VersionHistoryEntry` tuples in the form `(version, first_seen, last_seen)`.
+    /// A vector of `VersionHistoryEntry` tuples in the form `(version, first_seen, last_seen, is_insecure)`.
     ///
     /// # Examples
     ///
     /// ```
     /// let client = ApiClient::new("https://nxv.example.com").unwrap();
     /// let history = client.get_version_history("org/package").unwrap();
-    /// for (version, first_seen, last_seen) in history {
-    ///     println!("{}: {} - {}", version, first_seen, last_seen);
+    /// for (version, first_seen, last_seen, is_insecure) in history {
+    ///     println!("{}: {} - {} (insecure: {})", version, first_seen, last_seen, is_insecure);
     /// }
     /// ```
     pub fn get_version_history(&self, attr: &str) -> Result<Vec<VersionHistoryEntry>> {
@@ -320,7 +324,7 @@ impl ApiClient {
             Ok(response) => Ok(response
                 .data
                 .into_iter()
-                .map(|e| (e.version, e.first_seen, e.last_seen))
+                .map(|e| (e.version, e.first_seen, e.last_seen, e.is_insecure))
                 .collect()),
             Err(NxvError::PackageNotFound(_)) => Ok(Vec::new()),
             Err(e) => Err(e),

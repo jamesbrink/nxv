@@ -54,6 +54,7 @@ fn create_test_db(path: &std::path::Path) {
             homepage TEXT,
             maintainers TEXT,
             platforms TEXT,
+            known_vulnerabilities TEXT,
             UNIQUE(attribute_path, version, first_commit_hash)
         );
 
@@ -698,6 +699,7 @@ fn test_search_version_sort_order() {
             homepage TEXT,
             maintainers TEXT,
             platforms TEXT,
+            known_vulnerabilities TEXT,
             UNIQUE(attribute_path, version, first_commit_hash)
         );
         CREATE INDEX idx_packages_name ON package_versions(name);
@@ -1061,6 +1063,7 @@ fn create_compressed_test_db() -> (Vec<u8>, String) {
             homepage TEXT,
             maintainers TEXT,
             platforms TEXT,
+            known_vulnerabilities TEXT,
             UNIQUE(attribute_path, version, first_commit_hash)
         );
         CREATE INDEX idx_packages_name ON package_versions(name);
@@ -1391,6 +1394,7 @@ COMMIT;
             homepage TEXT,
             maintainers TEXT,
             platforms TEXT,
+            known_vulnerabilities TEXT,
             UNIQUE(attribute_path, version, first_commit_hash)
         );
         CREATE INDEX idx_packages_name ON package_versions(name);

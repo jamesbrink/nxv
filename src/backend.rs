@@ -165,6 +165,7 @@ impl Backend {
     }
 
     /// Get first occurrence of a specific version.
+    #[allow(dead_code)]
     pub fn get_first_occurrence(
         &self,
         attr: &str,
@@ -194,6 +195,7 @@ impl Backend {
     ///     println!("Found: {}", pkg.attribute_path);
     /// }
     /// ```
+    #[allow(dead_code)]
     pub fn get_last_occurrence(&self, attr: &str, version: &str) -> Result<Option<PackageVersion>> {
         match self {
             Backend::Local(db) => queries::get_last_occurrence(db.connection(), attr, version),

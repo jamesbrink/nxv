@@ -69,6 +69,7 @@ struct OpenRange {
     maintainers: Option<String>,
     platforms: Option<String>,
     source_path: Option<String>,
+    known_vulnerabilities: Option<String>,
 }
 
 impl OpenRange {
@@ -105,6 +106,7 @@ impl OpenRange {
             maintainers: self.maintainers.clone(),
             platforms: self.platforms.clone(),
             source_path: self.source_path.clone(),
+            known_vulnerabilities: self.known_vulnerabilities.clone(),
         }
     }
 
@@ -148,6 +150,7 @@ impl OpenRange {
     /// assert_eq!(r.description, Some("desc".into()));
     /// assert_eq!(r.source_path, Some("path/to/source".into()));
     /// ```
+    #[allow(clippy::too_many_arguments)]
     fn update_metadata(
         &mut self,
         description: Option<String>,
@@ -156,6 +159,7 @@ impl OpenRange {
         maintainers: Option<String>,
         platforms: Option<String>,
         source_path: Option<String>,
+        known_vulnerabilities: Option<String>,
     ) -> bool {
         let mut updated = false;
 
@@ -183,6 +187,10 @@ impl OpenRange {
             self.source_path = source_path;
             updated = true;
         }
+        if self.known_vulnerabilities != known_vulnerabilities {
+            self.known_vulnerabilities = known_vulnerabilities;
+            updated = true;
+        }
 
         updated
     }
@@ -199,6 +207,7 @@ struct PackageAggregate {
     maintainers: HashSet<String>,
     platforms: HashSet<String>,
     source_path: Option<String>,
+    known_vulnerabilities: Option<Vec<String>>,
 }
 
 impl PackageAggregate {
@@ -252,6 +261,7 @@ impl PackageAggregate {
             maintainers,
             platforms,
             source_path: pkg.source_path,
+            known_vulnerabilities: pkg.known_vulnerabilities,
         }
     }
 
@@ -317,6 +327,10 @@ impl PackageAggregate {
         if let Some(platforms) = pkg.platforms {
             self.platforms.extend(platforms);
         }
+        // Merge known_vulnerabilities - keep existing or use new
+        if self.known_vulnerabilities.is_none() {
+            self.known_vulnerabilities = pkg.known_vulnerabilities;
+        }
     }
 
     fn key(&self) -> String {
@@ -333,6 +347,13 @@ impl PackageAggregate {
 
     fn platforms_json(&self) -> Option<String> {
         set_to_json(&self.platforms)
+    }
+
+    fn known_vulnerabilities_json(&self) -> Option<String> {
+        self.known_vulnerabilities
+            .as_ref()
+            .filter(|v| !v.is_empty())
+            .map(|v| serde_json::to_string(v).unwrap_or_default())
     }
 }
 
@@ -1006,6 +1027,7 @@ impl Indexer {
                         maintainers_json,
                         platforms_json,
                         aggregate.source_path.clone(),
+                        aggregate.known_vulnerabilities_json(),
                     );
                 } else {
                     open_ranges.insert(
@@ -1022,6 +1044,7 @@ impl Indexer {
                             maintainers: maintainers_json,
                             platforms: platforms_json,
                             source_path: aggregate.source_path.clone(),
+                            known_vulnerabilities: aggregate.known_vulnerabilities_json(),
                         },
                     );
                 }
@@ -1404,6 +1427,7 @@ mod tests {
             maintainers: None,
             platforms: None,
             source_path: Some("pkgs/hello/default.nix".to_string()),
+            known_vulnerabilities: None,
         };
 
         let last_date = Utc::now();
@@ -1569,6 +1593,7 @@ mod tests {
                 maintainers: None,
                 platforms: None,
                 source_path: None,
+                known_vulnerabilities: None,
             },
             PackageVersion {
                 id: 0,
@@ -1585,6 +1610,7 @@ mod tests {
                 maintainers: None,
                 platforms: None,
                 source_path: None,
+                known_vulnerabilities: None,
             },
         ];
 
@@ -1635,6 +1661,7 @@ mod tests {
                 maintainers: None,
                 platforms: None,
                 source_path: None,
+                known_vulnerabilities: None,
             };
             db.insert_package_ranges_batch(&[pkg]).unwrap();
 
@@ -1670,6 +1697,7 @@ mod tests {
                 maintainers: None,
                 platforms: None,
                 source_path: None,
+                known_vulnerabilities: None,
             };
             db.insert_package_ranges_batch(&[pkg]).unwrap();
 

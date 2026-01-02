@@ -156,6 +156,8 @@ pub struct VersionHistorySchema {
     pub first_seen: DateTime<Utc>,
     /// Last time this version was seen.
     pub last_seen: DateTime<Utc>,
+    /// Whether this version has known vulnerabilities.
+    pub is_insecure: bool,
 }
 
 /// Package version info (re-export with ToSchema).
@@ -179,6 +181,9 @@ pub struct PackageVersionSchema {
     /// Source file path relative to nixpkgs root (may be null for older packages).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_path: Option<String>,
+    /// Known security vulnerabilities (JSON array, may be null for secure packages).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub known_vulnerabilities: Option<String>,
 }
 
 impl From<PackageVersion> for PackageVersionSchema {
@@ -211,6 +216,7 @@ impl From<PackageVersion> for PackageVersionSchema {
             maintainers: p.maintainers,
             platforms: p.platforms,
             source_path: p.source_path,
+            known_vulnerabilities: p.known_vulnerabilities,
         }
     }
 }

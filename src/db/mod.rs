@@ -10,7 +10,7 @@ use std::path::Path;
 
 /// Current schema version.
 #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 
 /// Database connection wrapper.
 pub struct Database {
@@ -102,6 +102,7 @@ impl Database {
                 maintainers TEXT,
                 platforms TEXT,
                 source_path TEXT,
+                known_vulnerabilities TEXT,
                 UNIQUE(attribute_path, version, first_commit_hash)
             );
 
@@ -195,6 +196,25 @@ impl Database {
             }
         }
 
+        if current_version < 3 {
+            // Migration v2 -> v3: Add known_vulnerabilities column
+            let has_known_vulns: bool = self
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM pragma_table_info('package_versions') WHERE name='known_vulnerabilities'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+
+            if !has_known_vulns {
+                self.conn.execute(
+                    "ALTER TABLE package_versions ADD COLUMN known_vulnerabilities TEXT",
+                    [],
+                )?;
+            }
+        }
+
         if current_version < SCHEMA_VERSION {
             self.set_meta("schema_version", &SCHEMA_VERSION.to_string())?;
         }
@@ -262,8 +282,9 @@ impl Database {
                 INSERT OR IGNORE INTO package_versions
                     (name, version, first_commit_hash, first_commit_date,
                      last_commit_hash, last_commit_date, attribute_path,
-                     description, license, homepage, maintainers, platforms, source_path)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     description, license, homepage, maintainers, platforms, source_path,
+                     known_vulnerabilities)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
             )?;
 
@@ -282,6 +303,7 @@ impl Database {
                     pkg.maintainers,
                     pkg.platforms,
                     pkg.source_path,
+                    pkg.known_vulnerabilities,
                 ])?;
                 inserted += changes;
             }
@@ -389,7 +411,7 @@ mod tests {
         let db = Database::open(&db_path).unwrap();
 
         let version = db.get_meta("schema_version").unwrap();
-        assert_eq!(version, Some("2".to_string()));
+        assert_eq!(version, Some("3".to_string()));
     }
 
     #[test]
@@ -417,6 +439,7 @@ mod tests {
                 maintainers: None,
                 platforms: None,
                 source_path: None,
+                known_vulnerabilities: None,
             },
             PackageVersion {
                 id: 0,
@@ -433,6 +456,7 @@ mod tests {
                 maintainers: None,
                 platforms: None,
                 source_path: None,
+                known_vulnerabilities: None,
             },
         ];
 
@@ -473,6 +497,7 @@ mod tests {
             maintainers: None,
             platforms: None,
             source_path: None,
+            known_vulnerabilities: None,
         };
 
         // First insert should succeed
@@ -521,6 +546,7 @@ mod tests {
             maintainers: None,
             platforms: None,
             source_path: None,
+            known_vulnerabilities: None,
         };
 
         db.insert_package_ranges_batch(&[pkg]).unwrap();
@@ -563,6 +589,7 @@ mod tests {
                 maintainers: None,
                 platforms: None,
                 source_path: None,
+                known_vulnerabilities: None,
             })
             .collect();
 

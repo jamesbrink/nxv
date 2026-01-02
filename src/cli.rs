@@ -303,14 +303,38 @@ pub struct IndexArgs {
 }
 
 /// Arguments for the backfill command (feature-gated).
+///
+/// Backfill updates existing database records with metadata extracted from nixpkgs.
+/// This is useful for populating fields that weren't captured during initial indexing.
+///
+/// Two modes are available:
+///
+/// HEAD MODE (default):
+///   Extracts metadata from the current nixpkgs checkout. Fast (single nix eval),
+///   but can only update packages that still exist in that checkout. Packages that
+///   have been removed or renamed won't be found.
+///
+/// HISTORICAL MODE (--history):
+///   For each package, checks out the original commit where it was indexed and
+///   extracts metadata from there. Much slower (many git checkouts + nix evals),
+///   but can update old/removed packages like Python 2.7.
+///
+/// Examples:
+///   # Fast backfill from current HEAD (only updates packages that still exist)
+///   nxv backfill --nixpkgs-path ./nixpkgs --fields known_vulnerabilities
+///
+///   # Full historical backfill (slower, but updates old/removed packages)
+///   nxv backfill --nixpkgs-path ./nixpkgs --fields known_vulnerabilities --history
 #[cfg(feature = "indexer")]
 #[derive(Parser, Debug)]
 pub struct BackfillArgs {
-    /// Path to the nixpkgs repository.
+    /// Path to the nixpkgs repository checkout.
     #[arg(long)]
     pub nixpkgs_path: PathBuf,
 
-    /// Only backfill these specific fields.
+    /// Comma-separated list of fields to backfill.
+    /// Available: source_path, homepage, known_vulnerabilities.
+    /// Default: all fields.
     #[arg(long, value_delimiter = ',')]
     pub fields: Option<Vec<String>>,
 
@@ -322,8 +346,9 @@ pub struct BackfillArgs {
     #[arg(long)]
     pub dry_run: bool,
 
-    /// Traverse git history to extract metadata from original commits.
-    /// Without this flag, metadata is extracted from current nixpkgs HEAD only.
+    /// Use historical mode: traverse git to each package's original commit.
+    /// Slower but can update packages that no longer exist in current nixpkgs.
+    /// Without this flag, only packages in the current checkout can be updated.
     #[arg(long)]
     pub history: bool,
 }

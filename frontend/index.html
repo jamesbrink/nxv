@@ -493,6 +493,56 @@
         opacity: 1;
       }
 
+      .legacy-warning {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        background: rgba(210, 153, 34, 0.15);
+        border: 1px solid var(--warning);
+        color: var(--warning);
+        padding: 0.5rem 0.75rem;
+        border-radius: 6px;
+        font-size: 0.8rem;
+        margin: 0.75rem 0;
+      }
+
+      .legacy-warning svg {
+        flex-shrink: 0;
+      }
+
+      .insecure-warning {
+        display: flex;
+        align-items: flex-start;
+        gap: 0.5rem;
+        background: rgba(248, 81, 73, 0.15);
+        border: 1px solid var(--error);
+        color: var(--error);
+        padding: 0.5rem 0.75rem;
+        border-radius: 6px;
+        font-size: 0.8rem;
+        margin: 0.75rem 0;
+      }
+
+      .insecure-warning svg {
+        flex-shrink: 0;
+        margin-top: 2px;
+      }
+
+      .insecure-warning-content {
+        flex: 1;
+      }
+
+      .insecure-warning-title {
+        font-weight: 600;
+        margin-bottom: 0.25rem;
+      }
+
+      .insecure-warning-list {
+        font-size: 0.75rem;
+        opacity: 0.9;
+        line-height: 1.4;
+      }
+
       .code-block {
         background: var(--bg);
         border: 1px solid var(--border);
@@ -774,6 +824,36 @@
         return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
       };
 
+      // Check if a date predates flake.nix in nixpkgs (Feb 10, 2020)
+      const FLAKE_EPOCH = new Date('2020-02-10T00:00:00Z');
+      const predatesFlakes = (dateStr) => new Date(dateStr) < FLAKE_EPOCH;
+
+      // Parse known_vulnerabilities field into an array (handles JSON string or array)
+      const parseVulnerabilities = (pkg) => {
+        if (!pkg.known_vulnerabilities) return [];
+        try {
+          const vulns =
+            typeof pkg.known_vulnerabilities === 'string'
+              ? JSON.parse(pkg.known_vulnerabilities)
+              : pkg.known_vulnerabilities;
+          return Array.isArray(vulns) ? vulns : [];
+        } catch {
+          return [];
+        }
+      };
+
+      // Check if package has known vulnerabilities (is insecure)
+      const isInsecure = (pkg) => parseVulnerabilities(pkg).length > 0;
+
+      // Get vulnerabilities list from package
+      const getVulnerabilities = (pkg) => parseVulnerabilities(pkg);
+
+      // Safely get short commit hash (7 chars) with null/undefined handling
+      const getShortHash = (hash) => {
+        if (!hash || typeof hash !== 'string') return '';
+        return hash.substring(0, Math.min(7, hash.length));
+      };
+
       // Format platforms into clean arch badges
       const formatPlatforms = (platforms) => {
         if (!platforms) return [];
@@ -947,17 +1027,14 @@
           const parsed = parseSearchQuery(query);
           const currentVersion = versionInput.value.trim();
 
-          // Use detected version if:
-          // 1. No version in the field, OR
-          // 2. The current version was auto-populated (update it as user types)
-          let effectiveQuery = query;
+          // If query contains a version (e.g., "python 2.7"), always use just the package name
+          // The version goes to the version filter (either auto-populated or manually overridden)
+          let effectiveQuery = parsed.version ? parsed.package : query;
           let effectiveVersion = currentVersion;
 
           if (parsed.version && (!currentVersion || versionAutoPopulated)) {
-            effectiveQuery = parsed.package;
+            // Auto-populate version field when user types "python 2.7" style query
             effectiveVersion = parsed.version;
-
-            // Auto-populate version field for transparency
             versionInput.value = parsed.version;
             versionAutoPopulated = true;
             versionInput.style.borderColor = 'var(--accent)';
@@ -1071,18 +1148,40 @@
       // Render a package card
       const renderPackageCard = (pkg) => {
         const cardId = `pkg-${pkg.id}`;
-        const nixExpr = `(import (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/${pkg.last_commit_hash}.tar.gz") {}).${pkg.attribute_path}`;
-        const nixShell = `nix-shell -p '(import (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/${pkg.last_commit_hash}.tar.gz") {}).${pkg.attribute_path}'`;
+        const isLegacy = predatesFlakes(pkg.last_commit_date);
+        const shortHash = getShortHash(pkg.last_commit_hash);
+        const hasCommitHash = shortHash.length > 0;
 
-        // Store expressions in the map
-        expressionStore.set(`${cardId}-expr`, nixExpr);
-        expressionStore.set(`${cardId}-shell`, nixShell);
+        // Use flake syntax for modern packages, legacy fetchTarball for old ones
+        // Add NIXPKGS_ALLOW_INSECURE=1 and --impure for insecure packages
+        const pkgInsecure = isInsecure(pkg);
+        const insecurePrefix = pkgInsecure ? 'NIXPKGS_ALLOW_INSECURE=1 ' : '';
+        const impureFlag = pkgInsecure ? ' --impure' : '';
+
+        // Only generate expressions if we have a valid commit hash
+        const nixExpr = hasCommitHash
+          ? (isLegacy
+              ? `(import (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/${shortHash}.tar.gz") {}).${pkg.attribute_path}`
+              : `nixpkgs#${pkg.attribute_path}  # or nixpkgs/${shortHash}#${pkg.attribute_path}`)
+          : '';
+        const nixShell = hasCommitHash
+          ? (isLegacy
+              ? `${insecurePrefix}nix-shell -p '(import (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/${shortHash}.tar.gz") {}).${pkg.attribute_path}'`
+              : `${insecurePrefix}nix shell${impureFlag} nixpkgs/${shortHash}#${pkg.attribute_path}`)
+          : '';
+
+        // Store expressions in the map (only if valid)
+        if (hasCommitHash) {
+          expressionStore.set(`${cardId}-expr`, nixExpr);
+          expressionStore.set(`${cardId}-shell`, nixShell);
+          expressionStore.set(`${cardId}-legacy`, isLegacy);
+        }
 
         return `
         <div class="result-card" data-attr="${escapeHtml(pkg.attribute_path)}">
           <div class="result-header">
             <span class="result-name">${escapeHtml(pkg.name)}</span>
-            <span class="result-version">${escapeHtml(pkg.version)}</span>
+            <span class="result-version" ${isInsecure(pkg) ? 'style="background: rgba(248, 81, 73, 0.3); border: 1px solid var(--error);"' : ''}>${escapeHtml(pkg.version)}${isInsecure(pkg) ? ' ⚠' : ''}</span>
           </div>
           <div class="result-attr">${escapeHtml(pkg.attribute_path)}</div>
           ${pkg.description ? `<div class="result-desc">${escapeHtml(pkg.description)}</div>` : ''}
@@ -1104,29 +1203,56 @@
               })
               .join('')}</div>`;
           })()}
+          ${
+            isInsecure(pkg)
+              ? `
+          <div class="insecure-warning">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+            <div class="insecure-warning-content">
+              <div class="insecure-warning-title">This package has known vulnerabilities</div>
+              <div class="insecure-warning-list">${getVulnerabilities(pkg)
+                .map((v) => escapeHtml(v))
+                .join(', ')}</div>
+            </div>
+          </div>
+          `
+              : ''
+          }
+          ${
+            predatesFlakes(pkg.last_commit_date)
+              ? `
+          <div class="legacy-warning">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+            Very old nixpkgs (pre-2020) may not build with modern Nix
+          </div>
+          `
+              : ''
+          }
           <div class="result-actions">
+            ${hasCommitHash ? `
             <button class="btn copy-expr" data-id="${cardId}-expr">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-              Copy Nix Expression
+              ${isLegacy ? 'Copy Nix Expression' : 'Copy Flake Ref'}
             </button>
             <button class="btn copy-shell" data-id="${cardId}-shell">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m4 17 6-6-6-6M12 19h8"/></svg>
-              Copy nix-shell
+              ${isLegacy ? 'Copy nix-shell' : 'Copy nix shell'}
             </button>
+            ` : ''}
             ${
-              pkg.source_path
+              hasCommitHash && pkg.source_path
                 ? `
               <a class="btn" href="https://github.com/NixOS/nixpkgs/blob/${pkg.last_commit_hash}/${escapeHtml(pkg.source_path)}" target="_blank" rel="noopener" title="View source in nixpkgs">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
                 View Source
               </a>
             `
-                : `
+                : hasCommitHash ? `
               <a class="btn" href="https://github.com/NixOS/nixpkgs/tree/${pkg.last_commit_hash}" target="_blank" rel="noopener" title="View nixpkgs at this commit">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
                 View nixpkgs
               </a>
-            `
+            ` : ''
             }
             ${
               pkg.homepage && isSafeUrl(pkg.homepage)
@@ -1219,7 +1345,7 @@
             return;
           }
 
-          // Fetch full version info for each version to get commit hashes
+          // Fetch full version info for each version to get commit hashes and vulnerability info
           const versionsWithHashes = await Promise.all(
             data.map(async (v, idx) => {
               try {
@@ -1227,9 +1353,14 @@
                   `${API_BASE}/packages/${encodeURIComponent(attr)}/versions/${encodeURIComponent(v.version)}`
                 );
                 const vJson = await vRes.json();
-                return { ...v, commit_hash: vJson.data?.last_commit_hash, idx };
+                return {
+                  ...v,
+                  commit_hash: vJson.data?.last_commit_hash,
+                  known_vulnerabilities: vJson.data?.known_vulnerabilities,
+                  idx,
+                };
               } catch {
-                return { ...v, commit_hash: null, idx };
+                return { ...v, commit_hash: null, known_vulnerabilities: null, idx };
               }
             })
           );
@@ -1239,7 +1370,14 @@
           const escapedAttr = escapeHtml(attr);
           versionsWithHashes.forEach((v) => {
             if (v.commit_hash) {
-              const nixExpr = `(import (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/${v.commit_hash}.tar.gz") {}).${attr}`;
+              const isLegacy = predatesFlakes(v.last_seen);
+              const shortHash = v.commit_hash.substring(0, 7);
+              const versionInsecure = isInsecure(v);
+              const insecurePrefix = versionInsecure ? 'NIXPKGS_ALLOW_INSECURE=1 ' : '';
+              const impureFlag = versionInsecure ? ' --impure' : '';
+              const nixExpr = isLegacy
+                ? `${insecurePrefix}nix-shell -p '(import (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/${shortHash}.tar.gz") {}).${attr}'`
+                : `${insecurePrefix}nix shell${impureFlag} nixpkgs/${shortHash}#${attr}`;
               expressionStore.set(`history-${escapedAttr}-${v.idx}`, nixExpr);
             }
           });
@@ -1249,12 +1387,14 @@
             ${versionsWithHashes
               .map((v) => {
                 const hasCommit = v.commit_hash;
+                const isLegacy = predatesFlakes(v.last_seen);
+                const versionInsecure = isInsecure(v);
                 return `
                 <div class="version-item">
                   <div class="version-info">
-                    <div class="version-number">${escapeHtml(v.version)}</div>
+                    <div class="version-number">${escapeHtml(v.version)}${versionInsecure ? ' <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--error)" stroke-width="2" style="vertical-align: middle" title="Has known vulnerabilities"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>' : ''}${isLegacy ? ' <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--warning)" stroke-width="2" style="vertical-align: middle" title="May not build with modern Nix"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>' : ''}</div>
                     <div class="version-dates">${formatDate(v.first_seen)} - ${formatDate(v.last_seen)}</div>
-                    ${hasCommit ? `<div class="version-commit">${v.commit_hash.substring(0, 12)}</div>` : ''}
+                    ${hasCommit ? `<div class="version-commit">${v.commit_hash.substring(0, 7)}</div>` : ''}
                   </div>
                   ${
                     hasCommit

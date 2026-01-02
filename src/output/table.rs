@@ -49,9 +49,20 @@ pub fn print_table(results: &[PackageVersion], options: TableOptions) {
         let date = pkg.last_commit_date.format("%Y-%m-%d").to_string();
         let description = pkg.description.as_deref().unwrap_or("-");
 
+        // Add warning indicator for insecure packages
+        let version_display = if pkg.is_insecure() {
+            format!("{} ⚠", pkg.version)
+        } else {
+            pkg.version.clone()
+        };
+
         let mut row = vec![
             Cell::new(&pkg.attribute_path).fg(Color::Cyan),
-            Cell::new(&pkg.version).fg(Color::Green),
+            Cell::new(&version_display).fg(if pkg.is_insecure() {
+                Color::Red
+            } else {
+                Color::Green
+            }),
             Cell::new(&pkg.last_commit_hash).fg(Color::Yellow),
             Cell::new(&date).fg(Color::White),
             Cell::new(description).fg(Color::White),
@@ -96,6 +107,7 @@ mod tests {
             maintainers: None,
             platforms: None,
             source_path: None,
+            known_vulnerabilities: None,
         }];
 
         // Should not panic

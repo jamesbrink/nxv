@@ -165,6 +165,11 @@ impl Backend {
     }
 
     /// Get first occurrence of a specific version.
+    ///
+    /// This method is part of the public API for library consumers and mirrors
+    /// the `/api/v1/packages/{attr}/versions/{version}/first` endpoint.
+    /// Not currently used by the CLI but provided for API completeness.
+    #[allow(dead_code)]
     pub fn get_first_occurrence(
         &self,
         attr: &str,
@@ -177,6 +182,10 @@ impl Backend {
     }
 
     /// Retrieve the most recent `PackageVersion` entry for the given attribute path and version.
+    ///
+    /// This method is part of the public API for library consumers and mirrors
+    /// the `/api/v1/packages/{attr}/versions/{version}/last` endpoint.
+    /// Not currently used by the CLI but provided for API completeness.
     ///
     /// - `attr`: attribute path (attribute identifier) to search for.
     /// - `version`: package version to match.
@@ -194,6 +203,7 @@ impl Backend {
     ///     println!("Found: {}", pkg.attribute_path);
     /// }
     /// ```
+    #[allow(dead_code)]
     pub fn get_last_occurrence(&self, attr: &str, version: &str) -> Result<Option<PackageVersion>> {
         match self {
             Backend::Local(db) => queries::get_last_occurrence(db.connection(), attr, version),

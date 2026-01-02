@@ -32,6 +32,8 @@ pub struct BackfillResult {
     pub source_paths_filled: usize,
     /// Number of homepage fields filled.
     pub homepages_filled: usize,
+    /// Number of known_vulnerabilities fields filled.
+    pub vulnerabilities_filled: usize,
     /// Number of commits processed (historical mode only).
     pub commits_processed: usize,
     /// Whether the operation was interrupted.
@@ -54,21 +56,26 @@ pub struct BackfillConfig {
 impl Default for BackfillConfig {
     /// Creates a BackfillConfig initialized with the module's sensible defaults.
     ///
-    /// The default configuration backfills the `source_path` and `homepage` fields,
-    /// does not impose a processing limit, and runs in non-dry, non-historical mode.
+    /// The default configuration backfills the `source_path`, `homepage`, and
+    /// `known_vulnerabilities` fields, does not impose a processing limit, and
+    /// runs in non-dry, non-historical mode.
     ///
     /// # Examples
     ///
     /// ```
     /// let cfg = BackfillConfig::default();
-    /// assert_eq!(cfg.fields, vec!["source_path".to_string(), "homepage".to_string()]);
+    /// assert_eq!(cfg.fields, vec!["source_path".to_string(), "homepage".to_string(), "known_vulnerabilities".to_string()]);
     /// assert!(cfg.limit.is_none());
     /// assert!(!cfg.dry_run);
     /// assert!(!cfg.use_history);
     /// ```
     fn default() -> Self {
         Self {
-            fields: vec!["source_path".to_string(), "homepage".to_string()],
+            fields: vec![
+                "source_path".to_string(),
+                "homepage".to_string(),
+                "known_vulnerabilities".to_string(),
+            ],
             limit: None,
             dry_run: false,
             use_history: false,
@@ -176,12 +183,15 @@ fn run_backfill_head<P: AsRef<Path>, Q: AsRef<Path>>(
         config.fields.is_empty() || config.fields.iter().any(|f| f == "source_path");
     let backfill_homepage =
         config.fields.is_empty() || config.fields.iter().any(|f| f == "homepage");
+    let backfill_vulnerabilities =
+        config.fields.is_empty() || config.fields.iter().any(|f| f == "known_vulnerabilities");
 
     // Get unique attribute paths that need backfilling
     let attrs_to_backfill = get_attrs_needing_backfill(
         db.connection(),
         backfill_source_path,
         backfill_homepage,
+        backfill_vulnerabilities,
         config.limit,
     )?;
 
@@ -246,11 +256,15 @@ fn run_backfill_head<P: AsRef<Path>, Q: AsRef<Path>>(
             };
 
         // Build lookup map
-        let mut metadata_map: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
+        let mut metadata_map: HashMap<String, PackageMetadata> = HashMap::new();
         for pkg in packages {
             metadata_map.insert(
                 pkg.attribute_path.clone(),
-                (pkg.source_path.clone(), pkg.homepage.clone()),
+                (
+                    pkg.source_path.clone(),
+                    pkg.homepage.clone(),
+                    pkg.known_vulnerabilities_json(),
+                ),
             );
         }
 
@@ -260,18 +274,23 @@ fn run_backfill_head<P: AsRef<Path>, Q: AsRef<Path>>(
             &metadata_map,
             backfill_source_path,
             backfill_homepage,
+            backfill_vulnerabilities,
             None, // No commit filter for HEAD mode
         )?;
 
         result.records_updated += updates.0;
         result.source_paths_filled += updates.1;
         result.homepages_filled += updates.2;
+        result.vulnerabilities_filled += updates.3;
         result.packages_checked += batch.len();
 
         progress.set_position(result.packages_checked as u64);
         progress.set_message(format!(
-            "{} updated, {} source_paths, {} homepages",
-            result.records_updated, result.source_paths_filled, result.homepages_filled
+            "{} updated, {} source, {} home, {} vuln",
+            result.records_updated,
+            result.source_paths_filled,
+            result.homepages_filled,
+            result.vulnerabilities_filled
         ));
     }
 
@@ -317,12 +336,15 @@ fn run_backfill_historical<P: AsRef<Path>, Q: AsRef<Path>>(
         config.fields.is_empty() || config.fields.iter().any(|f| f == "source_path");
     let backfill_homepage =
         config.fields.is_empty() || config.fields.iter().any(|f| f == "homepage");
+    let backfill_vulnerabilities =
+        config.fields.is_empty() || config.fields.iter().any(|f| f == "known_vulnerabilities");
 
     // Get packages grouped by their first_commit
     let packages_by_commit = get_packages_by_commit(
         db.connection(),
         backfill_source_path,
         backfill_homepage,
+        backfill_vulnerabilities,
         config.limit,
     )?;
 
@@ -411,11 +433,15 @@ fn run_backfill_historical<P: AsRef<Path>, Q: AsRef<Path>>(
             };
 
         // Build lookup map
-        let mut metadata_map: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
+        let mut metadata_map: HashMap<String, PackageMetadata> = HashMap::new();
         for pkg in packages {
             metadata_map.insert(
                 pkg.attribute_path.clone(),
-                (pkg.source_path.clone(), pkg.homepage.clone()),
+                (
+                    pkg.source_path.clone(),
+                    pkg.homepage.clone(),
+                    pkg.known_vulnerabilities_json(),
+                ),
             );
         }
 
@@ -425,12 +451,14 @@ fn run_backfill_historical<P: AsRef<Path>, Q: AsRef<Path>>(
             &metadata_map,
             backfill_source_path,
             backfill_homepage,
+            backfill_vulnerabilities,
             Some(commit),
         )?;
 
         result.records_updated += updates.0;
         result.source_paths_filled += updates.1;
         result.homepages_filled += updates.2;
+        result.vulnerabilities_filled += updates.3;
         result.packages_checked += attr_paths.len();
         result.commits_processed += 1;
 
@@ -456,41 +484,14 @@ fn run_backfill_historical<P: AsRef<Path>, Q: AsRef<Path>>(
 
 /// Collects attribute paths that are missing requested metadata and returns each attribute's first commit hash.
 ///
-/// The query filters packages where `source_path` and/or `homepage` are NULL according to the boolean flags,
-/// and returns a map from attribute path to the package's `first_commit_hash`. If neither flag is set, an
-/// empty map is returned.
-///
-/// # Examples
-///
-/// ```
-/// use rusqlite::Connection;
-/// use std::collections::HashMap;
-///
-/// // setup an in-memory database matching the expected schema
-/// let conn = Connection::open_in_memory().unwrap();
-/// conn.execute_batch(r#"
-/// CREATE TABLE package_versions (
-///     attribute_path TEXT,
-///     first_commit_hash TEXT,
-///     source_path TEXT,
-///     homepage TEXT
-/// );
-/// INSERT INTO package_versions (attribute_path, first_commit_hash, source_path, homepage) VALUES
-/// ('pkgs.foo', 'commit1', NULL, 'https://example.com'),
-/// ('pkgs.bar', 'commit2', NULL, NULL),
-/// ('pkgs.baz', 'commit3', '/some/path', NULL);
-/// "#).unwrap();
-///
-/// // collect attrs needing source_path
-/// let result = get_attrs_needing_backfill(&conn, true, false, None).unwrap();
-/// assert_eq!(result.get("pkgs.foo"), Some(&"commit1".to_string()));
-/// assert_eq!(result.get("pkgs.bar"), Some(&"commit2".to_string()));
-/// assert!(result.get("pkgs.baz").is_none());
-/// ```
+/// The query filters packages where `source_path`, `homepage`, and/or `known_vulnerabilities` are NULL
+/// according to the boolean flags, and returns a map from attribute path to the package's `first_commit_hash`.
+/// If no flags are set, an empty map is returned.
 fn get_attrs_needing_backfill(
     conn: &rusqlite::Connection,
     need_source_path: bool,
     need_homepage: bool,
+    need_vulnerabilities: bool,
     limit: Option<usize>,
 ) -> Result<HashMap<String, String>> {
     let mut conditions = Vec::new();
@@ -499,6 +500,9 @@ fn get_attrs_needing_backfill(
     }
     if need_homepage {
         conditions.push("homepage IS NULL");
+    }
+    if need_vulnerabilities {
+        conditions.push("known_vulnerabilities IS NULL");
     }
 
     if conditions.is_empty() {
@@ -530,46 +534,14 @@ fn get_attrs_needing_backfill(
 
 /// Group package attribute paths by their first commit hash for packages missing specified metadata.
 ///
-/// Queries the `package_versions` table for rows where `source_path` and/or `homepage` are NULL
-/// (based on `need_source_path` / `need_homepage`) and returns a map from each `first_commit_hash`
-/// to the list of `attribute_path`s that first appeared in that commit.
-///
-/// # Arguments
-///
-/// * `conn` - SQLite connection to query.
-/// * `need_source_path` - If `true`, include packages whose `source_path` is NULL.
-/// * `need_homepage` - If `true`, include packages whose `homepage` is NULL.
-/// * `limit` - Optional maximum number of rows to consider.
-///
-/// # Returns
-///
-/// A `HashMap` mapping a commit hash (`String`) to a `Vec<String>` of attribute paths found in that commit.
-///
-/// # Examples
-///
-/// ```
-/// use rusqlite::Connection;
-/// use std::collections::HashMap;
-///
-/// // prepare an in-memory database with minimal schema
-/// let conn = Connection::open_in_memory().unwrap();
-/// conn.execute_batch(r#"
-///     CREATE TABLE package_versions (attribute_path TEXT, first_commit_hash TEXT, source_path TEXT, homepage TEXT);
-///     INSERT INTO package_versions VALUES ('pkgA', 'commit1', NULL, 'http://a');
-///     INSERT INTO package_versions VALUES ('pkgB', 'commit1', NULL, NULL);
-///     INSERT INTO package_versions VALUES ('pkgC', 'commit2', '/src', NULL);
-/// "#).unwrap();
-///
-/// // call the function to group packages missing source_path or homepage
-/// let map = get_packages_by_commit(&conn, true, true, None).unwrap();
-///
-/// assert_eq!(map.get("commit1").map(|v| v.len()), Some(2));
-/// assert_eq!(map.get("commit2").map(|v| v.len()), Some(1));
-/// ```
+/// Queries the `package_versions` table for rows where `source_path`, `homepage`, and/or
+/// `known_vulnerabilities` are NULL (based on the boolean flags) and returns a map from each
+/// `first_commit_hash` to the list of `attribute_path`s that first appeared in that commit.
 fn get_packages_by_commit(
     conn: &rusqlite::Connection,
     need_source_path: bool,
     need_homepage: bool,
+    need_vulnerabilities: bool,
     limit: Option<usize>,
 ) -> Result<HashMap<String, Vec<String>>> {
     let mut conditions = Vec::new();
@@ -578,6 +550,9 @@ fn get_packages_by_commit(
     }
     if need_homepage {
         conditions.push("homepage IS NULL");
+    }
+    if need_vulnerabilities {
+        conditions.push("known_vulnerabilities IS NULL");
     }
 
     if conditions.is_empty() {
@@ -607,12 +582,15 @@ fn get_packages_by_commit(
     Ok(by_commit)
 }
 
+/// Metadata extracted for a package: (source_path, homepage, known_vulnerabilities_json)
+type PackageMetadata = (Option<String>, Option<String>, Option<String>);
+
 /// Apply extracted metadata to package_versions rows in the database.
 ///
-/// Updates the `source_path` and/or `homepage` columns for rows whose current
-/// value is NULL using entries from `metadata`. Each key in `metadata` is an
-/// `attribute_path`; the value is a tuple `(source_path, homepage)` where each
-/// element is applied only if `Some`.
+/// Updates the `source_path`, `homepage`, and/or `known_vulnerabilities` columns for rows
+/// whose current value is NULL using entries from `metadata`. Each key in `metadata` is an
+/// `attribute_path`; the value is a tuple `(source_path, homepage, known_vulnerabilities_json)`
+/// where each element is applied only if `Some`.
 ///
 /// If `commit` is `Some`, only rows whose `first_commit_hash` equals that value
 /// are eligible for update; otherwise all matching rows for an `attribute_path`
@@ -620,35 +598,19 @@ fn get_packages_by_commit(
 ///
 /// # Returns
 ///
-/// A tuple `(total_updated, source_paths_filled, homepages_filled)` where
-/// `total_updated` is the total number of rows changed, and the other two
-/// elements count how many `source_path` and `homepage` fields were set,
-/// respectively.
-///
-/// # Examples
-///
-/// ```
-/// use std::collections::HashMap;
-/// // Prepare a connection and a metadata map (omitted):
-/// // let conn = rusqlite::Connection::open_in_memory().unwrap();
-/// // set up package_versions table...
-/// let mut metadata = HashMap::new();
-/// metadata.insert("mypkg".to_string(), (Some("/path".to_string()), Some("https://hp".to_string())));
-///
-/// // Apply updates for HEAD (no commit filter)
-/// let (total, sp, hp) = crate::index::backfill::apply_backfill_updates(&conn, &metadata, true, true, None).unwrap();
-/// assert!(total >= 0);
-/// ```
+/// A tuple `(total_updated, source_paths_filled, homepages_filled, vulnerabilities_filled)`.
 fn apply_backfill_updates(
     conn: &rusqlite::Connection,
-    metadata: &HashMap<String, (Option<String>, Option<String>)>,
+    metadata: &HashMap<String, PackageMetadata>,
     update_source_path: bool,
     update_homepage: bool,
+    update_vulnerabilities: bool,
     commit: Option<&str>,
-) -> Result<(usize, usize, usize)> {
+) -> Result<(usize, usize, usize, usize)> {
     let mut total_updated = 0;
     let mut source_paths = 0;
     let mut homepages = 0;
+    let mut vulnerabilities = 0;
 
     // Update source_path where NULL
     if update_source_path {
@@ -659,7 +621,7 @@ fn apply_backfill_updates(
         };
         let mut stmt = conn.prepare(sql)?;
 
-        for (attr, (source_path, _)) in metadata {
+        for (attr, (source_path, _, _)) in metadata {
             if let Some(path) = source_path {
                 let changes = if let Some(c) = commit {
                     stmt.execute(rusqlite::params![path, attr, c])?
@@ -683,7 +645,7 @@ fn apply_backfill_updates(
         };
         let mut stmt = conn.prepare(sql)?;
 
-        for (attr, (_, homepage)) in metadata {
+        for (attr, (_, homepage, _)) in metadata {
             if let Some(hp) = homepage {
                 let changes = if let Some(c) = commit {
                     stmt.execute(rusqlite::params![hp, attr, c])?
@@ -698,5 +660,29 @@ fn apply_backfill_updates(
         }
     }
 
-    Ok((total_updated, source_paths, homepages))
+    // Update known_vulnerabilities where NULL
+    if update_vulnerabilities {
+        let sql = if commit.is_some() {
+            "UPDATE package_versions SET known_vulnerabilities = ? WHERE attribute_path = ? AND first_commit_hash = ? AND known_vulnerabilities IS NULL"
+        } else {
+            "UPDATE package_versions SET known_vulnerabilities = ? WHERE attribute_path = ? AND known_vulnerabilities IS NULL"
+        };
+        let mut stmt = conn.prepare(sql)?;
+
+        for (attr, (_, _, vulns_json)) in metadata {
+            if let Some(v) = vulns_json {
+                let changes = if let Some(c) = commit {
+                    stmt.execute(rusqlite::params![v, attr, c])?
+                } else {
+                    stmt.execute(rusqlite::params![v, attr])?
+                };
+                if changes > 0 {
+                    vulnerabilities += changes;
+                    total_updated += changes;
+                }
+            }
+        }
+    }
+
+    Ok((total_updated, source_paths, homepages, vulnerabilities))
 }

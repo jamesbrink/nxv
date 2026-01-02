@@ -21,6 +21,8 @@ pub struct PackageInfo {
     /// Source file path relative to nixpkgs root (e.g., "pkgs/development/interpreters/python/default.nix")
     #[serde(rename = "sourcePath")]
     pub source_path: Option<String>,
+    /// Known security vulnerabilities or EOL notices from meta.knownVulnerabilities
+    pub known_vulnerabilities: Option<Vec<String>>,
 }
 
 /// Attribute position information for mapping attribute names to files.
@@ -54,6 +56,14 @@ impl PackageInfo {
         self.platforms
             .as_ref()
             .map(|p| serde_json::to_string(p).unwrap_or_default())
+    }
+
+    /// Serialize known vulnerabilities to JSON for database storage.
+    #[allow(dead_code)]
+    pub fn known_vulnerabilities_json(&self) -> Option<String> {
+        self.known_vulnerabilities
+            .as_ref()
+            .map(|v| serde_json::to_string(v).unwrap_or_default())
     }
 }
 
@@ -142,6 +152,27 @@ let
     else null
   );
 
+  # Safely get knownVulnerabilities - list of strings describing security issues
+  # meta.knownVulnerabilities is a list of strings when present
+  getKnownVulnerabilities = v: tryDeep (
+    if v == null then null
+    else if builtins.isList v then
+      let
+        extracted = map (x:
+          let
+            result = builtins.tryEval (
+              if builtins.isString x then x
+              else if builtins.isInt x || builtins.isFloat x then builtins.toString x
+              else null
+            );
+          in if result.success then result.value else null
+        ) v;
+        # Filter out nulls
+        filtered = builtins.filter (x: x != null) extracted;
+      in if builtins.length filtered > 0 then filtered else null
+    else null
+  );
+
   # Check if something is a derivation (with error handling)
   isDerivation = x:
     let result = builtins.tryEval (builtins.isAttrs x && x ? type && x.type == "derivation");
@@ -194,6 +225,7 @@ let
       maintainers = if meta ? maintainers then getMaintainers meta.maintainers else null;
       platforms = if meta ? platforms then getPlatforms meta.platforms else null;
       sourcePath = safeString sourcePath;
+      knownVulnerabilities = if meta ? knownVulnerabilities then getKnownVulnerabilities meta.knownVulnerabilities else null;
     };
 
   # Process each package name with full error isolation
@@ -501,6 +533,7 @@ mod tests {
             maintainers: Some(vec!["user1".to_string(), "user2".to_string()]),
             platforms: Some(vec!["x86_64-linux".to_string()]),
             source_path: Some("pkgs/test/default.nix".to_string()),
+            known_vulnerabilities: None,
         };
 
         let license_json = pkg.license_json().unwrap();

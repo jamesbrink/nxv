@@ -4,6 +4,11 @@ use crate::error::Result;
 use chrono::{DateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Unix timestamp for when flake.nix was added to nixpkgs (2020-02-10 00:00:00 UTC).
+/// Commits before this date require legacy nix-shell syntax instead of flake references.
+/// See: https://github.com/NixOS/nixpkgs/pull/68897
+const FLAKE_EPOCH_TIMESTAMP: i64 = 1581292800;
+
 /// Represents a package version entry from the database.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackageVersion {
@@ -22,6 +27,8 @@ pub struct PackageVersion {
     pub platforms: Option<String>,
     /// Source file path relative to nixpkgs root
     pub source_path: Option<String>,
+    /// Known security vulnerabilities or EOL notices (JSON array)
+    pub known_vulnerabilities: Option<String>,
 }
 
 impl PackageVersion {
@@ -58,6 +65,7 @@ impl PackageVersion {
             maintainers: row.get("maintainers")?,
             platforms: row.get("platforms")?,
             source_path: row.get("source_path").ok().flatten(),
+            known_vulnerabilities: row.get("known_vulnerabilities").ok().flatten(),
         })
     }
 
@@ -69,6 +77,87 @@ impl PackageVersion {
     /// Get the short (7-char) last commit hash.
     pub fn last_commit_short(&self) -> &str {
         &self.last_commit_hash[..7.min(self.last_commit_hash.len())]
+    }
+
+    /// Check if the last commit predates flake.nix in nixpkgs.
+    pub fn predates_flakes(&self) -> bool {
+        self.last_commit_date.timestamp() < FLAKE_EPOCH_TIMESTAMP
+    }
+
+    /// Generate the appropriate nix shell command based on commit date and security status.
+    pub fn nix_shell_cmd(&self) -> String {
+        let insecure_prefix = if self.is_insecure() {
+            "NIXPKGS_ALLOW_INSECURE=1 "
+        } else {
+            ""
+        };
+
+        if self.predates_flakes() {
+            format!(
+                "{}nix-shell -p '(import (builtins.fetchTarball \"https://github.com/NixOS/nixpkgs/archive/{}.tar.gz\") {{}}).{}'",
+                insecure_prefix,
+                self.last_commit_short(),
+                self.attribute_path
+            )
+        } else {
+            let impure_flag = if self.is_insecure() { " --impure" } else { "" };
+            format!(
+                "{}nix shell{} nixpkgs/{}#{}",
+                insecure_prefix,
+                impure_flag,
+                self.last_commit_short(),
+                self.attribute_path
+            )
+        }
+    }
+
+    /// Generate the appropriate nix run command based on commit date and security status.
+    ///
+    /// Note: For legacy (pre-flake) packages, this uses `nix-shell --run` with the
+    /// attribute path as the command. This works when the binary name matches the
+    /// attribute path (e.g., `python`), but may fail for packages where they differ
+    /// (e.g., `python27` attribute but `python` binary). Users may need to adjust
+    /// the command for such cases.
+    pub fn nix_run_cmd(&self) -> String {
+        let insecure_prefix = if self.is_insecure() {
+            "NIXPKGS_ALLOW_INSECURE=1 "
+        } else {
+            ""
+        };
+
+        if self.predates_flakes() {
+            format!(
+                "{}nix-shell -p '(import (builtins.fetchTarball \"https://github.com/NixOS/nixpkgs/archive/{}.tar.gz\") {{}}).{}' --run {}",
+                insecure_prefix,
+                self.last_commit_short(),
+                self.attribute_path,
+                self.attribute_path
+            )
+        } else {
+            let impure_flag = if self.is_insecure() { " --impure" } else { "" };
+            format!(
+                "{}nix run{} nixpkgs/{}#{}",
+                insecure_prefix,
+                impure_flag,
+                self.last_commit_short(),
+                self.attribute_path
+            )
+        }
+    }
+
+    /// Check if the package has known vulnerabilities.
+    pub fn is_insecure(&self) -> bool {
+        self.known_vulnerabilities
+            .as_ref()
+            .is_some_and(|v| !v.is_empty() && v != "[]" && v != "null")
+    }
+
+    /// Get parsed known vulnerabilities as a vector of strings.
+    pub fn vulnerabilities(&self) -> Vec<String> {
+        self.known_vulnerabilities
+            .as_ref()
+            .and_then(|v| serde_json::from_str(v).ok())
+            .unwrap_or_default()
     }
 }
 
@@ -241,13 +330,14 @@ pub fn get_last_occurrence(
     }
 }
 
-/// Version history entry: (version, first_seen, last_seen).
-pub type VersionHistoryEntry = (String, DateTime<Utc>, DateTime<Utc>);
+/// Version history entry: (version, first_seen, last_seen, is_insecure).
+pub type VersionHistoryEntry = (String, DateTime<Utc>, DateTime<Utc>, bool);
 
 /// Retrieves the version history for a package attribute path.
 ///
 /// Returns each distinct version for the given `package` (matched against `attribute_path`)
-/// along with the earliest `first_commit_date` and the latest `last_commit_date` for that version.
+/// along with the earliest `first_commit_date`, the latest `last_commit_date` for that version,
+/// and a flag indicating if any record for that version has known vulnerabilities.
 /// Results are ordered by `first_seen` (earliest first_commit_date) descending.
 ///
 /// # Arguments
@@ -256,7 +346,7 @@ pub type VersionHistoryEntry = (String, DateTime<Utc>, DateTime<Utc>);
 ///
 /// # Returns
 ///
-/// A `Vec<VersionHistoryEntry>` where each entry is `(version, first_seen, last_seen)`,
+/// A `Vec<VersionHistoryEntry>` where each entry is `(version, first_seen, last_seen, is_insecure)`,
 /// and `first_seen` / `last_seen` are `DateTime<Utc>` values.
 ///
 /// # Examples
@@ -264,20 +354,39 @@ pub type VersionHistoryEntry = (String, DateTime<Utc>, DateTime<Utc>);
 /// ```
 /// // assumes `conn` is an open rusqlite::Connection
 /// let history = get_version_history(&conn, "python").unwrap();
-/// for (version, first_seen, last_seen) in history {
-///     println!("{}: {} - {}", version, first_seen, last_seen);
+/// for (version, first_seen, last_seen, is_insecure) in history {
+///     println!("{}: {} - {} (insecure: {})", version, first_seen, last_seen, is_insecure);
 /// }
 /// ```
 pub fn get_version_history(
     conn: &rusqlite::Connection,
     package: &str,
 ) -> Result<Vec<VersionHistoryEntry>> {
+    // Query history for the specific attribute path, but check if ANY package
+    // with the same version has vulnerabilities (since insecurity is about the
+    // version, not the attribute path - e.g., Python 2.7 is EOL regardless of
+    // whether it's called "python" or "python27")
+    //
+    // Uses a CTE to pre-compute insecure versions once, avoiding a correlated
+    // subquery that would run for each row in the result set.
     let mut stmt = conn.prepare(
         r#"
-        SELECT version, MIN(first_commit_date) as first_seen, MAX(last_commit_date) as last_seen
-        FROM package_versions
-        WHERE attribute_path = ?
-        GROUP BY version
+        WITH insecure_versions AS (
+            SELECT DISTINCT version
+            FROM package_versions
+            WHERE known_vulnerabilities IS NOT NULL
+              AND known_vulnerabilities != ''
+              AND known_vulnerabilities != '[]'
+              AND known_vulnerabilities != 'null'
+        )
+        SELECT pv.version,
+               MIN(pv.first_commit_date) as first_seen,
+               MAX(pv.last_commit_date) as last_seen,
+               CASE WHEN iv.version IS NOT NULL THEN 1 ELSE 0 END as is_insecure
+        FROM package_versions pv
+        LEFT JOIN insecure_versions iv ON pv.version = iv.version
+        WHERE pv.attribute_path = ?
+        GROUP BY pv.version
         ORDER BY first_seen DESC
         "#,
     )?;
@@ -286,10 +395,12 @@ pub fn get_version_history(
         let version: String = row.get(0)?;
         let first_ts: i64 = row.get(1)?;
         let last_ts: i64 = row.get(2)?;
+        let is_insecure: i64 = row.get(3)?;
         Ok((
             version,
             Utc.timestamp_opt(first_ts, 0).unwrap(),
             Utc.timestamp_opt(last_ts, 0).unwrap(),
+            is_insecure != 0,
         ))
     })?;
 
@@ -667,5 +778,221 @@ mod tests {
         let results =
             search_by_description(db.connection(), "nonexistent description xyz").unwrap();
         assert!(results.is_empty());
+    }
+
+    // Helper to create a PackageVersion for testing helper methods
+    fn make_test_package(
+        last_commit_date: DateTime<Utc>,
+        known_vulnerabilities: Option<String>,
+    ) -> PackageVersion {
+        PackageVersion {
+            id: 1,
+            name: "test".to_string(),
+            version: "1.0.0".to_string(),
+            first_commit_hash: "abc1234567890".to_string(),
+            first_commit_date: Utc.timestamp_opt(1500000000, 0).unwrap(),
+            last_commit_hash: "def1234567890".to_string(),
+            last_commit_date,
+            attribute_path: "test".to_string(),
+            description: Some("Test package".to_string()),
+            license: None,
+            homepage: None,
+            maintainers: None,
+            platforms: None,
+            source_path: None,
+            known_vulnerabilities,
+        }
+    }
+
+    #[test]
+    fn test_is_insecure_with_vulnerabilities() {
+        let pkg = make_test_package(
+            Utc.timestamp_opt(1700000000, 0).unwrap(),
+            Some(r#"["CVE-2023-1234", "CVE-2023-5678"]"#.to_string()),
+        );
+        assert!(pkg.is_insecure());
+    }
+
+    #[test]
+    fn test_is_insecure_with_empty_array() {
+        let pkg = make_test_package(
+            Utc.timestamp_opt(1700000000, 0).unwrap(),
+            Some("[]".to_string()),
+        );
+        assert!(!pkg.is_insecure());
+    }
+
+    #[test]
+    fn test_is_insecure_with_null() {
+        let pkg = make_test_package(
+            Utc.timestamp_opt(1700000000, 0).unwrap(),
+            Some("null".to_string()),
+        );
+        assert!(!pkg.is_insecure());
+    }
+
+    #[test]
+    fn test_is_insecure_with_none() {
+        let pkg = make_test_package(Utc.timestamp_opt(1700000000, 0).unwrap(), None);
+        assert!(!pkg.is_insecure());
+    }
+
+    #[test]
+    fn test_is_insecure_with_empty_string() {
+        let pkg = make_test_package(
+            Utc.timestamp_opt(1700000000, 0).unwrap(),
+            Some("".to_string()),
+        );
+        assert!(!pkg.is_insecure());
+    }
+
+    #[test]
+    fn test_vulnerabilities_parsing() {
+        let pkg = make_test_package(
+            Utc.timestamp_opt(1700000000, 0).unwrap(),
+            Some(r#"["CVE-2023-1234", "CVE-2023-5678"]"#.to_string()),
+        );
+        let vulns = pkg.vulnerabilities();
+        assert_eq!(vulns.len(), 2);
+        assert_eq!(vulns[0], "CVE-2023-1234");
+        assert_eq!(vulns[1], "CVE-2023-5678");
+    }
+
+    #[test]
+    fn test_vulnerabilities_empty_array() {
+        let pkg = make_test_package(
+            Utc.timestamp_opt(1700000000, 0).unwrap(),
+            Some("[]".to_string()),
+        );
+        let vulns = pkg.vulnerabilities();
+        assert!(vulns.is_empty());
+    }
+
+    #[test]
+    fn test_vulnerabilities_none() {
+        let pkg = make_test_package(Utc.timestamp_opt(1700000000, 0).unwrap(), None);
+        let vulns = pkg.vulnerabilities();
+        assert!(vulns.is_empty());
+    }
+
+    #[test]
+    fn test_vulnerabilities_invalid_json() {
+        let pkg = make_test_package(
+            Utc.timestamp_opt(1700000000, 0).unwrap(),
+            Some("invalid json".to_string()),
+        );
+        let vulns = pkg.vulnerabilities();
+        assert!(vulns.is_empty());
+    }
+
+    #[test]
+    fn test_predates_flakes_old_commit() {
+        // 2019-01-01 - before flakes (2020-02-10)
+        let pkg = make_test_package(Utc.timestamp_opt(1546300800, 0).unwrap(), None);
+        assert!(pkg.predates_flakes());
+    }
+
+    #[test]
+    fn test_predates_flakes_new_commit() {
+        // 2023-11-14 - after flakes
+        let pkg = make_test_package(Utc.timestamp_opt(1700000000, 0).unwrap(), None);
+        assert!(!pkg.predates_flakes());
+    }
+
+    #[test]
+    fn test_nix_shell_cmd_modern_secure() {
+        // Modern commit (after flakes), no vulnerabilities
+        let pkg = make_test_package(Utc.timestamp_opt(1700000000, 0).unwrap(), None);
+        let cmd = pkg.nix_shell_cmd();
+        assert_eq!(cmd, "nix shell nixpkgs/def1234#test");
+        assert!(!cmd.contains("NIXPKGS_ALLOW_INSECURE"));
+        assert!(!cmd.contains("--impure"));
+    }
+
+    #[test]
+    fn test_nix_shell_cmd_modern_insecure() {
+        // Modern commit (after flakes), with vulnerabilities
+        let pkg = make_test_package(
+            Utc.timestamp_opt(1700000000, 0).unwrap(),
+            Some(r#"["CVE-2023-1234"]"#.to_string()),
+        );
+        let cmd = pkg.nix_shell_cmd();
+        assert!(cmd.starts_with("NIXPKGS_ALLOW_INSECURE=1 "));
+        assert!(cmd.contains(" --impure "));
+        assert!(cmd.contains("nixpkgs/def1234#test"));
+    }
+
+    #[test]
+    fn test_nix_shell_cmd_legacy_secure() {
+        // Legacy commit (before flakes), no vulnerabilities
+        let pkg = make_test_package(Utc.timestamp_opt(1546300800, 0).unwrap(), None);
+        let cmd = pkg.nix_shell_cmd();
+        assert!(cmd.starts_with("nix-shell -p"));
+        assert!(cmd.contains("builtins.fetchTarball"));
+        assert!(cmd.contains("def1234"));
+        assert!(!cmd.contains("NIXPKGS_ALLOW_INSECURE"));
+    }
+
+    #[test]
+    fn test_nix_shell_cmd_legacy_insecure() {
+        // Legacy commit (before flakes), with vulnerabilities
+        let pkg = make_test_package(
+            Utc.timestamp_opt(1546300800, 0).unwrap(),
+            Some(r#"["CVE-2023-1234"]"#.to_string()),
+        );
+        let cmd = pkg.nix_shell_cmd();
+        assert!(cmd.starts_with("NIXPKGS_ALLOW_INSECURE=1 "));
+        assert!(cmd.contains("nix-shell -p"));
+        assert!(cmd.contains("builtins.fetchTarball"));
+        // Legacy commands don't use --impure
+        assert!(!cmd.contains("--impure"));
+    }
+
+    #[test]
+    fn test_nix_run_cmd_modern_secure() {
+        // Modern commit (after flakes), no vulnerabilities
+        let pkg = make_test_package(Utc.timestamp_opt(1700000000, 0).unwrap(), None);
+        let cmd = pkg.nix_run_cmd();
+        assert_eq!(cmd, "nix run nixpkgs/def1234#test");
+        assert!(!cmd.contains("NIXPKGS_ALLOW_INSECURE"));
+        assert!(!cmd.contains("--impure"));
+    }
+
+    #[test]
+    fn test_nix_run_cmd_modern_insecure() {
+        // Modern commit (after flakes), with vulnerabilities
+        let pkg = make_test_package(
+            Utc.timestamp_opt(1700000000, 0).unwrap(),
+            Some(r#"["CVE-2023-1234"]"#.to_string()),
+        );
+        let cmd = pkg.nix_run_cmd();
+        assert!(cmd.starts_with("NIXPKGS_ALLOW_INSECURE=1 "));
+        assert!(cmd.contains(" --impure "));
+        assert!(cmd.contains("nixpkgs/def1234#test"));
+    }
+
+    #[test]
+    fn test_nix_run_cmd_legacy_secure() {
+        // Legacy commit (before flakes), no vulnerabilities
+        let pkg = make_test_package(Utc.timestamp_opt(1546300800, 0).unwrap(), None);
+        let cmd = pkg.nix_run_cmd();
+        assert!(cmd.contains("nix-shell -p"));
+        assert!(cmd.contains("--run test"));
+        assert!(!cmd.contains("NIXPKGS_ALLOW_INSECURE"));
+    }
+
+    #[test]
+    fn test_nix_run_cmd_legacy_insecure() {
+        // Legacy commit (before flakes), with vulnerabilities
+        let pkg = make_test_package(
+            Utc.timestamp_opt(1546300800, 0).unwrap(),
+            Some(r#"["CVE-2023-1234"]"#.to_string()),
+        );
+        let cmd = pkg.nix_run_cmd();
+        assert!(cmd.starts_with("NIXPKGS_ALLOW_INSECURE=1 "));
+        assert!(cmd.contains("nix-shell -p"));
+        assert!(cmd.contains("--run test"));
+        // Legacy commands don't use --impure
+        assert!(!cmd.contains("--impure"));
     }
 }

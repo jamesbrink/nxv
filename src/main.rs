@@ -484,6 +484,13 @@ fn cmd_pkg_info(cli: &Cli, args: &cli::InfoArgs) -> Result<()> {
                 println!("homepage\t{}", pkg.homepage.as_deref().unwrap_or("-"));
                 println!("maintainers\t{}", pkg.maintainers.as_deref().unwrap_or("-"));
                 println!("platforms\t{}", pkg.platforms.as_deref().unwrap_or("-"));
+                println!("insecure\t{}", if pkg.is_insecure() { "yes" } else { "no" });
+                if pkg.is_insecure() {
+                    println!(
+                        "known_vulnerabilities\t{}",
+                        pkg.known_vulnerabilities.as_deref().unwrap_or("[]")
+                    );
+                }
                 println!();
             }
         }
@@ -607,17 +614,31 @@ fn cmd_pkg_info(cli: &Cli, args: &cli::InfoArgs) -> Result<()> {
                 println!();
             }
 
+            // Show security warning if package has known vulnerabilities
+            if pkg.is_insecure() {
+                println!("{}", "Security Warning".bold().underline().red());
+                println!(
+                    "  {}",
+                    "This package has known vulnerabilities!".red().bold()
+                );
+                let vulns = pkg.vulnerabilities();
+                for vuln in &vulns {
+                    println!("  {} {}", "•".red(), vuln);
+                }
+                println!();
+            }
+
             println!("{}", "Usage".bold().underline());
-            println!(
-                "  nix shell nixpkgs/{}#{}",
-                pkg.last_commit_short(),
-                pkg.attribute_path
-            );
-            println!(
-                "  nix run nixpkgs/{}#{}",
-                pkg.last_commit_short(),
-                pkg.attribute_path
-            );
+            println!("  {}", pkg.nix_shell_cmd());
+            println!("  {}", pkg.nix_run_cmd());
+
+            if pkg.predates_flakes() {
+                println!();
+                println!(
+                    "{}",
+                    "Note: Very old nixpkgs (pre-2020) may not build with modern Nix.".yellow()
+                );
+            }
 
             // Show other attribute paths if there are multiple (deduplicated)
             if packages.len() > 1 {
@@ -775,34 +796,45 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
 
     if let Some(ref version) = args.version {
         // Show when a specific version was available
-        let first = backend.get_first_occurrence(&args.package, version)?;
-        let last = backend.get_last_occurrence(&args.package, version)?;
+        // Use prefix search (like info command) to find best matching package
+        let packages = backend.search_by_name_version(&args.package, Some(version.as_str()))?;
 
-        match (first, last) {
-            (Some(first_pkg), Some(last_pkg)) => {
-                println!("Package: {} {}", args.package, version);
+        if packages.is_empty() {
+            println!("Version {} of {} not found.", version, args.package);
+        } else {
+            // Use the first (most recent) match
+            let pkg = &packages[0];
+            println!("Package: {} {}", pkg.attribute_path, pkg.version);
+            println!();
+            println!(
+                "First appeared: {} ({})",
+                pkg.first_commit_short(),
+                pkg.first_commit_date.format("%Y-%m-%d")
+            );
+            println!(
+                "Last seen: {} ({})",
+                pkg.last_commit_short(),
+                pkg.last_commit_date.format("%Y-%m-%d")
+            );
+            println!();
+
+            // Show security warning if package has known vulnerabilities
+            if pkg.is_insecure() {
+                use owo_colors::OwoColorize;
+                println!("{}", "Security Warning".bold().underline().red());
+                println!(
+                    "  {}",
+                    "This package has known vulnerabilities!".red().bold()
+                );
+                let vulns = pkg.vulnerabilities();
+                for vuln in &vulns {
+                    println!("  {} {}", "•".red(), vuln);
+                }
                 println!();
-                println!(
-                    "First appeared: {} ({})",
-                    first_pkg.first_commit_short(),
-                    first_pkg.first_commit_date.format("%Y-%m-%d")
-                );
-                println!(
-                    "Last seen: {} ({})",
-                    last_pkg.last_commit_short(),
-                    last_pkg.last_commit_date.format("%Y-%m-%d")
-                );
-                println!();
-                println!("To use this version:");
-                println!(
-                    "  nix run nixpkgs/{}#{}",
-                    last_pkg.last_commit_short(),
-                    last_pkg.attribute_path
-                );
             }
-            _ => {
-                println!("Version {} of {} not found.", version, args.package);
-            }
+
+            println!("To use this version:");
+            println!("  {}", pkg.nix_run_cmd());
         }
     } else if args.full {
         // Show full details for all versions
@@ -858,8 +890,19 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
 
                 for pkg in packages {
                     let desc = pkg.description.as_deref().unwrap_or("-");
+                    // Add warning indicator and use red for insecure packages
+                    let version_display = if pkg.is_insecure() {
+                        format!("{} ⚠", pkg.version)
+                    } else {
+                        pkg.version.clone()
+                    };
+                    let version_color = if pkg.is_insecure() {
+                        Color::Red
+                    } else {
+                        Color::Green
+                    };
                     table.add_row(vec![
-                        Cell::new(&pkg.version).fg(Color::Green),
+                        Cell::new(&version_display).fg(version_color),
                         Cell::new(&pkg.attribute_path).fg(Color::Cyan),
                         Cell::new(format!(
                             "{} ({})",
@@ -896,24 +939,26 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
             cli::OutputFormatArg::Json => {
                 let json_history: Vec<_> = history
                     .iter()
-                    .map(|(v, first, last)| {
+                    .map(|(v, first, last, is_insecure)| {
                         serde_json::json!({
                             "version": v,
                             "first_seen": first.to_rfc3339(),
                             "last_seen": last.to_rfc3339(),
+                            "is_insecure": is_insecure,
                         })
                     })
                     .collect();
                 println!("{}", serde_json::to_string_pretty(&json_history)?);
             }
             cli::OutputFormatArg::Plain => {
-                println!("VERSION\tFIRST_SEEN\tLAST_SEEN");
-                for (version, first, last) in history {
+                println!("VERSION\tFIRST_SEEN\tLAST_SEEN\tINSECURE");
+                for (version, first, last, is_insecure) in history {
                     println!(
-                        "{}\t{}\t{}",
+                        "{}\t{}\t{}\t{}",
                         version,
                         first.format("%Y-%m-%d"),
-                        last.format("%Y-%m-%d")
+                        last.format("%Y-%m-%d"),
+                        if is_insecure { "yes" } else { "no" }
                     );
                 }
             }
@@ -928,9 +973,19 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
                     .set_content_arrangement(ContentArrangement::Dynamic)
                     .set_header(vec!["Version", "First Seen", "Last Seen"]);
 
-                for (version, first, last) in history {
+                for (version, first, last, is_insecure) in history {
+                    let version_display = if is_insecure {
+                        format!("{} ⚠", version)
+                    } else {
+                        version
+                    };
+                    let version_color = if is_insecure {
+                        Color::Red
+                    } else {
+                        Color::Green
+                    };
                     table.add_row(vec![
-                        Cell::new(&version).fg(Color::Green),
+                        Cell::new(&version_display).fg(version_color),
                         Cell::new(first.format("%Y-%m-%d").to_string()).fg(Color::White),
                         Cell::new(last.format("%Y-%m-%d").to_string()).fg(Color::White),
                     ]);
@@ -1069,12 +1124,17 @@ fn cmd_backfill(cli: &Cli, args: &cli::BackfillArgs) -> Result<()> {
             "Backfilling metadata from {:?} (historical mode)",
             args.nixpkgs_path
         );
+        eprintln!("  This will check out each package's original commit to extract metadata.");
+        eprintln!("  Slower but can update old/removed packages.");
     } else {
         eprintln!(
             "Backfilling metadata from {:?} (HEAD mode)",
             args.nixpkgs_path
         );
+        eprintln!("  This extracts metadata from the current nixpkgs checkout only.");
+        eprintln!("  Fast, but packages not in this checkout won't be updated.");
     }
+    eprintln!();
 
     let config = BackfillConfig {
         fields: args.fields.clone().unwrap_or_default(),
@@ -1110,10 +1170,26 @@ fn cmd_backfill(cli: &Cli, args: &cli::BackfillArgs) -> Result<()> {
         result.source_paths_filled
     );
     eprintln!("  homepage fields filled: {}", result.homepages_filled);
+    eprintln!(
+        "  known_vulnerabilities fields filled: {}",
+        result.vulnerabilities_filled
+    );
 
+    // Show helpful tips based on results
     if result.was_interrupted {
         eprintln!();
         eprintln!("Note: Backfill was interrupted. Run again to continue.");
+    } else if !args.history && result.records_updated == 0 && result.packages_checked > 0 {
+        eprintln!();
+        eprintln!("Tip: No records were updated. This can happen if:");
+        eprintln!("  - All packages already have the requested metadata, or");
+        eprintln!("  - The packages no longer exist in your nixpkgs checkout.");
+        eprintln!();
+        eprintln!("To update old/removed packages, use historical mode:");
+        eprintln!(
+            "  nxv backfill --nixpkgs-path {:?} --history",
+            args.nixpkgs_path
+        );
     }
 
     Ok(())

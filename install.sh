@@ -7,6 +7,7 @@
 # Options (via environment variables):
 #   NXV_INSTALL_DIR  - Installation directory (default: ~/.local/bin or /usr/local/bin)
 #   NXV_VERSION      - Specific version to install (default: latest)
+#   NXV_VERIFY       - Set to 1 to verify download against SHA256SUMS.txt
 
 set -e
 
@@ -90,6 +91,18 @@ download() {
     fi
 }
 
+sha256_file() {
+    file="$1"
+
+    if command -v sha256sum > /dev/null 2>&1; then
+        sha256sum "$file" | awk '{print $1}'
+    elif command -v shasum > /dev/null 2>&1; then
+        shasum -a 256 "$file" | awk '{print $1}'
+    else
+        error "sha256sum or shasum is required for checksum verification."
+    fi
+}
+
 # Determine install directory
 get_install_dir() {
     if [ -n "${NXV_INSTALL_DIR:-}" ]; then
@@ -161,14 +174,35 @@ main() {
     # Download binary
     info "Downloading ${ARTIFACT}..."
     TMPFILE=$(mktemp)
-    trap 'rm -f "$TMPFILE"' EXIT
+    CHECKSUMS_FILE=""
+    trap 'rm -f "$TMPFILE" ${CHECKSUMS_FILE:+$CHECKSUMS_FILE}' EXIT
 
     if ! download "$DOWNLOAD_URL" "$TMPFILE"; then
-        error "Failed to download ${DOWNLOAD_URL}\nCheck if the release exists: https://github.com/${REPO}/releases"
+        error "Failed to download ${DOWNLOAD_URL}. Check: https://github.com/${REPO}/releases"
+    fi
+    if [ "${NXV_VERIFY:-}" = "1" ]; then
+        CHECKSUMS_FILE=$(mktemp)
+        if ! download "https://github.com/${REPO}/releases/download/${VERSION}/SHA256SUMS.txt" "$CHECKSUMS_FILE"; then
+            error "Failed to download SHA256SUMS.txt for ${VERSION}."
+        fi
+        EXPECTED_SHA=$(awk -v file="$ARTIFACT" '$2 == file {print $1}' "$CHECKSUMS_FILE")
+        if [ -z "$EXPECTED_SHA" ]; then
+            error "Checksum for ${ARTIFACT} not found in SHA256SUMS.txt."
+        fi
+        ACTUAL_SHA=$(sha256_file "$TMPFILE")
+        if [ "$EXPECTED_SHA" != "$ACTUAL_SHA" ]; then
+            error "Checksum verification failed for ${ARTIFACT}."
+        fi
+        success "Checksum verified for ${ARTIFACT}"
     fi
 
     # Install binary
-    mv "$TMPFILE" "$INSTALL_PATH"
+    if ! mv "$TMPFILE" "$INSTALL_PATH"; then
+        if ! cp "$TMPFILE" "$INSTALL_PATH"; then
+            error "Failed to install to ${INSTALL_PATH}. Check directory permissions."
+        fi
+        rm -f "$TMPFILE"
+    fi
     chmod +x "$INSTALL_PATH"
 
     success "Installed ${BINARY_NAME} ${VERSION} to ${INSTALL_PATH}"

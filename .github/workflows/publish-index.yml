@@ -63,15 +63,22 @@ jobs:
         if: ${{ github.event.inputs.full_rebuild != 'true' }}
         continue-on-error: true
         run: |
+          set -euo pipefail
           mkdir -p ~/.local/share/nxv
           # Download existing index from GitHub release
           curl -sSfL "${INDEX_URL_PREFIX}/index.db.zst" -o ~/.local/share/nxv/index.db.zst || true
           if [ -f ~/.local/share/nxv/index.db.zst ]; then
-            zstd -d ~/.local/share/nxv/index.db.zst -o ~/.local/share/nxv/index.db
-            rm ~/.local/share/nxv/index.db.zst
+            if zstd -d ~/.local/share/nxv/index.db.zst -o ~/.local/share/nxv/index.db; then
+              rm ~/.local/share/nxv/index.db.zst
+            else
+              rm -f ~/.local/share/nxv/index.db.zst ~/.local/share/nxv/index.db
+            fi
           fi
           # Also download bloom filter if available
           curl -sSfL "${INDEX_URL_PREFIX}/bloom.bin" -o ~/.local/share/nxv/bloom.bin || true
+          if [ -f ~/.local/share/nxv/bloom.bin ] && [ ! -s ~/.local/share/nxv/bloom.bin ]; then
+            rm -f ~/.local/share/nxv/bloom.bin
+          fi
 
       - name: Run indexer
         run: |
@@ -98,6 +105,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           # Check if release exists, create if not
           if ! gh release view "$INDEX_RELEASE_TAG" > /dev/null 2>&1; then
             echo "Creating release $INDEX_RELEASE_TAG..."
@@ -106,6 +114,7 @@ jobs:
               --notes "nxv package index files. Updated automatically." \
               --latest=false
           fi
+          gh release view "$INDEX_RELEASE_TAG" > /dev/null 2>&1
 
           # Upload files (--clobber overwrites existing assets)
           echo "Uploading index files to release..."

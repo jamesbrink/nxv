@@ -1184,6 +1184,10 @@ fn cmd_reset(_cli: &Cli, args: &cli::ResetArgs) -> Result<()> {
 fn cmd_publish(cli: &Cli, args: &cli::PublishArgs) -> Result<()> {
     use crate::index::publisher::publish_index;
 
+    if !cli.quiet && args.url_prefix.is_none() {
+        eprintln!("Warning: --url-prefix not set; manifest URLs will be local file names.");
+    }
+
     publish_index(
         &cli.db_path,
         &args.output,

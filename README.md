@@ -73,6 +73,7 @@ Or add to your flake:
 ```bash
 curl -sSfL https://raw.githubusercontent.com/jamesbrink/nxv/main/install.sh | sh
 ```
+For extra safety, download the script first, review it, and verify release checksums from GitHub Releases. You can also set `NXV_VERIFY=1` to enforce checksum verification.
 
 ### Cargo
 
@@ -263,6 +264,11 @@ nxv publish --output ./publish --url-prefix https://your-server.com/nxv
 ```
 
 The `--url-prefix` sets the base URL that will appear in the manifest. This should match where you'll host the files.
+
+### Integrity and Rollback
+
+- `manifest.json` includes SHA256 checksums; manifest signing is not implemented yet.
+- To roll back a bad index, re-upload a previous `index.db.zst`, `bloom.bin`, and `manifest.json` to the same location or point `NXV_MANIFEST_URL` at a known-good manifest.
 
 ### Hosting Your Own Index
 

@@ -314,6 +314,12 @@ pub fn publish_index<P: AsRef<Path>, Q: AsRef<Path>>(
     )?;
 
     if show_progress {
+        let commit_display = if last_commit.is_empty() {
+            "unknown (missing meta)"
+        } else {
+            &last_commit[..12.min(last_commit.len())]
+        };
+
         eprintln!();
         eprintln!("Published artifacts to: {}", output_dir.display());
         eprintln!("  - {} ({} bytes)", INDEX_DB_NAME, full_index.size_bytes);
@@ -323,10 +329,7 @@ pub fn publish_index<P: AsRef<Path>, Q: AsRef<Path>>(
         );
         eprintln!("  - {}", MANIFEST_NAME);
         eprintln!();
-        eprintln!(
-            "Last indexed commit: {}",
-            &last_commit[..12.min(last_commit.len())]
-        );
+        eprintln!("Last indexed commit: {}", commit_display);
     }
 
     Ok(())

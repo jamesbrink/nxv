@@ -324,6 +324,49 @@ mod tests {
     }
 
     #[test]
+    fn test_file_sha256_empty_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("empty.txt");
+        std::fs::write(&path, b"").unwrap();
+
+        let hash = file_sha256(&path).unwrap();
+        // SHA256 of empty string
+        assert_eq!(
+            hash,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn test_file_sha256_binary_content() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("binary.bin");
+        std::fs::write(&path, &[0x00, 0xFF, 0xAB, 0xCD]).unwrap();
+
+        // Should not panic on binary content
+        let hash = file_sha256(&path).unwrap();
+        assert_eq!(hash.len(), 64); // SHA256 is 64 hex chars
+    }
+
+    #[test]
+    fn test_file_sha256_large_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("large.bin");
+        // Create a 100KB file
+        let content: Vec<u8> = (0..100_000).map(|i| (i % 256) as u8).collect();
+        std::fs::write(&path, &content).unwrap();
+
+        let hash = file_sha256(&path).unwrap();
+        assert_eq!(hash.len(), 64);
+    }
+
+    #[test]
+    fn test_file_sha256_nonexistent_file() {
+        let result = file_sha256("/nonexistent/path/file.txt");
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_compress_decompress_zstd() {
         let dir = tempdir().unwrap();
         let original = dir.path().join("original.txt");
@@ -343,6 +386,55 @@ mod tests {
         // Verify content
         let result = std::fs::read_to_string(&decompressed).unwrap();
         assert_eq!(result, content);
+    }
+
+    #[test]
+    fn test_compress_zstd_different_levels() {
+        let dir = tempdir().unwrap();
+        let original = dir.path().join("original.txt");
+        let content = "a".repeat(10_000); // Highly compressible
+        std::fs::write(&original, &content).unwrap();
+
+        // Test low compression level
+        let low_compressed = dir.path().join("low.zst");
+        compress_zstd(&original, &low_compressed, 1).unwrap();
+
+        // Test high compression level
+        let high_compressed = dir.path().join("high.zst");
+        compress_zstd(&original, &high_compressed, 19).unwrap();
+
+        // Higher level should produce smaller (or equal) file
+        let low_size = std::fs::metadata(&low_compressed).unwrap().len();
+        let high_size = std::fs::metadata(&high_compressed).unwrap().len();
+        assert!(high_size <= low_size);
+    }
+
+    #[test]
+    fn test_compress_zstd_empty_file() {
+        let dir = tempdir().unwrap();
+        let original = dir.path().join("empty.txt");
+        let compressed = dir.path().join("empty.zst");
+        let decompressed = dir.path().join("decompressed.txt");
+
+        std::fs::write(&original, b"").unwrap();
+        compress_zstd(&original, &compressed, 3).unwrap();
+        decompress_zstd(&compressed, &decompressed, false).unwrap();
+
+        let result = std::fs::read(&decompressed).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_decompress_zstd_invalid_data() {
+        let dir = tempdir().unwrap();
+        let invalid = dir.path().join("invalid.zst");
+        let dest = dir.path().join("output.txt");
+
+        // Write invalid zstd data
+        std::fs::write(&invalid, b"this is not zstd data").unwrap();
+
+        let result = decompress_zstd(&invalid, &dest, false);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -382,5 +474,71 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), "persistent error");
         assert_eq!(attempts.load(Ordering::SeqCst), 3); // 3 attempts (0, 1, 2 retries)
+    }
+
+    #[test]
+    fn test_retry_with_backoff_zero_retries() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let attempts = AtomicU32::new(0);
+
+        let result: std::result::Result<i32, &str> = retry_with_backoff(0, false, || {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            Err("error")
+        });
+
+        assert!(result.is_err());
+        assert_eq!(attempts.load(Ordering::SeqCst), 1); // Only 1 attempt with 0 retries
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+    use tempfile::tempdir;
+
+    proptest! {
+        /// Compression and decompression should be lossless for any data.
+        #[test]
+        fn compress_decompress_roundtrip(content in prop::collection::vec(any::<u8>(), 0..1000)) {
+            let dir = tempdir().unwrap();
+            let original = dir.path().join("original.bin");
+            let compressed = dir.path().join("compressed.zst");
+            let decompressed = dir.path().join("decompressed.bin");
+
+            std::fs::write(&original, &content).unwrap();
+            compress_zstd(&original, &compressed, 3).unwrap();
+            decompress_zstd(&compressed, &decompressed, false).unwrap();
+
+            let result = std::fs::read(&decompressed).unwrap();
+            prop_assert_eq!(result, content);
+        }
+
+        /// SHA256 should always produce a 64-character hex string.
+        #[test]
+        fn sha256_always_64_chars(content in prop::collection::vec(any::<u8>(), 0..500)) {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("test.bin");
+            std::fs::write(&path, &content).unwrap();
+
+            let hash = file_sha256(&path).unwrap();
+            prop_assert_eq!(hash.len(), 64);
+            prop_assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+        }
+
+        /// Same content should always produce the same hash.
+        #[test]
+        fn sha256_deterministic(content in prop::collection::vec(any::<u8>(), 0..500)) {
+            let dir = tempdir().unwrap();
+            let path1 = dir.path().join("file1.bin");
+            let path2 = dir.path().join("file2.bin");
+
+            std::fs::write(&path1, &content).unwrap();
+            std::fs::write(&path2, &content).unwrap();
+
+            let hash1 = file_sha256(&path1).unwrap();
+            let hash2 = file_sha256(&path2).unwrap();
+            prop_assert_eq!(hash1, hash2);
+        }
     }
 }

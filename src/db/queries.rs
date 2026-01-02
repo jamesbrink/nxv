@@ -462,10 +462,24 @@ mod tests {
     }
 
     #[test]
+    fn test_search_by_name_exact_no_match() {
+        let (_dir, db) = create_test_db();
+        let results = search_by_name(db.connection(), "nonexistent-pkg", true).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
     fn test_search_by_name_prefix() {
         let (_dir, db) = create_test_db();
         let results = search_by_name(db.connection(), "python", false).unwrap();
         assert_eq!(results.len(), 3); // python-3.11.0, python-3.12.0, python2-2.7.18
+    }
+
+    #[test]
+    fn test_search_by_name_prefix_no_match() {
+        let (_dir, db) = create_test_db();
+        let results = search_by_name(db.connection(), "zzz", false).unwrap();
+        assert!(results.is_empty());
     }
 
     #[test]
@@ -475,6 +489,63 @@ mod tests {
         let results = search_by_name_version(db.connection(), "python", "3.11").unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].version, "3.11.0");
+    }
+
+    #[test]
+    fn test_search_by_name_version_no_match() {
+        let (_dir, db) = create_test_db();
+        let results = search_by_name_version(db.connection(), "python", "99.99").unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_search_by_attr() {
+        let (_dir, db) = create_test_db();
+        let results = search_by_attr(db.connection(), "python").unwrap();
+        // Should match "python" and "python2" attribute paths
+        assert_eq!(results.len(), 3);
+    }
+
+    #[test]
+    fn test_search_by_attr_exact_match() {
+        let (_dir, db) = create_test_db();
+        let results = search_by_attr(db.connection(), "nodejs").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].attribute_path, "nodejs");
+    }
+
+    #[test]
+    fn test_get_first_occurrence() {
+        let (_dir, db) = create_test_db();
+        let result = get_first_occurrence(db.connection(), "python", "3.11.0").unwrap();
+        assert!(result.is_some());
+        let pkg = result.unwrap();
+        assert_eq!(pkg.version, "3.11.0");
+        assert_eq!(pkg.first_commit_hash, "abc1234567890");
+    }
+
+    #[test]
+    fn test_get_first_occurrence_not_found() {
+        let (_dir, db) = create_test_db();
+        let result = get_first_occurrence(db.connection(), "nonexistent", "1.0.0").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_get_last_occurrence() {
+        let (_dir, db) = create_test_db();
+        let result = get_last_occurrence(db.connection(), "python", "3.11.0").unwrap();
+        assert!(result.is_some());
+        let pkg = result.unwrap();
+        assert_eq!(pkg.version, "3.11.0");
+        assert_eq!(pkg.last_commit_hash, "def1234567890");
+    }
+
+    #[test]
+    fn test_get_last_occurrence_not_found() {
+        let (_dir, db) = create_test_db();
+        let result = get_last_occurrence(db.connection(), "nonexistent", "1.0.0").unwrap();
+        assert!(result.is_none());
     }
 
     #[test]
@@ -489,10 +560,111 @@ mod tests {
     }
 
     #[test]
+    fn test_get_version_history_empty() {
+        let (_dir, db) = create_test_db();
+        let history = get_version_history(db.connection(), "nonexistent").unwrap();
+        assert!(history.is_empty());
+    }
+
+    #[test]
     fn test_get_stats() {
         let (_dir, db) = create_test_db();
         let stats = get_stats(db.connection()).unwrap();
         assert_eq!(stats.total_ranges, 4);
         assert_eq!(stats.unique_names, 4); // python-3.11.0, python-3.12.0, python2-2.7.18, nodejs-20.0.0
+    }
+
+    #[test]
+    fn test_get_stats_empty_db() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("empty.db");
+        let db = Database::open(&db_path).unwrap();
+
+        let stats = get_stats(db.connection()).unwrap();
+        assert_eq!(stats.total_ranges, 0);
+        assert_eq!(stats.unique_names, 0);
+        assert_eq!(stats.unique_versions, 0);
+    }
+
+    #[test]
+    fn test_get_all_unique_attrs() {
+        let (_dir, db) = create_test_db();
+        let attrs = get_all_unique_attrs(db.connection()).unwrap();
+        assert_eq!(attrs.len(), 3); // nodejs, python, python2
+        assert!(attrs.contains(&"python".to_string()));
+        assert!(attrs.contains(&"python2".to_string()));
+        assert!(attrs.contains(&"nodejs".to_string()));
+    }
+
+    #[test]
+    fn test_get_all_unique_attrs_empty() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("empty.db");
+        let db = Database::open(&db_path).unwrap();
+
+        let attrs = get_all_unique_attrs(db.connection()).unwrap();
+        assert!(attrs.is_empty());
+    }
+
+    #[test]
+    fn test_package_version_first_commit_short() {
+        let (_dir, db) = create_test_db();
+        let results = search_by_name(db.connection(), "python-3.11.0", true).unwrap();
+        let pkg = &results[0];
+        assert_eq!(pkg.first_commit_short(), "abc1234");
+    }
+
+    #[test]
+    fn test_package_version_last_commit_short() {
+        let (_dir, db) = create_test_db();
+        let results = search_by_name(db.connection(), "python-3.11.0", true).unwrap();
+        let pkg = &results[0];
+        assert_eq!(pkg.last_commit_short(), "def1234");
+    }
+
+    #[test]
+    fn test_package_version_short_commit_with_short_hash() {
+        // Test edge case where hash is shorter than 7 chars
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db = Database::open(&db_path).unwrap();
+
+        db.connection()
+            .execute(
+                r#"
+            INSERT INTO package_versions (name, version, first_commit_hash, first_commit_date,
+                last_commit_hash, last_commit_date, attribute_path, description)
+            VALUES ('test', '1.0', 'abc', 1700000000, 'xyz', 1700100000, 'test', 'test')
+            "#,
+                [],
+            )
+            .unwrap();
+
+        let results = search_by_name(db.connection(), "test", true).unwrap();
+        let pkg = &results[0];
+        assert_eq!(pkg.first_commit_short(), "abc");
+        assert_eq!(pkg.last_commit_short(), "xyz");
+    }
+
+    #[test]
+    fn test_search_by_description() {
+        let (_dir, db) = create_test_db();
+        let results = search_by_description(db.connection(), "interpreter").unwrap();
+        assert_eq!(results.len(), 3); // python, python2
+    }
+
+    #[test]
+    fn test_search_by_description_partial() {
+        let (_dir, db) = create_test_db();
+        let results = search_by_description(db.connection(), "runtime").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "nodejs-20.0.0");
+    }
+
+    #[test]
+    fn test_search_by_description_no_match() {
+        let (_dir, db) = create_test_db();
+        let results = search_by_description(db.connection(), "nonexistent description xyz").unwrap();
+        assert!(results.is_empty());
     }
 }

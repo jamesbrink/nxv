@@ -12,6 +12,14 @@
 
 nxv indexes the entire nixpkgs git history to help you discover when packages were added, which versions existed, and the exact commit to use with `nix shell nixpkgs/<commit>#package`.
 
+### Why nxv?
+
+Because sometimes you need Python 2.7 for that legacy project nobody wants to touch. Or Ruby 2.6 because the Gemfile hasn't been updated since the Obama administration. Instead of spending your afternoon spelunking through GitHub commits and praying to the Nix gods, just ask nxv. It's indexed 8+ years of nixpkgs history so you don't have to.
+
+<p align="center">
+  <img src="./docs/where-is-it.gif" alt="nxv in action" />
+</p>
+
 > **Early Development** — No public index available yet. Building your own index requires a local nixpkgs clone.
 
 ## Features

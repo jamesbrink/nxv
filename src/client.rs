@@ -482,3 +482,146 @@ mod urlencoding {
         result
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod urlencoding_tests {
+        use super::urlencoding;
+
+        #[test]
+        fn test_encode_unreserved_chars() {
+            // Letters, digits, and unreserved chars should pass through unchanged
+            assert_eq!(urlencoding::encode("abcXYZ"), "abcXYZ");
+            assert_eq!(urlencoding::encode("0123456789"), "0123456789");
+            assert_eq!(urlencoding::encode("-_.~"), "-_.~");
+        }
+
+        #[test]
+        fn test_encode_spaces() {
+            assert_eq!(urlencoding::encode("hello world"), "hello%20world");
+            assert_eq!(urlencoding::encode("  "), "%20%20");
+        }
+
+        #[test]
+        fn test_encode_special_chars() {
+            assert_eq!(urlencoding::encode("foo/bar"), "foo%2Fbar");
+            assert_eq!(urlencoding::encode("a=b&c=d"), "a%3Db%26c%3Dd");
+            assert_eq!(urlencoding::encode("test?query"), "test%3Fquery");
+        }
+
+        #[test]
+        fn test_encode_unicode() {
+            // UTF-8 encoding of 'é' is C3 A9
+            assert_eq!(urlencoding::encode("café"), "caf%C3%A9");
+            // UTF-8 encoding of '你' is E4 BD A0
+            assert_eq!(urlencoding::encode("你好"), "%E4%BD%A0%E5%A5%BD");
+        }
+
+        #[test]
+        fn test_encode_empty_string() {
+            assert_eq!(urlencoding::encode(""), "");
+        }
+
+        #[test]
+        fn test_encode_realistic_package_names() {
+            // Common package name patterns
+            assert_eq!(urlencoding::encode("python3"), "python3");
+            assert_eq!(urlencoding::encode("gcc-12"), "gcc-12");
+            assert_eq!(urlencoding::encode("node_modules"), "node_modules");
+            assert_eq!(
+                urlencoding::encode("nixpkgs.python3"),
+                "nixpkgs.python3"
+            );
+        }
+    }
+
+    mod api_client_tests {
+        use super::*;
+
+        #[test]
+        fn test_new_trims_trailing_slash() {
+            let client = ApiClient::new("https://example.com/").unwrap();
+            assert!(!client.base_url.ends_with('/'));
+        }
+
+        #[test]
+        fn test_new_no_trailing_slash() {
+            let client = ApiClient::new("https://example.com").unwrap();
+            assert_eq!(client.base_url, "https://example.com");
+        }
+
+        #[test]
+        fn test_new_multiple_trailing_slashes() {
+            // trim_end_matches removes ALL matching chars, so both slashes are removed
+            let client = ApiClient::new("https://example.com//").unwrap();
+            assert_eq!(client.base_url, "https://example.com");
+        }
+
+        #[test]
+        fn test_map_status_error_not_found() {
+            let client = ApiClient::new("https://example.com").unwrap();
+            let err = client.map_status_error(StatusCode::NOT_FOUND, "/test");
+            assert!(matches!(err, NxvError::PackageNotFound(_)));
+        }
+
+        #[test]
+        fn test_map_status_error_service_unavailable() {
+            let client = ApiClient::new("https://example.com").unwrap();
+            let err = client.map_status_error(StatusCode::SERVICE_UNAVAILABLE, "/test");
+            assert!(matches!(err, NxvError::NoIndex));
+        }
+
+        #[test]
+        fn test_map_status_error_other() {
+            let client = ApiClient::new("https://example.com").unwrap();
+            let err = client.map_status_error(StatusCode::INTERNAL_SERVER_ERROR, "/test");
+            match err {
+                NxvError::ApiError(msg) => assert!(msg.contains("500")),
+                _ => panic!("Expected ApiError"),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::urlencoding;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// URL encoding should never panic on any input.
+        #[test]
+        fn encode_never_panics(s in "\\PC*") {
+            let _ = urlencoding::encode(&s);
+        }
+
+        /// Encoded strings should only contain safe URL characters.
+        #[test]
+        fn encode_produces_safe_chars(s in "[\\x00-\\x7F]{0,50}") {
+            let encoded = urlencoding::encode(&s);
+            for c in encoded.chars() {
+                prop_assert!(
+                    c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~' | '%'),
+                    "Unexpected character in encoded string: {:?}",
+                    c
+                );
+            }
+        }
+
+        /// Encoded strings should be at least as long as input.
+        #[test]
+        fn encode_length_reasonable(s in ".{0,30}") {
+            let encoded = urlencoding::encode(&s);
+            prop_assert!(encoded.len() >= s.len());
+        }
+
+        /// Unreserved characters should pass through unchanged.
+        #[test]
+        fn unreserved_chars_unchanged(s in "[a-zA-Z0-9._~-]+") {
+            let encoded = urlencoding::encode(&s);
+            prop_assert_eq!(encoded, s);
+        }
+    }
+}

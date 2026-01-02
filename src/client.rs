@@ -541,10 +541,7 @@ mod tests {
             assert_eq!(urlencoding::encode("python3"), "python3");
             assert_eq!(urlencoding::encode("gcc-12"), "gcc-12");
             assert_eq!(urlencoding::encode("node_modules"), "node_modules");
-            assert_eq!(
-                urlencoding::encode("nixpkgs.python3"),
-                "nixpkgs.python3"
-            );
+            assert_eq!(urlencoding::encode("nixpkgs.python3"), "nixpkgs.python3");
         }
     }
 

@@ -664,7 +664,8 @@ mod tests {
     #[test]
     fn test_search_by_description_no_match() {
         let (_dir, db) = create_test_db();
-        let results = search_by_description(db.connection(), "nonexistent description xyz").unwrap();
+        let results =
+            search_by_description(db.connection(), "nonexistent description xyz").unwrap();
         assert!(results.is_empty());
     }
 }

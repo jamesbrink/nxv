@@ -341,7 +341,7 @@ mod tests {
     fn test_file_sha256_binary_content() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("binary.bin");
-        std::fs::write(&path, &[0x00, 0xFF, 0xAB, 0xCD]).unwrap();
+        std::fs::write(&path, [0x00, 0xFF, 0xAB, 0xCD]).unwrap();
 
         // Should not panic on binary content
         let hash = file_sha256(&path).unwrap();

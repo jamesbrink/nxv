@@ -465,3 +465,118 @@ mod tests {
         assert_eq!(opts.sort, SortOrder::Date);
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    prop_compose! {
+        /// Generate an arbitrary PackageVersion for testing.
+        fn arb_package_version()(
+            name in "[a-z][a-z0-9_-]{0,30}",
+            version in "[0-9]{1,3}\\.[0-9]{1,3}(\\.[0-9]{1,3})?",
+            attr in "[a-z][a-z0-9_-]{0,30}",
+            license in prop_oneof![
+                Just(Some("MIT".to_string())),
+                Just(Some("GPL-3.0".to_string())),
+                Just(Some("Apache-2.0".to_string())),
+                Just(None),
+            ],
+        ) -> PackageVersion {
+            PackageVersion {
+                id: 1,
+                name,
+                version,
+                first_commit_hash: "abc123".to_string(),
+                first_commit_date: chrono::Utc::now(),
+                last_commit_hash: "def456".to_string(),
+                last_commit_date: chrono::Utc::now(),
+                attribute_path: attr,
+                description: Some("test package".to_string()),
+                license,
+                homepage: None,
+                maintainers: None,
+                platforms: None,
+                source_path: None,
+            }
+        }
+    }
+
+    proptest! {
+        /// Sorting should never panic regardless of input.
+        #[test]
+        fn sort_never_panics(
+            packages in prop::collection::vec(arb_package_version(), 0..100),
+            order in prop_oneof![
+                Just(SortOrder::Date),
+                Just(SortOrder::Version),
+                Just(SortOrder::Name),
+            ],
+            reverse in any::<bool>(),
+        ) {
+            let mut pkgs = packages;
+            sort_results(&mut pkgs, order, reverse);
+            // If we get here without panicking, the test passes
+        }
+
+        /// Deduplication should never increase the number of results.
+        #[test]
+        fn deduplicate_never_increases(
+            packages in prop::collection::vec(arb_package_version(), 0..100),
+        ) {
+            let original_len = packages.len();
+            let deduped = deduplicate(packages);
+            prop_assert!(deduped.len() <= original_len);
+        }
+
+        /// Pagination should never return more items than requested.
+        #[test]
+        fn paginate_respects_limit(
+            packages in prop::collection::vec(arb_package_version(), 0..100),
+            limit in 0usize..50,
+            offset in 0usize..50,
+        ) {
+            let (data, total) = paginate(packages.clone(), limit, offset);
+            prop_assert_eq!(total, packages.len());
+            if limit > 0 {
+                prop_assert!(data.len() <= limit);
+            }
+        }
+
+        /// License filter should only return packages with matching license.
+        #[test]
+        fn license_filter_correctness(
+            packages in prop::collection::vec(arb_package_version(), 0..50),
+            filter in "[A-Za-z]{1,10}",
+        ) {
+            let filtered = filter_by_license(packages, Some(&filter));
+            let filter_lower = filter.to_lowercase();
+            for pkg in filtered {
+                let license = pkg.license.unwrap();
+                prop_assert!(license.to_lowercase().contains(&filter_lower));
+            }
+        }
+
+        /// Version sorting should be stable (same input = same output order).
+        #[test]
+        fn sort_is_deterministic(
+            packages in prop::collection::vec(arb_package_version(), 1..20),
+            order in prop_oneof![
+                Just(SortOrder::Date),
+                Just(SortOrder::Version),
+                Just(SortOrder::Name),
+            ],
+        ) {
+            let mut pkgs1 = packages.clone();
+            let mut pkgs2 = packages;
+            sort_results(&mut pkgs1, order, false);
+            sort_results(&mut pkgs2, order, false);
+
+            for (p1, p2) in pkgs1.iter().zip(pkgs2.iter()) {
+                prop_assert_eq!(&p1.name, &p2.name);
+                prop_assert_eq!(&p1.version, &p2.version);
+            }
+        }
+    }
+}

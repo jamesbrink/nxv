@@ -11,7 +11,6 @@ use crate::bloom::PackageBloomFilter;
 use crate::db::Database;
 use crate::db::queries::PackageVersion;
 use crate::error::{NxvError, Result};
-use crate::paths;
 use chrono::{DateTime, Utc};
 use git::NixpkgsRepo;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
@@ -1219,16 +1218,20 @@ pub fn build_bloom_filter(db: &Database) -> Result<PackageBloomFilter> {
 }
 
 /// Build and save a bloom filter for the index.
-pub fn save_bloom_filter(db: &Database) -> Result<()> {
+///
+/// # Arguments
+/// * `db` - The database to build the bloom filter from
+/// * `bloom_path` - Path where the bloom filter should be saved
+pub fn save_bloom_filter<P: AsRef<std::path::Path>>(db: &Database, bloom_path: P) -> Result<()> {
     let filter = build_bloom_filter(db)?;
-    let bloom_path = paths::get_bloom_path();
+    let bloom_path = bloom_path.as_ref();
 
     // Ensure parent directory exists
     if let Some(parent) = bloom_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    filter.save(&bloom_path)?;
+    filter.save(bloom_path)?;
     Ok(())
 }
 

@@ -127,11 +127,11 @@ pub fn apply_full_update<P: AsRef<Path>>(
         show_progress,
     )?;
 
-    // Download bloom filter
+    // Download bloom filter (sibling to database file)
     if show_progress {
         eprintln!("Downloading bloom filter...");
     }
-    let bloom_path = paths::get_bloom_path();
+    let bloom_path = paths::get_bloom_path_for_db(db_path);
     download_file(
         &manifest.bloom_filter.url,
         &bloom_path,
@@ -181,11 +181,11 @@ pub fn apply_delta_update<P: AsRef<Path>>(
     let sql_content = std::fs::read_to_string(&delta_path)?;
     import_delta_sql(db.connection(), &sql_content)?;
 
-    // Also update the bloom filter
+    // Also update the bloom filter (sibling to database file)
     if show_progress {
         eprintln!("Downloading bloom filter...");
     }
-    let bloom_path = paths::get_bloom_path();
+    let bloom_path = paths::get_bloom_path_for_db(db_path);
     download_file(
         &manifest.bloom_filter.url,
         &bloom_path,

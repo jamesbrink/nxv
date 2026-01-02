@@ -236,7 +236,7 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
     // For exact package searches with local backend, check bloom filter first
     // This only applies to exact searches (not prefix or description searches)
     if args.exact && !args.desc && !backend.is_remote() {
-        let bloom_path = paths::get_bloom_path();
+        let bloom_path = paths::get_bloom_path_for_db(&cli.db_path);
 
         // Regenerate bloom filter if missing but database exists
         if !bloom_path.exists()
@@ -246,7 +246,7 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
             if !cli.quiet {
                 eprintln!("Generating bloom filter...");
             }
-            if let Err(e) = PackageBloomFilter::regenerate_from_db(&db) {
+            if let Err(e) = PackageBloomFilter::regenerate_from_db(&db, &bloom_path) {
                 // Non-fatal: just log and continue without bloom filter
                 if verbosity >= Verbosity::Debug {
                     eprintln!("[debug] Failed to generate bloom filter: {}", e);
@@ -733,7 +733,7 @@ fn cmd_stats(cli: &Cli) -> Result<()> {
         }
 
         // Bloom filter status
-        let bloom_path = paths::get_bloom_path();
+        let bloom_path = paths::get_bloom_path_for_db(&cli.db_path);
         if bloom_path.exists()
             && let Ok(metadata) = std::fs::metadata(&bloom_path)
         {
@@ -1020,8 +1020,9 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
         eprintln!();
         eprintln!("Building bloom filter...");
         let db = Database::open_readonly(&cli.db_path)?;
-        save_bloom_filter(&db)?;
-        eprintln!("Bloom filter saved to {:?}", paths::get_bloom_path());
+        let bloom_path = paths::get_bloom_path_for_db(&cli.db_path);
+        save_bloom_filter(&db, &bloom_path)?;
+        eprintln!("Bloom filter saved to {:?}", bloom_path);
     }
 
     if result.was_interrupted {

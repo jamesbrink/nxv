@@ -117,6 +117,22 @@ export NXV_API_URL=http://your-server:8080
 nxv search python  # uses remote API transparently
 ```
 
+## Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `NXV_DB_PATH` | Path to the index database. The bloom filter is stored as a sibling file (`.bloom` extension). |
+| `NXV_API_URL` | Remote API server URL. When set, CLI uses remote API instead of local database. |
+| `NXV_MANIFEST_URL` | Custom manifest URL for index downloads. |
+| `NO_COLOR` | Disable colored output. |
+
+Example for service deployments:
+
+```bash
+export NXV_DB_PATH=/var/lib/nxv/index.db
+nxv serve  # bloom filter at /var/lib/nxv/index.bloom
+```
+
 ## Building an Index
 
 Requires the `indexer` feature and a local nixpkgs clone:

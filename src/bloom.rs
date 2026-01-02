@@ -2,7 +2,6 @@
 
 use crate::db::Database;
 use crate::error::Result;
-use crate::paths;
 use bloomfilter::Bloom;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
@@ -85,17 +84,21 @@ impl PackageBloomFilter {
     /// Regenerate the bloom filter from the database and save it.
     ///
     /// This is useful when the bloom filter is missing but the database exists.
-    /// The filter is saved to the standard bloom filter path.
-    pub fn regenerate_from_db(db: &Database) -> Result<()> {
+    /// The filter is saved to the specified path.
+    ///
+    /// # Arguments
+    /// * `db` - The database to build the bloom filter from
+    /// * `bloom_path` - Path where the bloom filter should be saved
+    pub fn regenerate_from_db<P: AsRef<Path>>(db: &Database, bloom_path: P) -> Result<()> {
         let filter = Self::build_from_db(db)?;
-        let bloom_path = paths::get_bloom_path();
+        let bloom_path = bloom_path.as_ref();
 
         // Ensure parent directory exists
         if let Some(parent) = bloom_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
-        filter.save(&bloom_path)?;
+        filter.save(bloom_path)?;
         Ok(())
     }
 }

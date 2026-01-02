@@ -1,6 +1,6 @@
 //! Path utilities for nxv data storage.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Get the data directory for nxv.
 ///
@@ -20,27 +20,29 @@ pub fn get_index_path() -> PathBuf {
     get_data_dir().join("index.db")
 }
 
-/// Provides the filesystem path to the nxv bloom filter file.
+/// Derives the bloom filter path from the database path.
 ///
-/// If the `NXV_BLOOM_PATH` environment variable is set, its value is used as the path.
-/// Otherwise the file is located at `<data_dir>/index.bloom`, where `data_dir` is returned by `get_data_dir()`.
+/// The bloom filter is stored as a sibling file to the database with `.bloom` extension.
+/// For example, if the database is at `/var/lib/nxv/index.db`, the bloom filter
+/// will be at `/var/lib/nxv/index.bloom`.
 ///
 /// # Examples
 ///
 /// ```
-/// std::env::remove_var("NXV_BLOOM_PATH");
-/// let path = nxv::paths::get_bloom_path();
-/// assert!(path.ends_with("index.bloom"));
+/// use std::path::PathBuf;
+/// use nxv::paths::get_bloom_path_for_db;
 ///
-/// std::env::set_var("NXV_BLOOM_PATH", "/tmp/custom.bloom");
-/// let overridden = nxv::paths::get_bloom_path();
-/// assert_eq!(overridden, std::path::PathBuf::from("/tmp/custom.bloom"));
+/// let db_path = PathBuf::from("/var/lib/nxv/index.db");
+/// let bloom_path = get_bloom_path_for_db(&db_path);
+/// assert_eq!(bloom_path, PathBuf::from("/var/lib/nxv/index.bloom"));
+///
+/// let db_path = PathBuf::from("my-index.db");
+/// let bloom_path = get_bloom_path_for_db(&db_path);
+/// assert_eq!(bloom_path, PathBuf::from("my-index.bloom"));
 /// ```
-pub fn get_bloom_path() -> PathBuf {
-    std::env::var("NXV_BLOOM_PATH")
-        .ok()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| get_data_dir().join("index.bloom"))
+pub fn get_bloom_path_for_db<P: AsRef<Path>>(db_path: P) -> PathBuf {
+    let db_path = db_path.as_ref();
+    db_path.with_extension("bloom")
 }
 
 /// Ensures the nxv data directory exists, creating it and any missing parents if necessary.
@@ -87,13 +89,23 @@ mod tests {
     }
 
     #[test]
-    fn test_get_bloom_path_is_in_data_dir() {
-        let data_dir = get_data_dir();
-        let bloom_path = get_bloom_path();
-        assert!(bloom_path.starts_with(&data_dir));
-        assert_eq!(
-            bloom_path.file_name().unwrap().to_str().unwrap(),
-            "index.bloom"
-        );
+    fn test_get_bloom_path_for_db_derives_from_db_path() {
+        let db_path = PathBuf::from("/var/lib/nxv/index.db");
+        let bloom_path = get_bloom_path_for_db(&db_path);
+        assert_eq!(bloom_path, PathBuf::from("/var/lib/nxv/index.bloom"));
+    }
+
+    #[test]
+    fn test_get_bloom_path_for_db_handles_different_names() {
+        let db_path = PathBuf::from("/tmp/custom.db");
+        let bloom_path = get_bloom_path_for_db(&db_path);
+        assert_eq!(bloom_path, PathBuf::from("/tmp/custom.bloom"));
+    }
+
+    #[test]
+    fn test_get_bloom_path_for_db_relative_path() {
+        let db_path = PathBuf::from("data/index.db");
+        let bloom_path = get_bloom_path_for_db(&db_path);
+        assert_eq!(bloom_path, PathBuf::from("data/index.bloom"));
     }
 }

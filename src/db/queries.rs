@@ -354,19 +354,25 @@ pub fn get_version_history(
     conn: &rusqlite::Connection,
     package: &str,
 ) -> Result<Vec<VersionHistoryEntry>> {
+    // Query history for the specific attribute path, but check if ANY package
+    // with the same version has vulnerabilities (since insecurity is about the
+    // version, not the attribute path - e.g., Python 2.7 is EOL regardless of
+    // whether it's called "python" or "python27")
     let mut stmt = conn.prepare(
         r#"
-        SELECT version,
-               MIN(first_commit_date) as first_seen,
-               MAX(last_commit_date) as last_seen,
-               MAX(CASE WHEN known_vulnerabilities IS NOT NULL
-                        AND known_vulnerabilities != ''
-                        AND known_vulnerabilities != '[]'
-                        AND known_vulnerabilities != 'null'
-                   THEN 1 ELSE 0 END) as is_insecure
-        FROM package_versions
-        WHERE attribute_path = ?
-        GROUP BY version
+        SELECT pv.version,
+               MIN(pv.first_commit_date) as first_seen,
+               MAX(pv.last_commit_date) as last_seen,
+               COALESCE((SELECT 1 FROM package_versions pv2
+                         WHERE pv2.version = pv.version
+                         AND pv2.known_vulnerabilities IS NOT NULL
+                         AND pv2.known_vulnerabilities != ''
+                         AND pv2.known_vulnerabilities != '[]'
+                         AND pv2.known_vulnerabilities != 'null'
+                         LIMIT 1), 0) as is_insecure
+        FROM package_versions pv
+        WHERE pv.attribute_path = ?
+        GROUP BY pv.version
         ORDER BY first_seen DESC
         "#,
     )?;

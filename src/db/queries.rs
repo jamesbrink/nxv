@@ -94,7 +94,7 @@ impl PackageVersion {
 
         if self.predates_flakes() {
             format!(
-                "{}nix-shell -p '(import (fetchTarball \"https://github.com/NixOS/nixpkgs/archive/{}.tar.gz\") {{}}).{}'",
+                "{}nix-shell -p '(import (builtins.fetchTarball \"https://github.com/NixOS/nixpkgs/archive/{}.tar.gz\") {{}}).{}'",
                 insecure_prefix,
                 self.last_commit_short(),
                 self.attribute_path
@@ -127,7 +127,7 @@ impl PackageVersion {
 
         if self.predates_flakes() {
             format!(
-                "{}nix-shell -p '(import (fetchTarball \"https://github.com/NixOS/nixpkgs/archive/{}.tar.gz\") {{}}).{}' --run {}",
+                "{}nix-shell -p '(import (builtins.fetchTarball \"https://github.com/NixOS/nixpkgs/archive/{}.tar.gz\") {{}}).{}' --run {}",
                 insecure_prefix,
                 self.last_commit_short(),
                 self.attribute_path,
@@ -928,7 +928,7 @@ mod tests {
         let pkg = make_test_package(Utc.timestamp_opt(1546300800, 0).unwrap(), None);
         let cmd = pkg.nix_shell_cmd();
         assert!(cmd.starts_with("nix-shell -p"));
-        assert!(cmd.contains("fetchTarball"));
+        assert!(cmd.contains("builtins.fetchTarball"));
         assert!(cmd.contains("def1234"));
         assert!(!cmd.contains("NIXPKGS_ALLOW_INSECURE"));
     }
@@ -943,7 +943,7 @@ mod tests {
         let cmd = pkg.nix_shell_cmd();
         assert!(cmd.starts_with("NIXPKGS_ALLOW_INSECURE=1 "));
         assert!(cmd.contains("nix-shell -p"));
-        assert!(cmd.contains("fetchTarball"));
+        assert!(cmd.contains("builtins.fetchTarball"));
         // Legacy commands don't use --impure
         assert!(!cmd.contains("--impure"));
     }

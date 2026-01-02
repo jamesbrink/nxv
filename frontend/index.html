@@ -1152,10 +1152,10 @@
         const impureFlag = pkgInsecure ? ' --impure' : '';
 
         const nixExpr = isLegacy
-          ? `(import (fetchTarball "https://github.com/NixOS/nixpkgs/archive/${shortHash}.tar.gz") {}).${pkg.attribute_path}`
+          ? `(import (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/${shortHash}.tar.gz") {}).${pkg.attribute_path}`
           : `nixpkgs#${pkg.attribute_path}  # or nixpkgs/${shortHash}#${pkg.attribute_path}`;
         const nixShell = isLegacy
-          ? `${insecurePrefix}nix-shell -p '(import (fetchTarball "https://github.com/NixOS/nixpkgs/archive/${shortHash}.tar.gz") {}).${pkg.attribute_path}'`
+          ? `${insecurePrefix}nix-shell -p '(import (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/${shortHash}.tar.gz") {}).${pkg.attribute_path}'`
           : `${insecurePrefix}nix shell${impureFlag} nixpkgs/${shortHash}#${pkg.attribute_path}`;
 
         // Store expressions in the map
@@ -1360,7 +1360,7 @@
               const insecurePrefix = versionInsecure ? 'NIXPKGS_ALLOW_INSECURE=1 ' : '';
               const impureFlag = versionInsecure ? ' --impure' : '';
               const nixExpr = isLegacy
-                ? `${insecurePrefix}nix-shell -p '(import (fetchTarball "https://github.com/NixOS/nixpkgs/archive/${shortHash}.tar.gz") {}).${attr}'`
+                ? `${insecurePrefix}nix-shell -p '(import (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/${shortHash}.tar.gz") {}).${attr}'`
                 : `${insecurePrefix}nix shell${impureFlag} nixpkgs/${shortHash}#${attr}`;
               expressionStore.set(`history-${escapedAttr}-${v.idx}`, nixExpr);
             }

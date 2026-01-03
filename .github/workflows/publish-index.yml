@@ -26,6 +26,8 @@ jobs:
   update-index:
     name: Update Package Index
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout nxv
@@ -137,9 +139,8 @@ jobs:
             exit 0
           fi
 
-          # Add fixed buffer of 1000 to ensure we don't miss commits
-          DEPTH=$((AHEAD + 1000))
-          echo "Commits ahead: ${AHEAD}, buffer: 1000, clone depth: ${DEPTH}"
+          DEPTH=$((AHEAD + 10))
+          echo "Commits ahead: ${AHEAD}, clone depth: ${DEPTH}"
           echo "depth=${DEPTH}" >> $GITHUB_OUTPUT
           echo "strategy=shallow" >> $GITHUB_OUTPUT
 

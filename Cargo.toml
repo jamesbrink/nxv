@@ -2,7 +2,7 @@
 name = "nxv"
 version = "0.1.0"
 edition = "2024"
-description = "CLI tool for finding specific versions of Nix packages"
+description = "Nix Version Index"
 license = "MIT"
 repository = "https://github.com/jamesbrink/nxv"
 keywords = ["nix", "nixpkgs", "package", "version"]

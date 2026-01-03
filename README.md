@@ -1,4 +1,4 @@
-# nxv
+# nxv — Nix Version Index
 
 [![CI](https://github.com/jamesbrink/nxv/actions/workflows/ci.yml/badge.svg)](https://github.com/jamesbrink/nxv/actions/workflows/ci.yml)
 [![Release](https://github.com/jamesbrink/nxv/actions/workflows/release.yml/badge.svg)](https://github.com/jamesbrink/nxv/actions/workflows/release.yml)

@@ -390,6 +390,7 @@ fn cmd_update(cli: &Cli, args: &cli::UpdateArgs) -> Result<()> {
         show_progress,
         args.skip_verify,
         args.public_key.as_deref(),
+        Some(cli.api_timeout),
     )?;
 
     match status {
@@ -1291,23 +1292,13 @@ fn cmd_publish(cli: &Cli, args: &cli::PublishArgs) -> Result<()> {
 fn cmd_keygen(cli: &Cli, args: &cli::KeygenArgs) -> Result<()> {
     use crate::index::publisher::generate_keypair;
 
-    // Check if files already exist
-    if !args.force {
-        if args.secret_key.exists() {
-            return Err(anyhow::anyhow!(
-                "Secret key '{}' already exists. Use --force to overwrite.",
-                args.secret_key.display()
-            ));
-        }
-        if args.public_key.exists() {
-            return Err(anyhow::anyhow!(
-                "Public key '{}' already exists. Use --force to overwrite.",
-                args.public_key.display()
-            ));
-        }
-    }
-
-    let pk_base64 = generate_keypair(&args.secret_key, &args.public_key, &args.comment)?;
+    // generate_keypair handles force check atomically to avoid TOCTOU race
+    let pk_base64 = generate_keypair(
+        &args.secret_key,
+        &args.public_key,
+        &args.comment,
+        args.force,
+    )?;
 
     if !cli.quiet {
         eprintln!("Generated keypair:");

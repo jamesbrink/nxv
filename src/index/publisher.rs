@@ -9,7 +9,7 @@ use crate::remote::manifest::{DeltaFile, IndexFile, Manifest};
 use chrono::Utc;
 use indicatif::{ProgressBar, ProgressStyle};
 use sha2::{Digest, Sha256};
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
@@ -33,6 +33,7 @@ pub const MANIFEST_SIG_NAME: &str = "manifest.json.minisig";
 /// * `secret_key_path` - Where to save the secret key
 /// * `public_key_path` - Where to save the public key
 /// * `comment` - Comment to embed in the key files
+/// * `force` - If true, overwrite existing files; if false, fail if files exist
 ///
 /// # Returns
 /// The public key string (for embedding in applications).
@@ -40,24 +41,25 @@ pub fn generate_keypair<P: AsRef<Path>, Q: AsRef<Path>>(
     secret_key_path: P,
     public_key_path: Q,
     comment: &str,
+    force: bool,
 ) -> Result<String> {
     let secret_key_path = secret_key_path.as_ref();
     let public_key_path = public_key_path.as_ref();
 
     // Generate keypair
     let keypair = minisign::KeyPair::generate_unencrypted_keypair()
-        .map_err(|e| NxvError::NetworkMessage(format!("Failed to generate keypair: {}", e)))?;
+        .map_err(|e| NxvError::Signing(format!("failed to generate keypair: {}", e)))?;
 
     // Serialize with comment
     let sk_box = keypair
         .sk
         .to_box(None)
-        .map_err(|e| NxvError::NetworkMessage(format!("Failed to serialize secret key: {}", e)))?;
+        .map_err(|e| NxvError::Signing(format!("failed to serialize secret key: {}", e)))?;
 
     let pk_box = keypair
         .pk
         .to_box()
-        .map_err(|e| NxvError::NetworkMessage(format!("Failed to serialize public key: {}", e)))?;
+        .map_err(|e| NxvError::Signing(format!("failed to serialize public key: {}", e)))?;
 
     // Add custom comment to the key files
     let sk_str = sk_box.to_string();
@@ -74,27 +76,60 @@ pub fn generate_keypair<P: AsRef<Path>, Q: AsRef<Path>>(
         1,
     );
 
-    // Write key files
-    fs::write(secret_key_path, &sk_with_comment).map_err(|e| {
-        NxvError::NetworkMessage(format!(
-            "Failed to write secret key '{}': {}",
-            secret_key_path.display(),
-            e
-        ))
-    })?;
-
-    fs::write(public_key_path, &pk_with_comment).map_err(|e| {
-        NxvError::NetworkMessage(format!(
-            "Failed to write public key '{}': {}",
-            public_key_path.display(),
-            e
-        ))
-    })?;
+    // Write key files atomically (use create_new to avoid TOCTOU race)
+    write_key_file(secret_key_path, &sk_with_comment, force, "secret key")?;
+    write_key_file(public_key_path, &pk_with_comment, force, "public key")?;
 
     // Extract the base64 public key for embedding
     let pk_base64 = pk_with_comment.lines().nth(1).unwrap_or("").to_string();
 
     Ok(pk_base64)
+}
+
+/// Write a key file, optionally refusing to overwrite existing files.
+fn write_key_file(path: &Path, content: &str, force: bool, key_type: &str) -> Result<()> {
+    if force {
+        // Overwrite any existing file
+        fs::write(path, content).map_err(|e| {
+            NxvError::Signing(format!(
+                "failed to write {} '{}': {}",
+                key_type,
+                path.display(),
+                e
+            ))
+        })
+    } else {
+        // Use create_new to atomically check existence and create
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::AlreadyExists {
+                    NxvError::Signing(format!(
+                        "{} '{}' already exists. Use --force to overwrite.",
+                        key_type,
+                        path.display()
+                    ))
+                } else {
+                    NxvError::Signing(format!(
+                        "failed to create {} '{}': {}",
+                        key_type,
+                        path.display(),
+                        e
+                    ))
+                }
+            })?;
+
+        file.write_all(content.as_bytes()).map_err(|e| {
+            NxvError::Signing(format!(
+                "failed to write {} '{}': {}",
+                key_type,
+                path.display(),
+                e
+            ))
+        })
+    }
 }
 
 /// Sign a manifest file using a minisign secret key.
@@ -119,8 +154,8 @@ pub fn sign_manifest<P: AsRef<Path>, Q: AsRef<Path>>(
 
     // Read the secret key file
     let sk_string = fs::read_to_string(secret_key_path).map_err(|e| {
-        NxvError::NetworkMessage(format!(
-            "Failed to read secret key '{}': {}",
+        NxvError::Signing(format!(
+            "failed to read secret key '{}': {}",
             secret_key_path.display(),
             e
         ))
@@ -128,20 +163,20 @@ pub fn sign_manifest<P: AsRef<Path>, Q: AsRef<Path>>(
 
     // Parse the secret key
     let sk_box = minisign::SecretKeyBox::from_string(&sk_string)
-        .map_err(|e| NxvError::NetworkMessage(format!("Failed to parse secret key: {}", e)))?;
+        .map_err(|e| NxvError::Signing(format!("failed to parse secret key: {}", e)))?;
 
     // Load as unencrypted key
     let sk = sk_box.into_unencrypted_secret_key().map_err(|e| {
-        NxvError::NetworkMessage(format!(
-            "Failed to load secret key ({}). Keys must be generated with 'nxv keygen'.",
+        NxvError::Signing(format!(
+            "failed to load secret key ({}). Keys must be generated with 'nxv keygen'.",
             e
         ))
     })?;
 
     // Read the manifest content
     let manifest_content = fs::read(manifest_path).map_err(|e| {
-        NxvError::NetworkMessage(format!(
-            "Failed to read manifest '{}': {}",
+        NxvError::Signing(format!(
+            "failed to read manifest '{}': {}",
             manifest_path.display(),
             e
         ))
@@ -157,13 +192,13 @@ pub fn sign_manifest<P: AsRef<Path>, Q: AsRef<Path>>(
         Some("nxv manifest signature"),
         Some(&trusted_comment),
     )
-    .map_err(|e| NxvError::NetworkMessage(format!("Failed to sign manifest: {}", e)))?;
+    .map_err(|e| NxvError::Signing(format!("failed to sign manifest: {}", e)))?;
 
     // Write the signature file
     let sig_path = manifest_path.with_extension("json.minisig");
     fs::write(&sig_path, sig_box.to_string()).map_err(|e| {
-        NxvError::NetworkMessage(format!(
-            "Failed to write signature file '{}': {}",
+        NxvError::Signing(format!(
+            "failed to write signature file '{}': {}",
             sig_path.display(),
             e
         ))
@@ -859,7 +894,7 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
-            err_msg.contains("Failed to read secret key"),
+            err_msg.contains("failed to read secret key"),
             "Unexpected error: {}",
             err_msg
         );
@@ -880,8 +915,8 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
-            err_msg.contains("Failed to parse secret key")
-                || err_msg.contains("Failed to load secret key"),
+            err_msg.contains("failed to parse secret key")
+                || err_msg.contains("failed to load secret key"),
             "Unexpected error: {}",
             err_msg
         );
@@ -895,7 +930,7 @@ mod tests {
         let manifest_path = dir.path().join("manifest.json");
 
         // Generate keypair
-        let pk = generate_keypair(&sk_path, &pk_path, "test key").unwrap();
+        let pk = generate_keypair(&sk_path, &pk_path, "test key", false).unwrap();
         assert!(!pk.is_empty());
         assert!(sk_path.exists());
         assert!(pk_path.exists());
@@ -911,6 +946,31 @@ mod tests {
         let sig_content = fs::read_to_string(&sig_path).unwrap();
         assert!(sig_content.contains("untrusted comment:"));
         assert!(sig_content.contains("trusted comment:"));
+    }
+
+    #[test]
+    fn test_generate_keypair_force_overwrite() {
+        let dir = tempdir().unwrap();
+        let sk_path = dir.path().join("test.key");
+        let pk_path = dir.path().join("test.pub");
+
+        // Generate first keypair
+        let pk1 = generate_keypair(&sk_path, &pk_path, "first key", false).unwrap();
+        let sk1_content = fs::read_to_string(&sk_path).unwrap();
+
+        // Try to generate again without force - should fail
+        let result = generate_keypair(&sk_path, &pk_path, "second key", false);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("already exists"));
+
+        // Generate again with force - should succeed
+        let pk2 = generate_keypair(&sk_path, &pk_path, "second key", true).unwrap();
+        let sk2_content = fs::read_to_string(&sk_path).unwrap();
+
+        // Keys should be different (new keypair generated)
+        assert_ne!(pk1, pk2);
+        assert_ne!(sk1_content, sk2_content);
     }
 
     #[test]

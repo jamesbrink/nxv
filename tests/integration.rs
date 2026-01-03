@@ -2627,3 +2627,179 @@ fn test_index_then_search_workflow() {
         }
     }
 }
+
+// ============================================================================
+// Signing Workflow Tests (Indexer Feature)
+// ============================================================================
+
+/// Test the keygen command generates valid keypair files.
+#[test]
+#[cfg_attr(not(feature = "indexer"), ignore)]
+fn test_keygen_generates_keypair() {
+    let dir = tempdir().unwrap();
+    let sk_path = dir.path().join("test.key");
+    let pk_path = dir.path().join("test.pub");
+
+    // Generate keypair
+    nxv()
+        .args([
+            "keygen",
+            "--secret-key",
+            sk_path.to_str().unwrap(),
+            "--public-key",
+            pk_path.to_str().unwrap(),
+            "--comment",
+            "test signing key",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Generated keypair"))
+        .stderr(predicate::str::contains("Secret key:"))
+        .stderr(predicate::str::contains("Public key:"));
+
+    // Verify files exist and have expected content
+    assert!(sk_path.exists(), "Secret key should be created");
+    assert!(pk_path.exists(), "Public key should be created");
+
+    let sk_content = std::fs::read_to_string(&sk_path).unwrap();
+    assert!(
+        sk_content.contains("untrusted comment:"),
+        "Secret key should have comment"
+    );
+
+    let pk_content = std::fs::read_to_string(&pk_path).unwrap();
+    assert!(
+        pk_content.contains("untrusted comment:"),
+        "Public key should have comment"
+    );
+    assert!(
+        pk_content.contains("RW"),
+        "Public key should contain RW prefix"
+    );
+}
+
+/// Test that keygen fails when files already exist without --force.
+#[test]
+#[cfg_attr(not(feature = "indexer"), ignore)]
+fn test_keygen_refuses_overwrite_without_force() {
+    let dir = tempdir().unwrap();
+    let sk_path = dir.path().join("test.key");
+    let pk_path = dir.path().join("test.pub");
+
+    // Create existing files
+    std::fs::write(&sk_path, "existing key content").unwrap();
+    std::fs::write(&pk_path, "existing pub content").unwrap();
+
+    // keygen should fail without --force
+    nxv()
+        .args([
+            "keygen",
+            "--secret-key",
+            sk_path.to_str().unwrap(),
+            "--public-key",
+            pk_path.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already exists"));
+
+    // Files should be unchanged
+    let sk_content = std::fs::read_to_string(&sk_path).unwrap();
+    assert_eq!(sk_content, "existing key content");
+}
+
+/// Test that keygen with --force overwrites existing files.
+#[test]
+#[cfg_attr(not(feature = "indexer"), ignore)]
+fn test_keygen_force_overwrites() {
+    let dir = tempdir().unwrap();
+    let sk_path = dir.path().join("test.key");
+    let pk_path = dir.path().join("test.pub");
+
+    // Create existing files
+    std::fs::write(&sk_path, "existing key content").unwrap();
+    std::fs::write(&pk_path, "existing pub content").unwrap();
+
+    // keygen with --force should succeed
+    nxv()
+        .args([
+            "keygen",
+            "--force",
+            "--secret-key",
+            sk_path.to_str().unwrap(),
+            "--public-key",
+            pk_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    // Files should be overwritten with real keys
+    let sk_content = std::fs::read_to_string(&sk_path).unwrap();
+    assert!(
+        sk_content.contains("untrusted comment:"),
+        "Secret key should be a valid key format"
+    );
+}
+
+/// Test the full publish with signing workflow.
+#[test]
+#[cfg_attr(not(feature = "indexer"), ignore)]
+fn test_publish_with_signing() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    let output_dir = dir.path().join("publish");
+    let sk_path = dir.path().join("signing.key");
+    let pk_path = dir.path().join("signing.pub");
+
+    // Create a test database
+    create_test_db(&db_path);
+
+    // Generate signing keypair
+    nxv()
+        .args([
+            "keygen",
+            "--secret-key",
+            sk_path.to_str().unwrap(),
+            "--public-key",
+            pk_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    // Publish with signing
+    nxv()
+        .args([
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "publish",
+            "--output",
+            output_dir.to_str().unwrap(),
+            "--sign",
+            "--secret-key",
+            sk_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Signing manifest"))
+        .stderr(predicate::str::contains("manifest.json.minisig"));
+
+    // Verify all artifacts exist
+    assert!(output_dir.join("index.db.zst").exists());
+    assert!(output_dir.join("bloom.bin").exists());
+    assert!(output_dir.join("manifest.json").exists());
+    assert!(
+        output_dir.join("manifest.json.minisig").exists(),
+        "Signature file should be created"
+    );
+
+    // Verify signature file format
+    let sig_content = std::fs::read_to_string(output_dir.join("manifest.json.minisig")).unwrap();
+    assert!(
+        sig_content.contains("untrusted comment:"),
+        "Signature should have untrusted comment"
+    );
+    assert!(
+        sig_content.contains("trusted comment:"),
+        "Signature should have trusted comment"
+    );
+}

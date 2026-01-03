@@ -11,30 +11,37 @@ use std::path::Path;
 pub const DEFAULT_MANIFEST_URL: &str =
     "https://github.com/jamesbrink/nxv/releases/download/index-latest/manifest.json";
 
+/// Default timeout for manifest requests in seconds.
+const DEFAULT_MANIFEST_TIMEOUT_SECS: u64 = 30;
+
 /// Resolve a public key argument to its content.
 ///
 /// The key can be either:
+/// - A path to a .pub file containing the key (checked first)
 /// - A raw minisign public key (starts with "untrusted comment:" or "RW")
-/// - A path to a .pub file containing the key
+///
+/// File paths are checked first to avoid ambiguity with paths that happen
+/// to start with "RW" (e.g., "RWkeys/signing.pub").
 fn resolve_public_key(key: &str) -> Result<String> {
-    // Check if it looks like a raw key
-    if key.starts_with("untrusted comment:") || key.starts_with("RW") {
-        return Ok(key.to_string());
-    }
-
-    // Try to read as a file path
+    // Check if it's a file path first (handles paths like "RWkeys/signing.pub")
     let path = Path::new(key);
     if path.exists() {
         let content = std::fs::read_to_string(path).map_err(|e| {
             NxvError::NetworkMessage(format!("Failed to read public key file '{}': {}", key, e))
         })?;
-        Ok(content)
-    } else {
-        Err(NxvError::NetworkMessage(format!(
-            "Public key '{}' is not a valid key or file path",
-            key
-        )))
+        return Ok(content);
     }
+
+    // Check if it looks like a raw key (inline key content)
+    if key.starts_with("untrusted comment:") || key.starts_with("RW") {
+        return Ok(key.to_string());
+    }
+
+    // Neither a valid file nor a raw key format
+    Err(NxvError::NetworkMessage(format!(
+        "Public key '{}' is not a valid key or file path",
+        key
+    )))
 }
 
 /// Update status after checking for updates.
@@ -62,11 +69,18 @@ pub fn check_for_updates<P: AsRef<Path>>(
     show_progress: bool,
     skip_verify: bool,
     public_key: Option<&str>,
+    timeout_secs: Option<u64>,
 ) -> Result<UpdateStatus> {
     let manifest_url = manifest_url.unwrap_or(DEFAULT_MANIFEST_URL);
 
     // Fetch the manifest
-    let manifest = fetch_manifest(manifest_url, show_progress, skip_verify, public_key)?;
+    let manifest = fetch_manifest(
+        manifest_url,
+        show_progress,
+        skip_verify,
+        public_key,
+        timeout_secs,
+    )?;
 
     // Check if local index exists
     let db_path = db_path.as_ref();
@@ -117,9 +131,11 @@ fn fetch_manifest(
     show_progress: bool,
     skip_verify: bool,
     public_key: Option<&str>,
+    timeout_secs: Option<u64>,
 ) -> Result<Manifest> {
+    let timeout = timeout_secs.unwrap_or(DEFAULT_MANIFEST_TIMEOUT_SECS);
     let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(timeout))
         .build()?;
 
     // Download manifest JSON
@@ -201,9 +217,16 @@ pub fn apply_full_update<P: AsRef<Path>>(
     show_progress: bool,
     skip_verify: bool,
     public_key: Option<&str>,
+    timeout_secs: Option<u64>,
 ) -> Result<()> {
     let manifest_url = manifest_url.unwrap_or(DEFAULT_MANIFEST_URL);
-    let manifest = fetch_manifest(manifest_url, show_progress, skip_verify, public_key)?;
+    let manifest = fetch_manifest(
+        manifest_url,
+        show_progress,
+        skip_verify,
+        public_key,
+        timeout_secs,
+    )?;
 
     let db_path = db_path.as_ref();
 
@@ -241,11 +264,18 @@ pub fn apply_delta_update<P: AsRef<Path>>(
     show_progress: bool,
     skip_verify: bool,
     public_key: Option<&str>,
+    timeout_secs: Option<u64>,
 ) -> Result<()> {
     use crate::db::import::import_delta_sql;
 
     let manifest_url = manifest_url.unwrap_or(DEFAULT_MANIFEST_URL);
-    let manifest = fetch_manifest(manifest_url, show_progress, skip_verify, public_key)?;
+    let manifest = fetch_manifest(
+        manifest_url,
+        show_progress,
+        skip_verify,
+        public_key,
+        timeout_secs,
+    )?;
 
     let delta = manifest.find_delta(from_commit).ok_or_else(|| {
         NxvError::NetworkMessage(format!("No delta available from commit {}", from_commit))
@@ -297,6 +327,7 @@ pub fn perform_update<P: AsRef<Path>>(
     show_progress: bool,
     skip_verify: bool,
     public_key: Option<&str>,
+    timeout_secs: Option<u64>,
 ) -> Result<UpdateStatus> {
     let status = check_for_updates(
         &db_path,
@@ -304,6 +335,7 @@ pub fn perform_update<P: AsRef<Path>>(
         show_progress,
         skip_verify,
         public_key,
+        timeout_secs,
     )?;
 
     match &status {
@@ -319,6 +351,7 @@ pub fn perform_update<P: AsRef<Path>>(
                 show_progress,
                 skip_verify,
                 public_key,
+                timeout_secs,
             )?;
         }
         UpdateStatus::DeltaAvailable { from_commit, .. } => {
@@ -329,6 +362,7 @@ pub fn perform_update<P: AsRef<Path>>(
                     show_progress,
                     skip_verify,
                     public_key,
+                    timeout_secs,
                 )?;
             } else {
                 apply_delta_update(
@@ -338,6 +372,7 @@ pub fn perform_update<P: AsRef<Path>>(
                     show_progress,
                     skip_verify,
                     public_key,
+                    timeout_secs,
                 )?;
             }
         }

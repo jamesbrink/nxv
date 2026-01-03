@@ -53,6 +53,10 @@ pub enum NxvError {
     #[cfg(feature = "indexer")]
     #[error("Not a nixpkgs repository: {0}")]
     NotNixpkgsRepo(String),
+
+    #[cfg(feature = "indexer")]
+    #[error("Signing error: {0}")]
+    Signing(String),
 }
 
 /// Result type alias for nxv operations.
@@ -200,6 +204,14 @@ mod tests {
             let msg = err.to_string();
             assert!(msg.contains("/some/path"));
             assert!(msg.contains("nixpkgs"));
+        }
+
+        #[test]
+        fn test_signing_error_message() {
+            let err = NxvError::Signing("failed to generate keypair".to_string());
+            let msg = err.to_string();
+            assert!(msg.contains("Signing error"));
+            assert!(msg.contains("failed to generate keypair"));
         }
     }
 }

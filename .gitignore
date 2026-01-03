@@ -32,7 +32,6 @@ Thumbs.db
 *.key
 keys/nxv.key
 
-
 # Added by cargo
 
 /target

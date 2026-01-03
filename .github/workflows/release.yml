@@ -200,14 +200,26 @@ jobs:
 
       - name: Push to GHCR
         run: |
-          # Load the image built by Nix
-          docker load < result
+          # Load the image built by Nix and capture output
+          LOAD_OUTPUT=$(docker load < result)
+          echo "$LOAD_OUTPUT"
+
+          # Parse the loaded image reference from docker load output
+          # Format: "Loaded image: repo:tag" or "Loaded image ID: sha256:..."
+          if echo "$LOAD_OUTPUT" | grep -q "Loaded image:"; then
+            IMAGE_NAME=$(echo "$LOAD_OUTPUT" | sed -n 's/.*Loaded image: //p')
+          elif echo "$LOAD_OUTPUT" | grep -q "Loaded image ID:"; then
+            IMAGE_ID=$(echo "$LOAD_OUTPUT" | sed -n 's/.*Loaded image ID: //p')
+            IMAGE_NAME="$IMAGE_ID"
+          else
+            echo "Error: Could not parse docker load output"
+            exit 1
+          fi
+
+          echo "Loaded image: $IMAGE_NAME"
 
           # Get version from tag (strip 'v' prefix)
           VERSION=${GITHUB_REF_NAME#v}
-
-          # Get the image name from the tarball
-          IMAGE_NAME=$(docker images --format '{{.Repository}}:{{.Tag}}' | head -1)
 
           # Tag and push with version
           docker tag "$IMAGE_NAME" ghcr.io/${{ github.repository }}:${VERSION}

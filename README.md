@@ -6,6 +6,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
 [![Nix Flake](https://img.shields.io/badge/nix-flake-blue?logo=nixos)](https://nixos.wiki/wiki/Flakes)
+[![FlakeHub](https://img.shields.io/endpoint?url=https://flakehub.com/f/jamesbrink/nxv/badge)](https://flakehub.com/flake/jamesbrink/nxv)
 [![Built with Claude](https://img.shields.io/badge/Built%20with-Claude-D97757?logo=claude&logoColor=white)](https://claude.ai)
 
 **Find any version of any Nix package, instantly.**

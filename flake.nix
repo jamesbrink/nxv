@@ -199,11 +199,45 @@
           exit 1
         '';
 
+        # Docker image for nxv-indexer (Linux only)
+        nxv-docker = if pkgs.stdenv.isLinux then pkgs.dockerTools.buildLayeredImage {
+          name = "nxv";
+          tag = crateInfo.version;
+
+          contents = [
+            nxv-indexer
+            pkgs.cacert        # CA certificates for HTTPS
+            pkgs.tzdata        # Timezone data
+            pkgs.git           # Required for indexing nixpkgs
+          ];
+
+          config = {
+            Entrypoint = [ "${nxv-indexer}/bin/nxv" ];
+            Cmd = [ "serve" ];
+            ExposedPorts = {
+              "8080/tcp" = {};
+            };
+            Env = [
+              "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+              "TZ=UTC"
+            ];
+            Labels = {
+              "org.opencontainers.image.title" = "nxv";
+              "org.opencontainers.image.description" = "Nix Version Index - search nixpkgs package history";
+              "org.opencontainers.image.source" = "https://github.com/jamesbrink/nxv";
+              "org.opencontainers.image.version" = crateInfo.version;
+            };
+          };
+        } else pkgs.runCommand "nxv-docker-unavailable" {} ''
+          echo "Docker images are only available on Linux" >&2
+          exit 1
+        '';
+
       in
       {
         # Packages
         packages = {
-          inherit nxv nxv-indexer nxv-static;
+          inherit nxv nxv-indexer nxv-static nxv-docker;
           default = nxv;
         };
 

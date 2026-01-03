@@ -75,5 +75,79 @@ jobs:
       - name: Run integration tests
         run: cargo test --test integration
 
+  nix:
+    name: Nix Flake Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Setup Cachix
+        uses: cachix/cachix-action@v16
+        with:
+          name: nxv
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+
+      - name: Flake check
+        run: nix flake check
+
+  docker:
+    name: Build & Push Docker (latest)
+    runs-on: ubuntu-latest
+    # Only push on main branch, not PRs
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [test, nix]
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Setup Cachix
+        uses: cachix/cachix-action@v16
+        with:
+          name: nxv
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+
+      - name: Build Docker image
+        run: nix build .#packages.x86_64-linux.nxv-docker
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push to GHCR
+        run: |
+          # Load the image built by Nix and capture output
+          LOAD_OUTPUT=$(docker load < result)
+          echo "$LOAD_OUTPUT"
+
+          # Parse the loaded image reference from docker load output
+          # Format: "Loaded image: repo:tag" or "Loaded image ID: sha256:..."
+          if echo "$LOAD_OUTPUT" | grep -q "Loaded image:"; then
+            IMAGE_NAME=$(echo "$LOAD_OUTPUT" | sed -n 's/.*Loaded image: //p')
+          elif echo "$LOAD_OUTPUT" | grep -q "Loaded image ID:"; then
+            IMAGE_ID=$(echo "$LOAD_OUTPUT" | sed -n 's/.*Loaded image ID: //p')
+            IMAGE_NAME="$IMAGE_ID"
+          else
+            echo "Error: Could not parse docker load output"
+            exit 1
+          fi
+
+          echo "Loaded image: $IMAGE_NAME"
+
+          # Tag and push as latest
+          docker tag "$IMAGE_NAME" ghcr.io/${{ github.repository }}:latest
+          docker push ghcr.io/${{ github.repository }}:latest
+
   # Note: Release builds with static binaries are handled by .github/workflows/release.yml
   # which triggers on tag pushes (v*) and uses Nix for reproducible static musl builds

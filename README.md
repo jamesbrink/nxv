@@ -233,6 +233,42 @@ Run the API server as a systemd service with automatic updates:
 
 </details>
 
+## Docker
+
+Run nxv as a container using the official image from GitHub Container Registry:
+
+```bash
+# Run the API server (default command)
+docker run -p 8080:8080 ghcr.io/jamesbrink/nxv:latest
+
+# With persistent index storage
+docker run -p 8080:8080 -v nxv-data:/root/.local/share/nxv ghcr.io/jamesbrink/nxv:latest
+
+# Run other commands
+docker run ghcr.io/jamesbrink/nxv:latest search python
+docker run ghcr.io/jamesbrink/nxv:latest --help
+
+# Build an index (requires nixpkgs mount)
+docker run -v ./nixpkgs:/nixpkgs -v nxv-data:/root/.local/share/nxv \
+  ghcr.io/jamesbrink/nxv:latest index --nixpkgs-path /nixpkgs
+```
+
+**Tags:**
+- `latest` — Latest build from main branch
+- `x.y.z` — Specific version (e.g., `0.1.0`)
+
+The image includes the indexer feature, git, and CA certificates. By default it runs `nxv serve` on port 8080.
+
+### Build from Source with Nix
+
+```bash
+# Build the Docker image (Linux only)
+nix build .#packages.x86_64-linux.nxv-docker
+
+# Load into Docker
+docker load < result
+```
+
 ## Building Your Own Index
 
 The self-hosting workflow is:

@@ -319,6 +319,7 @@
           inputsFrom = [ nxv ];
 
           packages = [
+            pkgs.bashInteractive  # Use interactive bash (stdenv bash lacks readline/progcomp)
             pkgs.rust-analyzer
             pkgs.cargo-watch
             pkgs.cargo-edit

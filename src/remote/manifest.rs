@@ -96,8 +96,9 @@ pub fn verify_manifest_signature(manifest_data: &[u8], signature_str: &str) -> R
     Ok(())
 }
 
-/// Verify a manifest signature with a custom public key (for testing).
-#[allow(dead_code)]
+/// Verify a manifest signature with a custom public key.
+///
+/// Used for self-hosted indexes with custom signing keys.
 pub fn verify_manifest_signature_with_key(
     manifest_data: &[u8],
     signature_str: &str,

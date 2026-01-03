@@ -11,6 +11,32 @@ use std::path::Path;
 pub const DEFAULT_MANIFEST_URL: &str =
     "https://github.com/jamesbrink/nxv/releases/download/index-latest/manifest.json";
 
+/// Resolve a public key argument to its content.
+///
+/// The key can be either:
+/// - A raw minisign public key (starts with "untrusted comment:" or "RW")
+/// - A path to a .pub file containing the key
+fn resolve_public_key(key: &str) -> Result<String> {
+    // Check if it looks like a raw key
+    if key.starts_with("untrusted comment:") || key.starts_with("RW") {
+        return Ok(key.to_string());
+    }
+
+    // Try to read as a file path
+    let path = Path::new(key);
+    if path.exists() {
+        let content = std::fs::read_to_string(path).map_err(|e| {
+            NxvError::NetworkMessage(format!("Failed to read public key file '{}': {}", key, e))
+        })?;
+        Ok(content)
+    } else {
+        Err(NxvError::NetworkMessage(format!(
+            "Public key '{}' is not a valid key or file path",
+            key
+        )))
+    }
+}
+
 /// Update status after checking for updates.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -35,11 +61,12 @@ pub fn check_for_updates<P: AsRef<Path>>(
     manifest_url: Option<&str>,
     show_progress: bool,
     skip_verify: bool,
+    public_key: Option<&str>,
 ) -> Result<UpdateStatus> {
     let manifest_url = manifest_url.unwrap_or(DEFAULT_MANIFEST_URL);
 
     // Fetch the manifest
-    let manifest = fetch_manifest(manifest_url, show_progress, skip_verify)?;
+    let manifest = fetch_manifest(manifest_url, show_progress, skip_verify, public_key)?;
 
     // Check if local index exists
     let db_path = db_path.as_ref();
@@ -85,7 +112,12 @@ pub fn check_for_updates<P: AsRef<Path>>(
 ///
 /// When `skip_verify` is false, downloads the `.minisig` signature file
 /// and verifies the manifest using the embedded public key.
-fn fetch_manifest(url: &str, show_progress: bool, skip_verify: bool) -> Result<Manifest> {
+fn fetch_manifest(
+    url: &str,
+    show_progress: bool,
+    skip_verify: bool,
+    public_key: Option<&str>,
+) -> Result<Manifest> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
@@ -113,8 +145,21 @@ fn fetch_manifest(url: &str, show_progress: bool, skip_verify: bool) -> Result<M
         match client.get(&sig_url).send() {
             Ok(sig_response) if sig_response.status().is_success() => {
                 let signature = sig_response.text()?;
-                // Verify signature using embedded public key
-                Manifest::parse_and_verify(&manifest_json, &signature)?;
+
+                // Verify signature using custom or embedded public key
+                if let Some(key) = public_key {
+                    // Resolve key: could be raw key or path to .pub file
+                    let key_content = resolve_public_key(key)?;
+                    crate::remote::manifest::verify_manifest_signature_with_key(
+                        manifest_json.as_bytes(),
+                        &signature,
+                        &key_content,
+                    )?;
+                } else {
+                    // Use embedded public key
+                    Manifest::parse_and_verify(&manifest_json, &signature)?;
+                }
+
                 // Signature valid, return parsed manifest
                 let manifest: Manifest = serde_json::from_str(&manifest_json)?;
                 if manifest.version > 2 {
@@ -155,9 +200,10 @@ pub fn apply_full_update<P: AsRef<Path>>(
     db_path: P,
     show_progress: bool,
     skip_verify: bool,
+    public_key: Option<&str>,
 ) -> Result<()> {
     let manifest_url = manifest_url.unwrap_or(DEFAULT_MANIFEST_URL);
-    let manifest = fetch_manifest(manifest_url, show_progress, skip_verify)?;
+    let manifest = fetch_manifest(manifest_url, show_progress, skip_verify, public_key)?;
 
     let db_path = db_path.as_ref();
 
@@ -194,11 +240,12 @@ pub fn apply_delta_update<P: AsRef<Path>>(
     from_commit: &str,
     show_progress: bool,
     skip_verify: bool,
+    public_key: Option<&str>,
 ) -> Result<()> {
     use crate::db::import::import_delta_sql;
 
     let manifest_url = manifest_url.unwrap_or(DEFAULT_MANIFEST_URL);
-    let manifest = fetch_manifest(manifest_url, show_progress, skip_verify)?;
+    let manifest = fetch_manifest(manifest_url, show_progress, skip_verify, public_key)?;
 
     let delta = manifest.find_delta(from_commit).ok_or_else(|| {
         NxvError::NetworkMessage(format!("No delta available from commit {}", from_commit))
@@ -249,8 +296,15 @@ pub fn perform_update<P: AsRef<Path>>(
     force_full: bool,
     show_progress: bool,
     skip_verify: bool,
+    public_key: Option<&str>,
 ) -> Result<UpdateStatus> {
-    let status = check_for_updates(&db_path, manifest_url, show_progress, skip_verify)?;
+    let status = check_for_updates(
+        &db_path,
+        manifest_url,
+        show_progress,
+        skip_verify,
+        public_key,
+    )?;
 
     match &status {
         UpdateStatus::UpToDate { commit } => {
@@ -259,11 +313,23 @@ pub fn perform_update<P: AsRef<Path>>(
             }
         }
         UpdateStatus::NoLocalIndex { .. } | UpdateStatus::FullDownloadNeeded { .. } => {
-            apply_full_update(manifest_url, &db_path, show_progress, skip_verify)?;
+            apply_full_update(
+                manifest_url,
+                &db_path,
+                show_progress,
+                skip_verify,
+                public_key,
+            )?;
         }
         UpdateStatus::DeltaAvailable { from_commit, .. } => {
             if force_full {
-                apply_full_update(manifest_url, &db_path, show_progress, skip_verify)?;
+                apply_full_update(
+                    manifest_url,
+                    &db_path,
+                    show_progress,
+                    skip_verify,
+                    public_key,
+                )?;
             } else {
                 apply_delta_update(
                     manifest_url,
@@ -271,6 +337,7 @@ pub fn perform_update<P: AsRef<Path>>(
                     from_commit,
                     show_progress,
                     skip_verify,
+                    public_key,
                 )?;
             }
         }
@@ -520,5 +587,40 @@ COMMIT;
             )
             .unwrap();
         assert_eq!(commit, "commit_v3");
+    }
+
+    #[test]
+    fn test_resolve_public_key_raw_key() {
+        // Test with a raw key starting with "RW"
+        let key = "RWSBt4RfZg0FEiiDheTd5vYE60LQTeDH+MHrgWDR6TtIHuGMAuJjMIaL";
+        let result = resolve_public_key(key).unwrap();
+        assert_eq!(result, key);
+    }
+
+    #[test]
+    fn test_resolve_public_key_with_comment() {
+        // Test with a full key including untrusted comment
+        let key = "untrusted comment: minisign public key\nRWSBt4RfZg0FEiiDheTd5vYE60LQTeDH";
+        let result = resolve_public_key(key).unwrap();
+        assert_eq!(result, key);
+    }
+
+    #[test]
+    fn test_resolve_public_key_from_file() {
+        let dir = tempdir().unwrap();
+        let key_path = dir.path().join("test.pub");
+        let key_content = "untrusted comment: test key\nRWTest123";
+        fs::write(&key_path, key_content).unwrap();
+
+        let result = resolve_public_key(key_path.to_str().unwrap()).unwrap();
+        assert_eq!(result, key_content);
+    }
+
+    #[test]
+    fn test_resolve_public_key_invalid_path() {
+        let result = resolve_public_key("/nonexistent/path/to/key.pub");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("not a valid key or file path"));
     }
 }

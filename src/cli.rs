@@ -173,6 +173,11 @@ pub struct UpdateArgs {
     /// Skip manifest signature verification (INSECURE - use only for development/testing).
     #[arg(long, env = "NXV_SKIP_VERIFY")]
     pub skip_verify: bool,
+
+    /// Custom public key for manifest signature verification (for self-hosted indexes).
+    /// Can be the raw key (RW...) or path to a .pub file.
+    #[arg(long, env = "NXV_PUBLIC_KEY")]
+    pub public_key: Option<String>,
 }
 
 /// Arguments for the history command.
@@ -533,6 +538,30 @@ mod tests {
         match args.command {
             Commands::Update(update) => {
                 assert!(update.force);
+            }
+            _ => panic!("Expected Update command"),
+        }
+    }
+
+    #[test]
+    fn test_update_public_key() {
+        let args = Cli::try_parse_from(["nxv", "update", "--public-key", "RWTest123"]).unwrap();
+        match args.command {
+            Commands::Update(update) => {
+                assert_eq!(update.public_key, Some("RWTest123".to_string()));
+                assert!(!update.skip_verify);
+            }
+            _ => panic!("Expected Update command"),
+        }
+    }
+
+    #[test]
+    fn test_update_public_key_file() {
+        let args =
+            Cli::try_parse_from(["nxv", "update", "--public-key", "/path/to/key.pub"]).unwrap();
+        match args.command {
+            Commands::Update(update) => {
+                assert_eq!(update.public_key, Some("/path/to/key.pub".to_string()));
             }
             _ => panic!("Expected Update command"),
         }

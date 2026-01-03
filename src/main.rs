@@ -171,6 +171,7 @@ fn get_backend_with_prompt(cli: &Cli) -> Result<backend::Backend> {
                         force: false,
                         manifest_url: None,
                         skip_verify: false,
+                        public_key: None,
                     };
                     cmd_update(cli, &update_args)?;
 
@@ -386,6 +387,7 @@ fn cmd_update(cli: &Cli, args: &cli::UpdateArgs) -> Result<()> {
         args.force,
         show_progress,
         args.skip_verify,
+        args.public_key.as_deref(),
     )?;
 
     match status {

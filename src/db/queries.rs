@@ -546,6 +546,45 @@ pub fn get_all_unique_attrs(conn: &rusqlite::Connection) -> Result<Vec<String>> 
     Ok(results)
 }
 
+/// Return distinct package attribute paths matching a prefix, limited to a maximum count.
+///
+/// This function is optimized for shell tab completion, returning only unique attribute
+/// paths that start with the given prefix. Results are ordered alphabetically.
+///
+/// # Arguments
+///
+/// * `prefix` - The prefix to match against attribute paths (case-sensitive)
+/// * `limit` - Maximum number of results to return
+///
+/// # Examples
+///
+/// ```
+/// use rusqlite::Connection;
+/// let conn = Connection::open_in_memory().unwrap();
+/// conn.execute_batch("CREATE TABLE package_versions (attribute_path TEXT);
+///                    INSERT INTO package_versions (attribute_path) VALUES ('python'), ('python2'), ('python3'), ('ruby');").unwrap();
+///
+/// let attrs = crate::db::queries::complete_package_prefix(&conn, "pyth", 10).unwrap();
+/// assert_eq!(attrs, vec!["python", "python2", "python3"]);
+/// ```
+pub fn complete_package_prefix(
+    conn: &rusqlite::Connection,
+    prefix: &str,
+    limit: usize,
+) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT attribute_path FROM package_versions WHERE attribute_path LIKE ? ORDER BY attribute_path LIMIT ?",
+    )?;
+    let pattern = format!("{}%", prefix);
+    let rows = stmt.query_map(rusqlite::params![&pattern, limit as i64], |row| row.get(0))?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        results.push(row?);
+    }
+    Ok(results)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -738,6 +777,49 @@ mod tests {
 
         let attrs = get_all_unique_attrs(db.connection()).unwrap();
         assert!(attrs.is_empty());
+    }
+
+    #[test]
+    fn test_complete_package_prefix() {
+        let (_dir, db) = create_test_db();
+        // Test with prefix that matches multiple packages
+        let results = complete_package_prefix(db.connection(), "python", 10).unwrap();
+        assert_eq!(results.len(), 2); // python, python2
+        assert!(results.contains(&"python".to_string()));
+        assert!(results.contains(&"python2".to_string()));
+    }
+
+    #[test]
+    fn test_complete_package_prefix_exact() {
+        let (_dir, db) = create_test_db();
+        // Test with prefix that matches exactly one package
+        let results = complete_package_prefix(db.connection(), "nodejs", 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0], "nodejs");
+    }
+
+    #[test]
+    fn test_complete_package_prefix_no_match() {
+        let (_dir, db) = create_test_db();
+        // Test with prefix that matches nothing
+        let results = complete_package_prefix(db.connection(), "zzz", 10).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_complete_package_prefix_limit() {
+        let (_dir, db) = create_test_db();
+        // Test that limit is respected
+        let results = complete_package_prefix(db.connection(), "python", 1).unwrap();
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn test_complete_package_prefix_empty() {
+        let (_dir, db) = create_test_db();
+        // Empty prefix should return all packages (up to limit)
+        let results = complete_package_prefix(db.connection(), "", 10).unwrap();
+        assert_eq!(results.len(), 3); // nodejs, python, python2
     }
 
     #[test]

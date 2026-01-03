@@ -121,6 +121,10 @@ A NixOS module is provided for running nxv as a systemd service:
 }
 ```
 
+## Releasing
+
+**IMPORTANT: Always run `/release-notes` before creating a release.** This runs all pre-flight checks (fmt, clippy, tests, nix flake check, clean git status) and generates release notes.
+
 ## CI/CD & Index Publishing
 
 ### GitHub Actions Workflows

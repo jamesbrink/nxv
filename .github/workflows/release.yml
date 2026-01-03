@@ -59,10 +59,10 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: macos-13-large
+          - os: macos-15-large
             target: x86_64-apple-darwin
             artifact: nxv-darwin-x86_64
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
             artifact: nxv-darwin-aarch64
 

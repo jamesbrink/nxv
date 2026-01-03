@@ -394,6 +394,14 @@ pub struct PublishArgs {
     /// Base URL prefix for manifest URLs (e.g., https://github.com/user/repo/releases/download/index-latest).
     #[arg(long)]
     pub url_prefix: Option<String>,
+
+    /// Sign the manifest with a minisign secret key.
+    #[arg(long)]
+    pub sign: bool,
+
+    /// Path to minisign secret key file (required if --sign is used).
+    #[arg(long, required_if_eq("sign", "true"))]
+    pub secret_key: Option<PathBuf>,
 }
 
 /// Output format argument.
@@ -654,5 +662,52 @@ mod tests {
             }
             _ => panic!("Expected Index command"),
         }
+    }
+
+    #[cfg(feature = "indexer")]
+    #[test]
+    fn test_publish_command() {
+        let args = Cli::try_parse_from(["nxv", "publish", "--output", "/tmp/publish"]).unwrap();
+        match args.command {
+            Commands::Publish(publish) => {
+                assert_eq!(publish.output.to_string_lossy(), "/tmp/publish");
+                assert!(!publish.sign);
+                assert!(publish.secret_key.is_none());
+            }
+            _ => panic!("Expected Publish command"),
+        }
+    }
+
+    #[cfg(feature = "indexer")]
+    #[test]
+    fn test_publish_with_signing() {
+        let args = Cli::try_parse_from([
+            "nxv",
+            "publish",
+            "--sign",
+            "--secret-key",
+            "/path/to/key.key",
+        ])
+        .unwrap();
+        match args.command {
+            Commands::Publish(publish) => {
+                assert!(publish.sign);
+                assert_eq!(
+                    publish.secret_key.unwrap().to_string_lossy(),
+                    "/path/to/key.key"
+                );
+            }
+            _ => panic!("Expected Publish command"),
+        }
+    }
+
+    #[cfg(feature = "indexer")]
+    #[test]
+    fn test_publish_sign_requires_secret_key() {
+        // --sign without --secret-key should fail
+        let result = Cli::try_parse_from(["nxv", "publish", "--sign"]);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("secret-key"));
     }
 }

@@ -3,14 +3,14 @@
 use crate::bloom::PackageBloomFilter;
 use crate::db::Database;
 use crate::db::queries::get_all_unique_attrs;
-use crate::error::Result;
+use crate::error::{NxvError, Result};
 use crate::remote::download::{compress_zstd, file_sha256};
 use crate::remote::manifest::{DeltaFile, IndexFile, Manifest};
 use chrono::Utc;
 use indicatif::{ProgressBar, ProgressStyle};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, BufWriter, Cursor, Read, Write};
 use std::path::Path;
 
 /// Compression level for zstd (higher = better compression, slower).
@@ -23,6 +23,78 @@ const COMPRESSION_LEVEL: i32 = 19;
 pub const INDEX_DB_NAME: &str = "index.db.zst";
 pub const BLOOM_FILTER_NAME: &str = "bloom.bin";
 pub const MANIFEST_NAME: &str = "manifest.json";
+pub const MANIFEST_SIG_NAME: &str = "manifest.json.minisig";
+
+/// Sign a manifest file using a minisign secret key.
+///
+/// Creates a `.minisig` signature file alongside the manifest.
+///
+/// # Arguments
+/// * `manifest_path` - Path to the manifest.json file to sign
+/// * `secret_key_path` - Path to the minisign secret key file
+///
+/// # Returns
+/// The path to the created signature file.
+pub fn sign_manifest<P: AsRef<Path>, Q: AsRef<Path>>(
+    manifest_path: P,
+    secret_key_path: Q,
+) -> Result<std::path::PathBuf> {
+    let manifest_path = manifest_path.as_ref();
+    let secret_key_path = secret_key_path.as_ref();
+
+    // Read the secret key file
+    let sk_string = fs::read_to_string(secret_key_path).map_err(|e| {
+        NxvError::NetworkMessage(format!(
+            "Failed to read secret key '{}': {}",
+            secret_key_path.display(),
+            e
+        ))
+    })?;
+
+    // Parse the secret key (will prompt for password if encrypted)
+    let sk_box = minisign::SecretKeyBox::from_string(&sk_string)
+        .map_err(|e| NxvError::NetworkMessage(format!("Failed to parse secret key: {}", e)))?;
+
+    // Try to decrypt without password first (for unencrypted keys)
+    let sk = sk_box.into_secret_key(None).map_err(|_| {
+        NxvError::NetworkMessage(
+            "Secret key is password-protected. Use minisign CLI for encrypted keys.".to_string(),
+        )
+    })?;
+
+    // Read the manifest content
+    let manifest_content = fs::read(manifest_path).map_err(|e| {
+        NxvError::NetworkMessage(format!(
+            "Failed to read manifest '{}': {}",
+            manifest_path.display(),
+            e
+        ))
+    })?;
+
+    // Sign the manifest
+    let mut cursor = Cursor::new(&manifest_content);
+    let trusted_comment = format!("timestamp:{}", chrono::Utc::now().to_rfc3339());
+    let sig_box = minisign::sign(
+        None, // No public key needed for signing
+        &sk,
+        &mut cursor,
+        Some("nxv manifest signature"),
+        Some(&trusted_comment),
+    )
+    .map_err(|e| NxvError::NetworkMessage(format!("Failed to sign manifest: {}", e)))?;
+
+    // Write the signature file
+    let sig_path = manifest_path.with_extension("json.minisig");
+    fs::write(&sig_path, sig_box.to_string()).map_err(|e| {
+        NxvError::NetworkMessage(format!(
+            "Failed to write signature file '{}': {}",
+            sig_path.display(),
+            e
+        ))
+    })?;
+
+    Ok(sig_path)
+}
 
 /// Format bytes as human-readable size.
 fn format_bytes(bytes: u64) -> String {
@@ -455,13 +527,15 @@ pub fn generate_bloom_filter<P: AsRef<Path>, Q: AsRef<Path>>(
 /// - `index.db.zst` - Compressed database
 /// - `bloom.bin` - Bloom filter for fast lookups
 /// - `manifest.json` - Manifest with URLs and checksums
+/// - `manifest.json.minisig` - Signature file (if secret_key is provided)
 ///
 /// Returns the path to the output directory.
-pub fn publish_index<P: AsRef<Path>, Q: AsRef<Path>>(
+pub fn publish_index<P: AsRef<Path>, Q: AsRef<Path>, R: AsRef<Path>>(
     db_path: P,
     output_dir: Q,
     url_prefix: Option<&str>,
     show_progress: bool,
+    secret_key: Option<R>,
 ) -> Result<()> {
     let db_path = db_path.as_ref();
     let output_dir = output_dir.as_ref();
@@ -492,6 +566,19 @@ pub fn publish_index<P: AsRef<Path>, Q: AsRef<Path>>(
         bloom_filter.clone(),
     )?;
 
+    // Sign the manifest if a secret key was provided
+    let signed = if let Some(ref sk_path) = secret_key {
+        if show_progress {
+            eprintln!();
+            eprintln!("Signing manifest...");
+        }
+        let manifest_path = output_dir.join(MANIFEST_NAME);
+        sign_manifest(&manifest_path, sk_path)?;
+        true
+    } else {
+        false
+    };
+
     if show_progress {
         let commit_display = if last_commit.is_empty() {
             "unknown (missing meta)".to_string()
@@ -512,6 +599,9 @@ pub fn publish_index<P: AsRef<Path>, Q: AsRef<Path>>(
             format_bytes(bloom_filter.size_bytes)
         );
         eprintln!("  - {}", MANIFEST_NAME);
+        if signed {
+            eprintln!("  - {}", MANIFEST_SIG_NAME);
+        }
         eprintln!();
         eprintln!("Last indexed commit: {}", commit_display);
     }
@@ -677,5 +767,62 @@ mod tests {
     fn test_sql_quote_opt() {
         assert_eq!(sql_quote_opt(&Some("hello".to_string())), "'hello'");
         assert_eq!(sql_quote_opt(&None), "NULL");
+    }
+
+    #[test]
+    fn test_sign_manifest_missing_key() {
+        let dir = tempdir().unwrap();
+        let manifest_path = dir.path().join("manifest.json");
+        let secret_key_path = dir.path().join("nonexistent.key");
+
+        // Create a dummy manifest
+        fs::write(&manifest_path, r#"{"version":1}"#).unwrap();
+
+        // Should fail because secret key doesn't exist
+        let result = sign_manifest(&manifest_path, &secret_key_path);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Failed to read secret key"));
+    }
+
+    #[test]
+    fn test_sign_manifest_invalid_key() {
+        let dir = tempdir().unwrap();
+        let manifest_path = dir.path().join("manifest.json");
+        let secret_key_path = dir.path().join("invalid.key");
+
+        // Create a dummy manifest and invalid key
+        fs::write(&manifest_path, r#"{"version":1}"#).unwrap();
+        fs::write(&secret_key_path, "not a valid key").unwrap();
+
+        // Should fail because secret key is invalid
+        let result = sign_manifest(&manifest_path, &secret_key_path);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        // Error could be about parsing or decryption depending on minisign behavior
+        assert!(
+            err_msg.contains("Failed to parse secret key")
+                || err_msg.contains("password-protected"),
+            "Unexpected error message: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_publish_index_without_signing() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let output_dir = dir.path().join("output");
+
+        create_test_db(&db_path);
+
+        // Publish without signing
+        publish_index::<_, _, &Path>(&db_path, &output_dir, None, false, None).unwrap();
+
+        // Verify all artifacts except signature
+        assert!(output_dir.join(INDEX_DB_NAME).exists());
+        assert!(output_dir.join(BLOOM_FILTER_NAME).exists());
+        assert!(output_dir.join(MANIFEST_NAME).exists());
+        assert!(!output_dir.join(MANIFEST_SIG_NAME).exists());
     }
 }

@@ -21,7 +21,19 @@ Instead of spending your afternoon spelunking through GitHub commits and praying
   <img src="./docs/where-is-it.gif" alt="nxv in action" />
 </p>
 
-> **Early Development** — No public index available yet. Building your own index requires a local nixpkgs clone.
+## Try It Now
+
+No installation required — query the live API directly:
+
+```bash
+# Search for Node.js 15.x
+NXV_API_URL=https://nxv.urandom.io nix run github:jamesbrink/nxv -- search nodejs 15
+
+# Find Python 2.7
+NXV_API_URL=https://nxv.urandom.io nix run github:jamesbrink/nxv -- search python 2.7
+```
+
+Or browse the web UI at [nxv.urandom.io](https://nxv.urandom.io).
 
 ## Features
 

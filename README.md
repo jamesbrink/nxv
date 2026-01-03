@@ -277,8 +277,42 @@ The `--url-prefix` sets the base URL that will appear in the manifest. This shou
 
 ### Integrity and Rollback
 
-- `manifest.json` includes SHA256 checksums; manifest signing is not implemented yet.
-- To roll back a bad index, re-upload a previous `index.db.zst`, `bloom.bin`, and `manifest.json` to the same location or point `NXV_MANIFEST_URL` at a known-good manifest.
+- `manifest.json` includes SHA256 checksums for all artifacts
+- Manifests are cryptographically signed with [minisign](https://jedisct1.github.io/minisign/) and verified on download
+- To roll back a bad index, re-upload a previous `index.db.zst`, `bloom.bin`, and `manifest.json` to the same location or point `NXV_MANIFEST_URL` at a known-good manifest
+
+### Signing Your Manifest (Self-Hosted)
+
+For self-hosted indexes, sign your manifest to enable signature verification:
+
+```bash
+# Generate a keypair (one-time)
+minisign -G -p nxv.pub -s nxv.key -c "my nxv signing key"
+
+# Sign the manifest after publishing
+minisign -S -s nxv.key -m publish/manifest.json
+# Creates: publish/manifest.json.minisig
+
+# Upload both manifest.json and manifest.json.minisig
+```
+
+Clients can then verify using your public key:
+
+```bash
+# Via CLI flag
+nxv update --manifest-url https://your-server/manifest.json \
+           --public-key /path/to/nxv.pub
+
+# Or via environment variable
+export NXV_PUBLIC_KEY=/path/to/nxv.pub
+nxv update --manifest-url https://your-server/manifest.json
+```
+
+To skip verification (not recommended for production):
+
+```bash
+nxv update --manifest-url https://your-server/manifest.json --skip-verify
+```
 
 ### Hosting Your Own Index
 
@@ -420,6 +454,9 @@ The `manifest.json` format:
 | `NXV_DB_PATH` | Path to index database (bloom filter stored as sibling file) |
 | `NXV_API_URL` | Remote API URL (CLI uses remote instead of local DB when set) |
 | `NXV_MANIFEST_URL` | Custom manifest URL for index downloads |
+| `NXV_PUBLIC_KEY` | Custom public key for manifest verification (path or raw key) |
+| `NXV_SKIP_VERIFY` | Skip manifest signature verification (set to any value) |
+| `NXV_API_TIMEOUT` | API request timeout in seconds (default: 30) |
 | `NO_COLOR` | Disable colored output |
 | `NXV_INSTALL_DIR` | Custom install directory for curl installer (default: `~/.local/bin`) |
 | `NXV_VERSION` | Specific version for curl installer (default: latest) |

@@ -30,7 +30,7 @@ jobs:
         uses: DeterminateSystems/nix-installer-action@main
 
       - name: Setup Cachix
-        uses: cachix/cachix-action@v15
+        uses: cachix/cachix-action@v16
         with:
           name: nxv
           authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
@@ -72,7 +72,7 @@ jobs:
         uses: DeterminateSystems/nix-installer-action@main
 
       - name: Setup Cachix
-        uses: cachix/cachix-action@v15
+        uses: cachix/cachix-action@v16
         with:
           name: nxv
           authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
@@ -141,7 +141,7 @@ jobs:
         uses: DeterminateSystems/nix-installer-action@main
 
       - name: Setup Cachix
-        uses: cachix/cachix-action@v15
+        uses: cachix/cachix-action@v16
         with:
           name: nxv
           authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
@@ -183,7 +183,7 @@ jobs:
         uses: DeterminateSystems/nix-installer-action@main
 
       - name: Setup Cachix
-        uses: cachix/cachix-action@v15
+        uses: cachix/cachix-action@v16
         with:
           name: nxv
           authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'

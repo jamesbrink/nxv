@@ -10,7 +10,7 @@ use chrono::Utc;
 use indicatif::{ProgressBar, ProgressStyle};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter, Cursor, Read, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
 /// Compression level for zstd (higher = better compression, slower).
@@ -25,9 +25,82 @@ pub const BLOOM_FILTER_NAME: &str = "bloom.bin";
 pub const MANIFEST_NAME: &str = "manifest.json";
 pub const MANIFEST_SIG_NAME: &str = "manifest.json.minisig";
 
+/// Generate a new minisign keypair for signing manifests.
+///
+/// Creates an unencrypted keypair compatible with the minisign Rust crate.
+///
+/// # Arguments
+/// * `secret_key_path` - Where to save the secret key
+/// * `public_key_path` - Where to save the public key
+/// * `comment` - Comment to embed in the key files
+///
+/// # Returns
+/// The public key string (for embedding in applications).
+pub fn generate_keypair<P: AsRef<Path>, Q: AsRef<Path>>(
+    secret_key_path: P,
+    public_key_path: Q,
+    comment: &str,
+) -> Result<String> {
+    let secret_key_path = secret_key_path.as_ref();
+    let public_key_path = public_key_path.as_ref();
+
+    // Generate keypair
+    let keypair = minisign::KeyPair::generate_unencrypted_keypair()
+        .map_err(|e| NxvError::NetworkMessage(format!("Failed to generate keypair: {}", e)))?;
+
+    // Serialize with comment
+    let sk_box = keypair
+        .sk
+        .to_box(None)
+        .map_err(|e| NxvError::NetworkMessage(format!("Failed to serialize secret key: {}", e)))?;
+
+    let pk_box = keypair
+        .pk
+        .to_box()
+        .map_err(|e| NxvError::NetworkMessage(format!("Failed to serialize public key: {}", e)))?;
+
+    // Add custom comment to the key files
+    let sk_str = sk_box.to_string();
+    let sk_with_comment = sk_str.replacen(
+        "untrusted comment: rsign encrypted secret key",
+        &format!("untrusted comment: {}", comment),
+        1,
+    );
+
+    let pk_str = pk_box.to_string();
+    let pk_with_comment = pk_str.replacen(
+        "untrusted comment: minisign public key:",
+        &format!("untrusted comment: {} - public key:", comment),
+        1,
+    );
+
+    // Write key files
+    fs::write(secret_key_path, &sk_with_comment).map_err(|e| {
+        NxvError::NetworkMessage(format!(
+            "Failed to write secret key '{}': {}",
+            secret_key_path.display(),
+            e
+        ))
+    })?;
+
+    fs::write(public_key_path, &pk_with_comment).map_err(|e| {
+        NxvError::NetworkMessage(format!(
+            "Failed to write public key '{}': {}",
+            public_key_path.display(),
+            e
+        ))
+    })?;
+
+    // Extract the base64 public key for embedding
+    let pk_base64 = pk_with_comment.lines().nth(1).unwrap_or("").to_string();
+
+    Ok(pk_base64)
+}
+
 /// Sign a manifest file using a minisign secret key.
 ///
-/// Creates a `.minisig` signature file alongside the manifest.
+/// Uses the minisign Rust crate directly for signing.
+/// Keys must be generated with `nxv keygen` for compatibility.
 ///
 /// # Arguments
 /// * `manifest_path` - Path to the manifest.json file to sign
@@ -39,6 +112,8 @@ pub fn sign_manifest<P: AsRef<Path>, Q: AsRef<Path>>(
     manifest_path: P,
     secret_key_path: Q,
 ) -> Result<std::path::PathBuf> {
+    use std::io::Cursor;
+
     let manifest_path = manifest_path.as_ref();
     let secret_key_path = secret_key_path.as_ref();
 
@@ -51,15 +126,16 @@ pub fn sign_manifest<P: AsRef<Path>, Q: AsRef<Path>>(
         ))
     })?;
 
-    // Parse the secret key (will prompt for password if encrypted)
+    // Parse the secret key
     let sk_box = minisign::SecretKeyBox::from_string(&sk_string)
         .map_err(|e| NxvError::NetworkMessage(format!("Failed to parse secret key: {}", e)))?;
 
-    // Try to decrypt without password first (for unencrypted keys)
-    let sk = sk_box.into_secret_key(None).map_err(|_| {
-        NxvError::NetworkMessage(
-            "Secret key is password-protected. Use minisign CLI for encrypted keys.".to_string(),
-        )
+    // Load as unencrypted key
+    let sk = sk_box.into_unencrypted_secret_key().map_err(|e| {
+        NxvError::NetworkMessage(format!(
+            "Failed to load secret key ({}). Keys must be generated with 'nxv keygen'.",
+            e
+        ))
     })?;
 
     // Read the manifest content
@@ -75,7 +151,7 @@ pub fn sign_manifest<P: AsRef<Path>, Q: AsRef<Path>>(
     let mut cursor = Cursor::new(&manifest_content);
     let trusted_comment = format!("timestamp:{}", chrono::Utc::now().to_rfc3339());
     let sig_box = minisign::sign(
-        None, // No public key needed for signing
+        None,
         &sk,
         &mut cursor,
         Some("nxv manifest signature"),
@@ -782,7 +858,11 @@ mod tests {
         let result = sign_manifest(&manifest_path, &secret_key_path);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("Failed to read secret key"));
+        assert!(
+            err_msg.contains("Failed to read secret key"),
+            "Unexpected error: {}",
+            err_msg
+        );
     }
 
     #[test]
@@ -795,17 +875,42 @@ mod tests {
         fs::write(&manifest_path, r#"{"version":1}"#).unwrap();
         fs::write(&secret_key_path, "not a valid key").unwrap();
 
-        // Should fail because secret key is invalid
+        // Should fail because key is invalid
         let result = sign_manifest(&manifest_path, &secret_key_path);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
-        // Error could be about parsing or decryption depending on minisign behavior
         assert!(
             err_msg.contains("Failed to parse secret key")
-                || err_msg.contains("password-protected"),
-            "Unexpected error message: {}",
+                || err_msg.contains("Failed to load secret key"),
+            "Unexpected error: {}",
             err_msg
         );
+    }
+
+    #[test]
+    fn test_generate_and_sign() {
+        let dir = tempdir().unwrap();
+        let sk_path = dir.path().join("test.key");
+        let pk_path = dir.path().join("test.pub");
+        let manifest_path = dir.path().join("manifest.json");
+
+        // Generate keypair
+        let pk = generate_keypair(&sk_path, &pk_path, "test key").unwrap();
+        assert!(!pk.is_empty());
+        assert!(sk_path.exists());
+        assert!(pk_path.exists());
+
+        // Create a manifest
+        fs::write(&manifest_path, r#"{"version":1}"#).unwrap();
+
+        // Sign it
+        let sig_path = sign_manifest(&manifest_path, &sk_path).unwrap();
+        assert!(sig_path.exists());
+
+        // Verify signature file contains expected content
+        let sig_content = fs::read_to_string(&sig_path).unwrap();
+        assert!(sig_content.contains("untrusted comment:"));
+        assert!(sig_content.contains("trusted comment:"));
     }
 
     #[test]

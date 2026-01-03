@@ -70,6 +70,10 @@ pub enum Commands {
     #[cfg(feature = "indexer")]
     Publish(PublishArgs),
 
+    /// Generate a new minisign keypair for signing manifests.
+    #[cfg(feature = "indexer")]
+    Keygen(KeygenArgs),
+
     /// Start the API server.
     Serve(ServeArgs),
 
@@ -402,6 +406,27 @@ pub struct PublishArgs {
     /// Path to minisign secret key file (required if --sign is used).
     #[arg(long, required_if_eq("sign", "true"))]
     pub secret_key: Option<PathBuf>,
+}
+
+/// Arguments for the keygen command (feature-gated).
+#[cfg(feature = "indexer")]
+#[derive(Parser, Debug)]
+pub struct KeygenArgs {
+    /// Output path for the secret key file.
+    #[arg(short, long, default_value = "./nxv.key")]
+    pub secret_key: PathBuf,
+
+    /// Output path for the public key file.
+    #[arg(short, long, default_value = "./nxv.pub")]
+    pub public_key: PathBuf,
+
+    /// Comment to embed in the key files.
+    #[arg(short, long, default_value = "nxv signing key")]
+    pub comment: String,
+
+    /// Overwrite existing key files if they exist.
+    #[arg(short, long)]
+    pub force: bool,
 }
 
 /// Output format argument.

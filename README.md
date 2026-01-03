@@ -211,6 +211,8 @@ Run the API server as a systemd service with automatic updates:
 | `port` | `8080` | Port to listen on |
 | `dataDir` | `/var/lib/nxv` | Directory for `index.db` |
 | `manifestUrl` | `null` | Custom manifest URL for self-hosted index |
+| `publicKey` | `null` | Custom public key for signature verification (path or raw key) |
+| `skipVerify` | `false` | Skip signature verification (insecure) |
 | `cors.enable` | `false` | Enable CORS for all origins |
 | `cors.origins` | `null` | Specific allowed origins |
 | `openFirewall` | `false` | Open firewall port |
@@ -285,13 +287,9 @@ The `--url-prefix` sets the base URL that will appear in the manifest. This shou
 
 For self-hosted indexes, sign your manifest to enable signature verification.
 
-**Option 1: Built-in signing (recommended)**
-
-The `nxv publish` command can sign the manifest automatically:
-
 ```bash
-# Generate a keypair (one-time)
-minisign -G -p nxv.pub -s nxv.key -c "my nxv signing key"
+# Generate a keypair (one-time, requires indexer feature)
+nxv keygen --secret-key nxv.key --public-key nxv.pub
 
 # Publish with signing in one step
 nxv publish --output ./publish --url-prefix https://your-server/nxv --sign --secret-key ./nxv.key
@@ -301,18 +299,6 @@ nxv publish --output ./publish --url-prefix https://your-server/nxv --sign --sec
 #   publish/bloom.bin          - Bloom filter
 #   publish/manifest.json      - Manifest with URLs and checksums
 #   publish/manifest.json.minisig - Signature file
-```
-
-**Option 2: External minisign**
-
-You can also sign with the minisign CLI after publishing:
-
-```bash
-# Publish first
-nxv publish --output ./publish --url-prefix https://your-server/nxv
-
-# Then sign separately
-minisign -S -s nxv.key -m publish/manifest.json
 ```
 
 Clients can then verify using your public key:

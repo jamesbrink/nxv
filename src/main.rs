@@ -62,6 +62,8 @@ fn main() {
         Commands::Reset(args) => cmd_reset(&cli, args),
         #[cfg(feature = "indexer")]
         Commands::Publish(args) => cmd_publish(&cli, args),
+        #[cfg(feature = "indexer")]
+        Commands::Keygen(args) => cmd_keygen(&cli, args),
         Commands::Serve(args) => cmd_serve(&cli, args),
     };
 
@@ -1280,6 +1282,43 @@ fn cmd_publish(cli: &Cli, args: &cli::PublishArgs) -> Result<()> {
         !cli.quiet,
         args.secret_key.as_ref(),
     )?;
+
+    Ok(())
+}
+
+/// Generate a new minisign keypair for signing manifests.
+#[cfg(feature = "indexer")]
+fn cmd_keygen(cli: &Cli, args: &cli::KeygenArgs) -> Result<()> {
+    use crate::index::publisher::generate_keypair;
+
+    // Check if files already exist
+    if !args.force {
+        if args.secret_key.exists() {
+            return Err(anyhow::anyhow!(
+                "Secret key '{}' already exists. Use --force to overwrite.",
+                args.secret_key.display()
+            ));
+        }
+        if args.public_key.exists() {
+            return Err(anyhow::anyhow!(
+                "Public key '{}' already exists. Use --force to overwrite.",
+                args.public_key.display()
+            ));
+        }
+    }
+
+    let pk_base64 = generate_keypair(&args.secret_key, &args.public_key, &args.comment)?;
+
+    if !cli.quiet {
+        eprintln!("Generated keypair:");
+        eprintln!("  Secret key: {}", args.secret_key.display());
+        eprintln!("  Public key: {}", args.public_key.display());
+        eprintln!();
+        eprintln!("Public key (for embedding in manifest.rs):");
+        eprintln!("  {}", pk_base64);
+        eprintln!();
+        eprintln!("Keep the secret key safe! You'll need it to sign manifests.");
+    }
 
     Ok(())
 }

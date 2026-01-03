@@ -26,9 +26,8 @@ fn resolve_public_key(key: &str) -> Result<String> {
     // Check if it's a file path first (handles paths like "RWkeys/signing.pub")
     let path = Path::new(key);
     if path.exists() {
-        let content = std::fs::read_to_string(path).map_err(|e| {
-            NxvError::NetworkMessage(format!("Failed to read public key file '{}': {}", key, e))
-        })?;
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| NxvError::PublicKey(format!("failed to read '{}': {}", key, e)))?;
         return Ok(content);
     }
 
@@ -38,8 +37,8 @@ fn resolve_public_key(key: &str) -> Result<String> {
     }
 
     // Neither a valid file nor a raw key format
-    Err(NxvError::NetworkMessage(format!(
-        "Public key '{}' is not a valid key or file path",
+    Err(NxvError::PublicKey(format!(
+        "'{}' is not a valid key or file path",
         key
     )))
 }
@@ -656,6 +655,7 @@ COMMIT;
         let result = resolve_public_key("/nonexistent/path/to/key.pub");
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
+        assert!(err.contains("Public key error"));
         assert!(err.contains("not a valid key or file path"));
     }
 }

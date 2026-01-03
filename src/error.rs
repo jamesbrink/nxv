@@ -39,6 +39,9 @@ pub enum NxvError {
     #[error("Manifest signature verification failed")]
     InvalidManifestSignature,
 
+    #[error("Public key error: {0}")]
+    PublicKey(String),
+
     #[error("Checksum mismatch: expected {expected}, got {actual}")]
     ChecksumMismatch { expected: String, actual: String },
 
@@ -135,6 +138,14 @@ mod tests {
         let err = NxvError::NetworkMessage("custom network error".to_string());
         let msg = err.to_string();
         assert_eq!(msg, "custom network error");
+    }
+
+    #[test]
+    fn test_public_key_error_message() {
+        let err = NxvError::PublicKey("failed to read key file".to_string());
+        let msg = err.to_string();
+        assert!(msg.contains("Public key error"));
+        assert!(msg.contains("failed to read key file"));
     }
 
     #[test]

@@ -61,7 +61,10 @@ pub fn generate_keypair<P: AsRef<Path>, Q: AsRef<Path>>(
         .to_box()
         .map_err(|e| NxvError::Signing(format!("failed to serialize public key: {}", e)))?;
 
-    // Add custom comment to the key files
+    // Replace minisign's default comments with custom ones.
+    // Note: These default strings are defined by the minisign crate's internal format.
+    // If the crate changes its default comment format in a future version, this
+    // replacement may silently fail to apply, but the keys will still function correctly.
     let sk_str = sk_box.to_string();
     let sk_with_comment = sk_str.replacen(
         "untrusted comment: rsign encrypted secret key",

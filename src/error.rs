@@ -39,6 +39,9 @@ pub enum NxvError {
     #[error("Manifest signature verification failed")]
     InvalidManifestSignature,
 
+    #[error("Public key error: {0}")]
+    PublicKey(String),
+
     #[error("Checksum mismatch: expected {expected}, got {actual}")]
     ChecksumMismatch { expected: String, actual: String },
 
@@ -53,6 +56,10 @@ pub enum NxvError {
     #[cfg(feature = "indexer")]
     #[error("Not a nixpkgs repository: {0}")]
     NotNixpkgsRepo(String),
+
+    #[cfg(feature = "indexer")]
+    #[error("Signing error: {0}")]
+    Signing(String),
 }
 
 /// Result type alias for nxv operations.
@@ -134,6 +141,14 @@ mod tests {
     }
 
     #[test]
+    fn test_public_key_error_message() {
+        let err = NxvError::PublicKey("failed to read key file".to_string());
+        let msg = err.to_string();
+        assert!(msg.contains("Public key error"));
+        assert!(msg.contains("failed to read key file"));
+    }
+
+    #[test]
     fn test_io_error_conversion() {
         let io_err = io::Error::new(io::ErrorKind::NotFound, "file not found");
         let err: NxvError = io_err.into();
@@ -200,6 +215,14 @@ mod tests {
             let msg = err.to_string();
             assert!(msg.contains("/some/path"));
             assert!(msg.contains("nixpkgs"));
+        }
+
+        #[test]
+        fn test_signing_error_message() {
+            let err = NxvError::Signing("failed to generate keypair".to_string());
+            let msg = err.to_string();
+            assert!(msg.contains("Signing error"));
+            assert!(msg.contains("failed to generate keypair"));
         }
     }
 }

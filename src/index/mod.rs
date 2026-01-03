@@ -516,7 +516,9 @@ impl EtaTracker {
     /// ```
     fn eta(&self) -> Option<Duration> {
         let avg = self.avg_time_per_commit()?;
-        Some(avg * self.total_remaining as u32)
+        // Use checked multiplication to avoid overflow, cap at u32::MAX commits
+        let remaining = self.total_remaining.min(u32::MAX as u64) as u32;
+        avg.checked_mul(remaining).or(Some(Duration::MAX))
     }
 
     /// Returns a human-readable ETA string for the remaining work.

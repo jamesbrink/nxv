@@ -117,6 +117,26 @@ in
       '';
     };
 
+    publicKey = mkOption {
+      type = types.nullOr (types.either types.str types.path);
+      default = null;
+      example = "/etc/nxv/signing-key.pub";
+      description = ''
+        Custom public key for manifest signature verification. Required when
+        using a self-hosted index signed with your own key. Can be a path to
+        a .pub file or the raw key string (RW...).
+      '';
+    };
+
+    skipVerify = mkOption {
+      type = types.bool;
+      default = false;
+      description = ''
+        Skip manifest signature verification. INSECURE - only use for
+        development or testing with unsigned manifests.
+      '';
+    };
+
     autoUpdate = {
       enable = mkEnableOption "automatic index updates via systemd timer";
 
@@ -158,6 +178,13 @@ in
       serviceConfig = let
         manifestArgs = lib.optionalString (cfg.manifestUrl != null)
           "--manifest-url ${cfg.manifestUrl}";
+        publicKeyArgs = lib.optionalString (cfg.publicKey != null)
+          "--public-key ${toString cfg.publicKey}";
+        skipVerifyArgs = lib.optionalString cfg.skipVerify
+          "--skip-verify";
+        updateArgs = lib.concatStringsSep " " (lib.filter (s: s != "") [
+          manifestArgs publicKeyArgs skipVerifyArgs
+        ]);
         corsArgs =
           if cfg.cors.origins != null then
             "--cors-origins ${lib.concatStringsSep "," cfg.cors.origins}"
@@ -172,7 +199,7 @@ in
         ExecStartPre = pkgs.writeShellScript "nxv-bootstrap" ''
           if [ ! -f "${cfg.dataDir}/index.db" ]; then
             echo "Database not found, downloading index..."
-            ${cfg.package}/bin/nxv --db-path ${cfg.dataDir}/index.db update ${manifestArgs}
+            ${cfg.package}/bin/nxv --db-path ${cfg.dataDir}/index.db update ${updateArgs}
           fi
         '';
         ExecStart = ''
@@ -216,11 +243,18 @@ in
       serviceConfig = let
         manifestArgs = lib.optionalString (cfg.manifestUrl != null)
           "--manifest-url ${cfg.manifestUrl}";
+        publicKeyArgs = lib.optionalString (cfg.publicKey != null)
+          "--public-key ${toString cfg.publicKey}";
+        skipVerifyArgs = lib.optionalString cfg.skipVerify
+          "--skip-verify";
+        updateArgs = lib.concatStringsSep " " (lib.filter (s: s != "") [
+          manifestArgs publicKeyArgs skipVerifyArgs
+        ]);
       in {
         Type = "oneshot";
         User = cfg.user;
         Group = cfg.group;
-        ExecStart = "${cfg.package}/bin/nxv --db-path ${cfg.dataDir}/index.db update ${manifestArgs}";
+        ExecStart = "${cfg.package}/bin/nxv --db-path ${cfg.dataDir}/index.db update ${updateArgs}";
 
         # Hardening options
         NoNewPrivileges = true;

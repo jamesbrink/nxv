@@ -114,9 +114,7 @@ fn test_help_displays() {
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "CLI tool for finding specific versions",
-        ))
+        .stdout(predicate::str::contains("Nix Version Index"))
         .stdout(predicate::str::contains("search"))
         .stdout(predicate::str::contains("update"))
         .stdout(predicate::str::contains("info"))
@@ -1186,6 +1184,7 @@ fn test_update_with_mock_http_server() {
             "--db-path",
             db_path.to_str().unwrap(),
             "update",
+            "--skip-verify",
             "--manifest-url",
             &manifest_url,
         ])
@@ -1281,6 +1280,7 @@ fn test_update_already_up_to_date() {
             "--db-path",
             db_path.to_str().unwrap(),
             "update",
+            "--skip-verify",
             "--manifest-url",
             &manifest_url,
         ])
@@ -1420,6 +1420,7 @@ COMMIT;
             "--db-path",
             db_path.to_str().unwrap(),
             "update",
+            "--skip-verify",
             "--manifest-url",
             &manifest_url,
         ])
@@ -1481,6 +1482,7 @@ fn test_update_network_error_handling() {
             "--db-path",
             db_path.to_str().unwrap(),
             "update",
+            "--skip-verify",
             "--manifest-url",
             &manifest_url,
         ])
@@ -1543,6 +1545,7 @@ fn test_update_checksum_mismatch() {
             "--db-path",
             db_path.to_str().unwrap(),
             "update",
+            "--skip-verify",
             "--manifest-url",
             &manifest_url,
         ])
@@ -1571,12 +1574,181 @@ fn test_update_unreachable_server() {
             "--db-path",
             db_path.to_str().unwrap(),
             "update",
+            "--skip-verify",
             "--manifest-url",
             manifest_url,
         ])
         .assert()
         .failure()
         .stderr(predicate::str::contains("error"));
+}
+
+// ============================================================================
+// Signature Verification Tests
+// ============================================================================
+
+#[test]
+fn test_update_fails_without_signature_when_verify_enabled() {
+    // This test verifies that manifest signature verification is enforced by default.
+    // When no signature file is available, the update should fail unless --skip-verify is used.
+
+    // Create test artifacts
+    let (compressed_db, db_hash) = create_compressed_test_db();
+    let (bloom_data, bloom_hash) = create_test_bloom_filter();
+
+    // Start mock server that serves manifest but NO .minisig file
+    let mut server = mockito::Server::new();
+
+    let manifest = format!(
+        r#"{{
+        "version": 2,
+        "latest_commit": "abc123def456",
+        "latest_commit_date": "2024-01-15T12:00:00Z",
+        "full_index": {{
+            "url": "{}/index.db.zst",
+            "size_bytes": {},
+            "sha256": "{}"
+        }},
+        "bloom_filter": {{
+            "url": "{}/index.bloom",
+            "size_bytes": {},
+            "sha256": "{}"
+        }},
+        "deltas": []
+    }}"#,
+        server.url(),
+        compressed_db.len(),
+        db_hash,
+        server.url(),
+        bloom_data.len(),
+        bloom_hash
+    );
+
+    let _manifest_mock = server
+        .mock("GET", "/manifest.json")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(&manifest)
+        .create();
+
+    // Signature file returns 404 - simulating no signature available
+    let _signature_mock = server
+        .mock("GET", "/manifest.json.minisig")
+        .with_status(404)
+        .create();
+
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("index.db");
+    let manifest_url = format!("{}/manifest.json", server.url());
+
+    // Update should FAIL because signature verification is enabled by default
+    // and no signature is available
+    nxv()
+        .args([
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "update",
+            "--manifest-url",
+            &manifest_url,
+        ])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("Manifest signature not found")
+                .or(predicate::str::contains("--skip-verify")),
+        );
+
+    // Database should NOT be created since update failed
+    assert!(
+        !db_path.exists(),
+        "Database should not be created when signature verification fails"
+    );
+}
+
+#[test]
+fn test_update_skip_verify_shows_warning() {
+    // This test verifies that --skip-verify allows updates but shows a warning
+
+    // Create test artifacts
+    let (compressed_db, db_hash) = create_compressed_test_db();
+    let (bloom_data, bloom_hash) = create_test_bloom_filter();
+
+    // Start mock server
+    let mut server = mockito::Server::new();
+
+    let manifest = format!(
+        r#"{{
+        "version": 2,
+        "latest_commit": "abc123def456",
+        "latest_commit_date": "2024-01-15T12:00:00Z",
+        "full_index": {{
+            "url": "{}/index.db.zst",
+            "size_bytes": {},
+            "sha256": "{}"
+        }},
+        "bloom_filter": {{
+            "url": "{}/index.bloom",
+            "size_bytes": {},
+            "sha256": "{}"
+        }},
+        "deltas": []
+    }}"#,
+        server.url(),
+        compressed_db.len(),
+        db_hash,
+        server.url(),
+        bloom_data.len(),
+        bloom_hash
+    );
+
+    let _manifest_mock = server
+        .mock("GET", "/manifest.json")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(&manifest)
+        .create();
+
+    let _db_mock = server
+        .mock("GET", "/index.db.zst")
+        .with_status(200)
+        .with_header("content-type", "application/octet-stream")
+        .with_body(compressed_db)
+        .create();
+
+    let _bloom_mock = server
+        .mock("GET", "/index.bloom")
+        .with_status(200)
+        .with_header("content-type", "application/octet-stream")
+        .with_body(bloom_data)
+        .create();
+
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("index.db");
+    let bloom_path = dir.path().join("index.bloom");
+    let manifest_url = format!("{}/manifest.json", server.url());
+
+    // Update with --skip-verify should succeed but show a warning
+    nxv()
+        .args([
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "update",
+            "--skip-verify",
+            "--manifest-url",
+            &manifest_url,
+        ])
+        .env("NXV_BLOOM_PATH", bloom_path.to_str().unwrap())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "Skipping manifest signature verification",
+        ));
+
+    // Database should be created
+    assert!(
+        db_path.exists(),
+        "Database should be created with --skip-verify"
+    );
 }
 
 // ============================================================================
@@ -1672,6 +1844,7 @@ fn test_clear_error_message_invalid_manifest_version() {
             "--db-path",
             db_path.to_str().unwrap(),
             "update",
+            "--skip-verify",
             "--manifest-url",
             &manifest_url,
         ])
@@ -1782,6 +1955,7 @@ fn test_no_data_corruption_on_failed_download() {
             "--db-path",
             db_path.to_str().unwrap(),
             "update",
+            "--skip-verify",
             "--manifest-url",
             &manifest_url,
             "--force", // Force full download to test failure path
@@ -1855,6 +2029,7 @@ fn test_temp_files_cleaned_up_on_failure() {
             "--db-path",
             db_path.to_str().unwrap(),
             "update",
+            "--skip-verify",
             "--manifest-url",
             &manifest_url,
         ])
@@ -1999,6 +2174,7 @@ fn test_full_delta_update_workflow() {
             "--db-path",
             db_path.to_str().unwrap(),
             "update",
+            "--skip-verify",
             "--manifest-url",
             &manifest_url,
         ])
@@ -2109,6 +2285,7 @@ UPDATE meta SET value = 'delta789012345678901234567890abcdef12' WHERE key = 'las
             "--db-path",
             db_path.to_str().unwrap(),
             "update",
+            "--skip-verify",
             "--manifest-url",
             &manifest_url,
         ])
@@ -2447,4 +2624,359 @@ fn test_index_then_search_workflow() {
                 .stdout(predicate::str::contains("Total version ranges"));
         }
     }
+}
+
+// ============================================================================
+// Signing Workflow Tests (Indexer Feature)
+// ============================================================================
+
+/// Test the keygen command generates valid keypair files.
+#[test]
+#[cfg_attr(not(feature = "indexer"), ignore)]
+fn test_keygen_generates_keypair() {
+    let dir = tempdir().unwrap();
+    let sk_path = dir.path().join("test.key");
+    let pk_path = dir.path().join("test.pub");
+
+    // Generate keypair
+    nxv()
+        .args([
+            "keygen",
+            "--secret-key",
+            sk_path.to_str().unwrap(),
+            "--public-key",
+            pk_path.to_str().unwrap(),
+            "--comment",
+            "test signing key",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Generated keypair"))
+        .stderr(predicate::str::contains("Secret key:"))
+        .stderr(predicate::str::contains("Public key:"));
+
+    // Verify files exist and have expected content
+    assert!(sk_path.exists(), "Secret key should be created");
+    assert!(pk_path.exists(), "Public key should be created");
+
+    let sk_content = std::fs::read_to_string(&sk_path).unwrap();
+    assert!(
+        sk_content.contains("untrusted comment:"),
+        "Secret key should have comment"
+    );
+
+    let pk_content = std::fs::read_to_string(&pk_path).unwrap();
+    assert!(
+        pk_content.contains("untrusted comment:"),
+        "Public key should have comment"
+    );
+    assert!(
+        pk_content.contains("RW"),
+        "Public key should contain RW prefix"
+    );
+}
+
+/// Test that keygen fails when files already exist without --force.
+#[test]
+#[cfg_attr(not(feature = "indexer"), ignore)]
+fn test_keygen_refuses_overwrite_without_force() {
+    let dir = tempdir().unwrap();
+    let sk_path = dir.path().join("test.key");
+    let pk_path = dir.path().join("test.pub");
+
+    // Create existing files
+    std::fs::write(&sk_path, "existing key content").unwrap();
+    std::fs::write(&pk_path, "existing pub content").unwrap();
+
+    // keygen should fail without --force
+    nxv()
+        .args([
+            "keygen",
+            "--secret-key",
+            sk_path.to_str().unwrap(),
+            "--public-key",
+            pk_path.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already exists"));
+
+    // Files should be unchanged
+    let sk_content = std::fs::read_to_string(&sk_path).unwrap();
+    assert_eq!(sk_content, "existing key content");
+}
+
+/// Test that keygen with --force overwrites existing files.
+#[test]
+#[cfg_attr(not(feature = "indexer"), ignore)]
+fn test_keygen_force_overwrites() {
+    let dir = tempdir().unwrap();
+    let sk_path = dir.path().join("test.key");
+    let pk_path = dir.path().join("test.pub");
+
+    // Create existing files
+    std::fs::write(&sk_path, "existing key content").unwrap();
+    std::fs::write(&pk_path, "existing pub content").unwrap();
+
+    // keygen with --force should succeed
+    nxv()
+        .args([
+            "keygen",
+            "--force",
+            "--secret-key",
+            sk_path.to_str().unwrap(),
+            "--public-key",
+            pk_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    // Files should be overwritten with real keys
+    let sk_content = std::fs::read_to_string(&sk_path).unwrap();
+    assert!(
+        sk_content.contains("untrusted comment:"),
+        "Secret key should be a valid key format"
+    );
+}
+
+/// Test the full publish with signing workflow.
+#[test]
+#[cfg_attr(not(feature = "indexer"), ignore)]
+fn test_publish_with_signing() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    let output_dir = dir.path().join("publish");
+    let sk_path = dir.path().join("signing.key");
+    let pk_path = dir.path().join("signing.pub");
+
+    // Create a test database
+    create_test_db(&db_path);
+
+    // Generate signing keypair
+    nxv()
+        .args([
+            "keygen",
+            "--secret-key",
+            sk_path.to_str().unwrap(),
+            "--public-key",
+            pk_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    // Publish with signing
+    nxv()
+        .args([
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "publish",
+            "--output",
+            output_dir.to_str().unwrap(),
+            "--sign",
+            "--secret-key",
+            sk_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Signing manifest"))
+        .stderr(predicate::str::contains("manifest.json.minisig"));
+
+    // Verify all artifacts exist
+    assert!(output_dir.join("index.db.zst").exists());
+    assert!(output_dir.join("bloom.bin").exists());
+    assert!(output_dir.join("manifest.json").exists());
+    assert!(
+        output_dir.join("manifest.json.minisig").exists(),
+        "Signature file should be created"
+    );
+
+    // Verify signature file format
+    let sig_content = std::fs::read_to_string(output_dir.join("manifest.json.minisig")).unwrap();
+    assert!(
+        sig_content.contains("untrusted comment:"),
+        "Signature should have untrusted comment"
+    );
+    assert!(
+        sig_content.contains("trusted comment:"),
+        "Signature should have trusted comment"
+    );
+}
+
+/// End-to-end test: keygen → publish with sign → update with custom public key.
+///
+/// This is the critical security path test that verifies:
+/// 1. Generated keys work for signing
+/// 2. Signed manifests are served correctly
+/// 3. Update with --public-key validates against the correct key
+#[test]
+#[cfg_attr(not(feature = "indexer"), ignore)]
+fn test_end_to_end_signed_manifest_verification() {
+    let dir = tempdir().unwrap();
+    let source_db_path = dir.path().join("source.db");
+    let output_dir = dir.path().join("publish");
+    let sk_path = dir.path().join("signing.key");
+    let pk_path = dir.path().join("signing.pub");
+    let client_db_path = dir.path().join("client.db");
+
+    // Step 1: Create a source database
+    create_test_db(&source_db_path);
+
+    // Step 2: Generate signing keypair
+    nxv()
+        .args([
+            "keygen",
+            "--secret-key",
+            sk_path.to_str().unwrap(),
+            "--public-key",
+            pk_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    // Step 3: Publish with signing
+    nxv()
+        .args([
+            "--db-path",
+            source_db_path.to_str().unwrap(),
+            "publish",
+            "--output",
+            output_dir.to_str().unwrap(),
+            "--sign",
+            "--secret-key",
+            sk_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    // Verify all artifacts exist
+    assert!(output_dir.join("index.db.zst").exists());
+    assert!(output_dir.join("bloom.bin").exists());
+    assert!(output_dir.join("manifest.json").exists());
+    assert!(output_dir.join("manifest.json.minisig").exists());
+
+    // Step 4: Start mock server serving the published artifacts
+    let mut server = mockito::Server::new();
+
+    // Read the manifest and update URLs to point to mock server
+    let manifest_content = std::fs::read_to_string(output_dir.join("manifest.json")).unwrap();
+    let mut manifest: serde_json::Value = serde_json::from_str(&manifest_content).unwrap();
+
+    // Update URLs in manifest to point to our mock server
+    manifest["full_index"]["url"] = serde_json::json!(format!("{}/index.db.zst", server.url()));
+    manifest["bloom_filter"]["url"] = serde_json::json!(format!("{}/bloom.bin", server.url()));
+
+    let updated_manifest = serde_json::to_string(&manifest).unwrap();
+
+    // Re-sign the modified manifest (URLs changed)
+    // We need to sign the modified manifest content
+    let temp_manifest_path = dir.path().join("temp_manifest.json");
+    std::fs::write(&temp_manifest_path, &updated_manifest).unwrap();
+
+    // Sign using minisign crate directly (since we can't call nxv publish for just signing)
+    let sk_content = std::fs::read_to_string(&sk_path).unwrap();
+    let sk_box = minisign::SecretKeyBox::from_string(&sk_content).unwrap();
+    let sk = sk_box.into_unencrypted_secret_key().unwrap();
+
+    use std::io::Cursor;
+    let mut cursor = Cursor::new(updated_manifest.as_bytes());
+    let sig_box = minisign::sign(
+        None,
+        &sk,
+        &mut cursor,
+        Some("test signature"),
+        Some("test trusted comment"),
+    )
+    .unwrap();
+    let signature = sig_box.to_string();
+
+    // Set up mock endpoints
+    let _manifest_mock = server
+        .mock("GET", "/manifest.json")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(&updated_manifest)
+        .create();
+
+    let _signature_mock = server
+        .mock("GET", "/manifest.json.minisig")
+        .with_status(200)
+        .with_header("content-type", "text/plain")
+        .with_body(&signature)
+        .create();
+
+    let db_data = std::fs::read(output_dir.join("index.db.zst")).unwrap();
+    let _db_mock = server
+        .mock("GET", "/index.db.zst")
+        .with_status(200)
+        .with_header("content-type", "application/octet-stream")
+        .with_body(db_data)
+        .create();
+
+    let bloom_data = std::fs::read(output_dir.join("bloom.bin")).unwrap();
+    let _bloom_mock = server
+        .mock("GET", "/bloom.bin")
+        .with_status(200)
+        .with_header("content-type", "application/octet-stream")
+        .with_body(bloom_data)
+        .create();
+
+    let manifest_url = format!("{}/manifest.json", server.url());
+
+    // Step 5: Update using the public key - this should SUCCEED
+    nxv()
+        .args([
+            "--db-path",
+            client_db_path.to_str().unwrap(),
+            "update",
+            "--manifest-url",
+            &manifest_url,
+            "--public-key",
+            pk_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Index downloaded successfully"));
+
+    // Verify the database was created
+    assert!(
+        client_db_path.exists(),
+        "Database should be created after successful signed update"
+    );
+
+    // Step 6: Try with WRONG public key - this should FAIL
+    let wrong_pk_path = dir.path().join("wrong.pub");
+    let wrong_sk_path = dir.path().join("wrong.key");
+
+    nxv()
+        .args([
+            "keygen",
+            "--secret-key",
+            wrong_sk_path.to_str().unwrap(),
+            "--public-key",
+            wrong_pk_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let client_db_path2 = dir.path().join("client2.db");
+
+    nxv()
+        .args([
+            "--db-path",
+            client_db_path2.to_str().unwrap(),
+            "update",
+            "--manifest-url",
+            &manifest_url,
+            "--public-key",
+            wrong_pk_path.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("signature verification failed"));
+
+    // Verify database was NOT created with wrong key
+    assert!(
+        !client_db_path2.exists(),
+        "Database should NOT be created when signature verification fails"
+    );
 }

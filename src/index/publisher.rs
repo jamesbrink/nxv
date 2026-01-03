@@ -3,13 +3,13 @@
 use crate::bloom::PackageBloomFilter;
 use crate::db::Database;
 use crate::db::queries::get_all_unique_attrs;
-use crate::error::Result;
+use crate::error::{NxvError, Result};
 use crate::remote::download::{compress_zstd, file_sha256};
 use crate::remote::manifest::{DeltaFile, IndexFile, Manifest};
 use chrono::Utc;
 use indicatif::{ProgressBar, ProgressStyle};
 use sha2::{Digest, Sha256};
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
@@ -23,6 +23,242 @@ const COMPRESSION_LEVEL: i32 = 19;
 pub const INDEX_DB_NAME: &str = "index.db.zst";
 pub const BLOOM_FILTER_NAME: &str = "bloom.bin";
 pub const MANIFEST_NAME: &str = "manifest.json";
+pub const MANIFEST_SIG_NAME: &str = "manifest.json.minisig";
+
+/// Replace the untrusted comment line in a minisign key string.
+///
+/// Minisign keys have the format:
+/// ```text
+/// untrusted comment: <comment>
+/// <base64 key data>
+/// ```
+///
+/// This function replaces the first line with a custom comment,
+/// making it robust against upstream format changes.
+fn replace_untrusted_comment(key_str: &str, new_comment: &str) -> String {
+    let mut lines = key_str.lines();
+    let first_line = lines.next().unwrap_or("");
+
+    // Only replace if the first line looks like an untrusted comment
+    if first_line.starts_with("untrusted comment:") {
+        let rest: Vec<&str> = lines.collect();
+        format!("{}\n{}", new_comment, rest.join("\n"))
+    } else {
+        // Unexpected format - prepend our comment but keep original intact
+        format!("{}\n{}", new_comment, key_str)
+    }
+}
+
+/// Generate a new minisign keypair for signing manifests.
+///
+/// Creates an unencrypted keypair compatible with the minisign Rust crate.
+///
+/// # Arguments
+/// * `secret_key_path` - Where to save the secret key
+/// * `public_key_path` - Where to save the public key
+/// * `comment` - Comment to embed in the key files
+/// * `force` - If true, overwrite existing files; if false, fail if files exist
+///
+/// # Returns
+/// The public key string (for embedding in applications).
+pub fn generate_keypair<P: AsRef<Path>, Q: AsRef<Path>>(
+    secret_key_path: P,
+    public_key_path: Q,
+    comment: &str,
+    force: bool,
+) -> Result<String> {
+    let secret_key_path = secret_key_path.as_ref();
+    let public_key_path = public_key_path.as_ref();
+
+    // Generate keypair
+    let keypair = minisign::KeyPair::generate_unencrypted_keypair()
+        .map_err(|e| NxvError::Signing(format!("failed to generate keypair: {}", e)))?;
+
+    // Serialize with comment
+    let sk_box = keypair
+        .sk
+        .to_box(None)
+        .map_err(|e| NxvError::Signing(format!("failed to serialize secret key: {}", e)))?;
+
+    let pk_box = keypair
+        .pk
+        .to_box()
+        .map_err(|e| NxvError::Signing(format!("failed to serialize public key: {}", e)))?;
+
+    // Replace minisign's default comments with custom ones.
+    // We replace the first line (the untrusted comment) regardless of its content,
+    // making this robust against upstream format changes.
+    let sk_str = sk_box.to_string();
+    let sk_with_comment =
+        replace_untrusted_comment(&sk_str, &format!("untrusted comment: {}", comment));
+
+    let pk_str = pk_box.to_string();
+    let pk_with_comment = replace_untrusted_comment(
+        &pk_str,
+        &format!("untrusted comment: {} - public key:", comment),
+    );
+
+    // Write key files atomically (use create_new to avoid TOCTOU race)
+    write_key_file(secret_key_path, &sk_with_comment, force, "secret key")?;
+    write_key_file(public_key_path, &pk_with_comment, force, "public key")?;
+
+    // Extract the base64 public key for embedding
+    let pk_base64 = pk_with_comment.lines().nth(1).unwrap_or("").to_string();
+
+    Ok(pk_base64)
+}
+
+/// Write a key file, optionally refusing to overwrite existing files.
+fn write_key_file(path: &Path, content: &str, force: bool, key_type: &str) -> Result<()> {
+    if force {
+        // Overwrite any existing file
+        fs::write(path, content).map_err(|e| {
+            NxvError::Signing(format!(
+                "failed to write {} '{}': {}",
+                key_type,
+                path.display(),
+                e
+            ))
+        })
+    } else {
+        // Use create_new to atomically check existence and create
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::AlreadyExists {
+                    NxvError::Signing(format!(
+                        "{} '{}' already exists. Use --force to overwrite.",
+                        key_type,
+                        path.display()
+                    ))
+                } else {
+                    NxvError::Signing(format!(
+                        "failed to create {} '{}': {}",
+                        key_type,
+                        path.display(),
+                        e
+                    ))
+                }
+            })?;
+
+        file.write_all(content.as_bytes()).map_err(|e| {
+            NxvError::Signing(format!(
+                "failed to write {} '{}': {}",
+                key_type,
+                path.display(),
+                e
+            ))
+        })
+    }
+}
+
+/// Resolve a secret key from either a file path or raw key content.
+///
+/// This function handles the NXV_SECRET_KEY environment variable which can contain
+/// either a path to a key file or the raw key content itself.
+///
+/// # Arguments
+/// * `key` - Either a file path or the raw minisign secret key content
+///
+/// # Returns
+/// The secret key content as a string.
+pub fn resolve_secret_key(key: &str) -> Result<String> {
+    let key = key.trim();
+
+    // Check if it looks like a file path that exists
+    let path = Path::new(key);
+    if path.exists() {
+        return fs::read_to_string(path)
+            .map_err(|e| NxvError::Signing(format!("failed to read secret key '{}': {}", key, e)));
+    }
+
+    // Check if it looks like raw key content (starts with "untrusted comment:")
+    if key.starts_with("untrusted comment:") {
+        return Ok(key.to_string());
+    }
+
+    // If it looks like a path but doesn't exist, give a helpful error
+    if key.contains('/') || key.contains('\\') || key.ends_with(".key") {
+        return Err(NxvError::Signing(format!(
+            "secret key file '{}' not found",
+            key
+        )));
+    }
+
+    // Otherwise, assume it's raw key content (user may have stripped the comment)
+    // Try to use it as-is and let the parser handle validation
+    Ok(key.to_string())
+}
+
+/// Sign a manifest file using a minisign secret key.
+///
+/// Uses the minisign Rust crate directly for signing.
+/// Keys must be generated with `nxv keygen` for compatibility.
+///
+/// # Arguments
+/// * `manifest_path` - Path to the manifest.json file to sign
+/// * `secret_key` - Either a file path or raw secret key content
+///
+/// # Returns
+/// The path to the created signature file.
+pub fn sign_manifest<P: AsRef<Path>>(
+    manifest_path: P,
+    secret_key: &str,
+) -> Result<std::path::PathBuf> {
+    use std::io::Cursor;
+
+    let manifest_path = manifest_path.as_ref();
+
+    // Resolve the secret key (handles both file paths and raw content)
+    let sk_string = resolve_secret_key(secret_key)?;
+
+    // Parse the secret key
+    let sk_box = minisign::SecretKeyBox::from_string(&sk_string)
+        .map_err(|e| NxvError::Signing(format!("failed to parse secret key: {}", e)))?;
+
+    // Load as unencrypted key
+    let sk = sk_box.into_unencrypted_secret_key().map_err(|e| {
+        NxvError::Signing(format!(
+            "failed to load secret key ({}). Keys must be generated with 'nxv keygen'.",
+            e
+        ))
+    })?;
+
+    // Read the manifest content
+    let manifest_content = fs::read(manifest_path).map_err(|e| {
+        NxvError::Signing(format!(
+            "failed to read manifest '{}': {}",
+            manifest_path.display(),
+            e
+        ))
+    })?;
+
+    // Sign the manifest
+    let mut cursor = Cursor::new(&manifest_content);
+    let trusted_comment = format!("timestamp:{}", chrono::Utc::now().to_rfc3339());
+    let sig_box = minisign::sign(
+        None,
+        &sk,
+        &mut cursor,
+        Some("nxv manifest signature"),
+        Some(&trusted_comment),
+    )
+    .map_err(|e| NxvError::Signing(format!("failed to sign manifest: {}", e)))?;
+
+    // Write the signature file
+    let sig_path = manifest_path.with_extension("json.minisig");
+    fs::write(&sig_path, sig_box.to_string()).map_err(|e| {
+        NxvError::Signing(format!(
+            "failed to write signature file '{}': {}",
+            sig_path.display(),
+            e
+        ))
+    })?;
+
+    Ok(sig_path)
+}
 
 /// Format bytes as human-readable size.
 fn format_bytes(bytes: u64) -> String {
@@ -455,6 +691,7 @@ pub fn generate_bloom_filter<P: AsRef<Path>, Q: AsRef<Path>>(
 /// - `index.db.zst` - Compressed database
 /// - `bloom.bin` - Bloom filter for fast lookups
 /// - `manifest.json` - Manifest with URLs and checksums
+/// - `manifest.json.minisig` - Signature file (if secret_key is provided)
 ///
 /// Returns the path to the output directory.
 pub fn publish_index<P: AsRef<Path>, Q: AsRef<Path>>(
@@ -462,6 +699,7 @@ pub fn publish_index<P: AsRef<Path>, Q: AsRef<Path>>(
     output_dir: Q,
     url_prefix: Option<&str>,
     show_progress: bool,
+    secret_key: Option<&str>,
 ) -> Result<()> {
     let db_path = db_path.as_ref();
     let output_dir = output_dir.as_ref();
@@ -492,6 +730,19 @@ pub fn publish_index<P: AsRef<Path>, Q: AsRef<Path>>(
         bloom_filter.clone(),
     )?;
 
+    // Sign the manifest if a secret key was provided
+    let signed = if let Some(sk) = secret_key {
+        if show_progress {
+            eprintln!();
+            eprintln!("Signing manifest...");
+        }
+        let manifest_path = output_dir.join(MANIFEST_NAME);
+        sign_manifest(&manifest_path, sk)?;
+        true
+    } else {
+        false
+    };
+
     if show_progress {
         let commit_display = if last_commit.is_empty() {
             "unknown (missing meta)".to_string()
@@ -512,6 +763,9 @@ pub fn publish_index<P: AsRef<Path>, Q: AsRef<Path>>(
             format_bytes(bloom_filter.size_bytes)
         );
         eprintln!("  - {}", MANIFEST_NAME);
+        if signed {
+            eprintln!("  - {}", MANIFEST_SIG_NAME);
+        }
         eprintln!();
         eprintln!("Last indexed commit: {}", commit_display);
     }
@@ -677,5 +931,208 @@ mod tests {
     fn test_sql_quote_opt() {
         assert_eq!(sql_quote_opt(&Some("hello".to_string())), "'hello'");
         assert_eq!(sql_quote_opt(&None), "NULL");
+    }
+
+    #[test]
+    fn test_sign_manifest_missing_key() {
+        let dir = tempdir().unwrap();
+        let manifest_path = dir.path().join("manifest.json");
+        let secret_key_path = dir.path().join("nonexistent.key");
+
+        // Create a dummy manifest
+        fs::write(&manifest_path, r#"{"version":1}"#).unwrap();
+
+        // Should fail because secret key doesn't exist
+        let result = sign_manifest(&manifest_path, secret_key_path.to_str().unwrap());
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("not found"),
+            "Unexpected error: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_sign_manifest_invalid_key() {
+        let dir = tempdir().unwrap();
+        let manifest_path = dir.path().join("manifest.json");
+        let secret_key_path = dir.path().join("invalid.key");
+
+        // Create a dummy manifest and invalid key
+        fs::write(&manifest_path, r#"{"version":1}"#).unwrap();
+        fs::write(&secret_key_path, "not a valid key").unwrap();
+
+        // Should fail because key is invalid
+        let result = sign_manifest(&manifest_path, secret_key_path.to_str().unwrap());
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("failed to parse secret key")
+                || err_msg.contains("failed to load secret key"),
+            "Unexpected error: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_generate_and_sign() {
+        let dir = tempdir().unwrap();
+        let sk_path = dir.path().join("test.key");
+        let pk_path = dir.path().join("test.pub");
+        let manifest_path = dir.path().join("manifest.json");
+
+        // Generate keypair
+        let pk = generate_keypair(&sk_path, &pk_path, "test key", false).unwrap();
+        assert!(!pk.is_empty());
+        assert!(sk_path.exists());
+        assert!(pk_path.exists());
+
+        // Create a manifest
+        fs::write(&manifest_path, r#"{"version":1}"#).unwrap();
+
+        // Sign it
+        let sig_path = sign_manifest(&manifest_path, sk_path.to_str().unwrap()).unwrap();
+        assert!(sig_path.exists());
+
+        // Verify signature file contains expected content
+        let sig_content = fs::read_to_string(&sig_path).unwrap();
+        assert!(sig_content.contains("untrusted comment:"));
+        assert!(sig_content.contains("trusted comment:"));
+    }
+
+    #[test]
+    fn test_generate_keypair_force_overwrite() {
+        let dir = tempdir().unwrap();
+        let sk_path = dir.path().join("test.key");
+        let pk_path = dir.path().join("test.pub");
+
+        // Generate first keypair
+        let pk1 = generate_keypair(&sk_path, &pk_path, "first key", false).unwrap();
+        let sk1_content = fs::read_to_string(&sk_path).unwrap();
+
+        // Try to generate again without force - should fail
+        let result = generate_keypair(&sk_path, &pk_path, "second key", false);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("already exists"));
+
+        // Generate again with force - should succeed
+        let pk2 = generate_keypair(&sk_path, &pk_path, "second key", true).unwrap();
+        let sk2_content = fs::read_to_string(&sk_path).unwrap();
+
+        // Keys should be different (new keypair generated)
+        assert_ne!(pk1, pk2);
+        assert_ne!(sk1_content, sk2_content);
+    }
+
+    #[test]
+    fn test_publish_index_without_signing() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let output_dir = dir.path().join("output");
+
+        create_test_db(&db_path);
+
+        // Publish without signing
+        publish_index(&db_path, &output_dir, None, false, None).unwrap();
+
+        // Verify all artifacts except signature
+        assert!(output_dir.join(INDEX_DB_NAME).exists());
+        assert!(output_dir.join(BLOOM_FILTER_NAME).exists());
+        assert!(output_dir.join(MANIFEST_NAME).exists());
+        assert!(!output_dir.join(MANIFEST_SIG_NAME).exists());
+    }
+
+    #[test]
+    fn test_sign_and_verify_roundtrip() {
+        use crate::remote::manifest::verify_manifest_signature_with_key;
+
+        let dir = tempdir().unwrap();
+        let sk_path = dir.path().join("test.key");
+        let pk_path = dir.path().join("test.pub");
+        let manifest_path = dir.path().join("manifest.json");
+
+        // Generate keypair
+        generate_keypair(&sk_path, &pk_path, "roundtrip test", false).unwrap();
+
+        // Create a manifest
+        let manifest_content = r#"{"version":1,"latest_commit":"abc123"}"#;
+        fs::write(&manifest_path, manifest_content).unwrap();
+
+        // Sign it
+        let sig_path = sign_manifest(&manifest_path, sk_path.to_str().unwrap()).unwrap();
+
+        // Read public key and signature
+        let pk_content = fs::read_to_string(&pk_path).unwrap();
+        let sig_content = fs::read_to_string(&sig_path).unwrap();
+
+        // Verify the signature
+        let result = verify_manifest_signature_with_key(
+            manifest_content.as_bytes(),
+            &sig_content,
+            &pk_content,
+        );
+
+        assert!(
+            result.is_ok(),
+            "Signature verification should succeed: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_resolve_secret_key_from_file() {
+        let dir = tempdir().unwrap();
+        let sk_path = dir.path().join("test.key");
+        let pk_path = dir.path().join("test.pub");
+
+        // Generate a real keypair
+        generate_keypair(&sk_path, &pk_path, "test", false).unwrap();
+
+        // Resolve from file path
+        let key_content = resolve_secret_key(sk_path.to_str().unwrap()).unwrap();
+        assert!(key_content.contains("untrusted comment:"));
+    }
+
+    #[test]
+    fn test_resolve_secret_key_from_raw_content() {
+        let dir = tempdir().unwrap();
+        let sk_path = dir.path().join("test.key");
+        let pk_path = dir.path().join("test.pub");
+
+        // Generate a real keypair
+        generate_keypair(&sk_path, &pk_path, "test", false).unwrap();
+
+        // Read the key content
+        let original_content = fs::read_to_string(&sk_path).unwrap();
+
+        // Resolve from raw content
+        let resolved = resolve_secret_key(&original_content).unwrap();
+        assert_eq!(resolved, original_content);
+    }
+
+    #[test]
+    fn test_resolve_secret_key_nonexistent_path() {
+        // Should fail for path-like strings that don't exist
+        let result = resolve_secret_key("/nonexistent/path/to/key.key");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("not found"));
+    }
+
+    #[test]
+    fn test_resolve_secret_key_with_whitespace() {
+        let dir = tempdir().unwrap();
+        let sk_path = dir.path().join("test.key");
+        let pk_path = dir.path().join("test.pub");
+
+        // Generate a real keypair
+        generate_keypair(&sk_path, &pk_path, "test", false).unwrap();
+
+        // Resolve with leading/trailing whitespace
+        let path_with_space = format!("  {}  ", sk_path.to_str().unwrap());
+        let key_content = resolve_secret_key(&path_with_space).unwrap();
+        assert!(key_content.contains("untrusted comment:"));
     }
 }

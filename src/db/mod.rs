@@ -48,13 +48,54 @@ impl Database {
     }
 
     /// Open a database in read-only mode.
+    ///
+    /// Validates that the database schema is compatible with this version of nxv.
+    /// Returns an error if the database was created with a newer, incompatible schema version.
     pub fn open_readonly<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
         if !path.exists() {
             return Err(NxvError::NoIndex);
         }
         let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        Ok(Self { conn })
+        let db = Self { conn };
+
+        // Validate schema version compatibility
+        db.validate_schema_version()?;
+
+        Ok(db)
+    }
+
+    /// Validate that the database schema is compatible with this version of nxv.
+    fn validate_schema_version(&self) -> Result<()> {
+        // Check if meta table exists (very old or corrupt database)
+        let has_meta: bool = self.conn.query_row(
+            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='meta'",
+            [],
+            |row| row.get(0),
+        )?;
+
+        if !has_meta {
+            return Err(NxvError::CorruptIndex("missing meta table".to_string()));
+        }
+
+        // Check schema version
+        let version_str = self.get_meta("schema_version")?;
+        let version_str = version_str.as_deref().unwrap_or("0");
+        let db_version: u32 = version_str.parse().map_err(|_| {
+            NxvError::CorruptIndex(format!(
+                "invalid schema_version '{}': expected integer",
+                version_str
+            ))
+        })?;
+
+        if db_version > SCHEMA_VERSION {
+            return Err(NxvError::CorruptIndex(format!(
+                "database schema version {} is newer than supported version {}",
+                db_version, SCHEMA_VERSION
+            )));
+        }
+
+        Ok(())
     }
 
     /// Initializes the database schema and related search index.

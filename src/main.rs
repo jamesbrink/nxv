@@ -1,4 +1,4 @@
-//! nxv - CLI tool for finding specific versions of Nix packages.
+//! nxv - Nix Version Index
 
 mod backend;
 mod bloom;
@@ -62,6 +62,8 @@ fn main() {
         Commands::Reset(args) => cmd_reset(&cli, args),
         #[cfg(feature = "indexer")]
         Commands::Publish(args) => cmd_publish(&cli, args),
+        #[cfg(feature = "indexer")]
+        Commands::Keygen(args) => cmd_keygen(&cli, args),
         Commands::Serve(args) => cmd_serve(&cli, args),
     };
 
@@ -110,7 +112,7 @@ fn get_backend(cli: &Cli) -> Result<backend::Backend> {
     use backend::Backend;
 
     if let Ok(url) = std::env::var("NXV_API_URL") {
-        let client = client::ApiClient::new(&url)?;
+        let client = client::ApiClient::new_with_timeout(&url, cli.api_timeout)?;
         Ok(Backend::Remote(client))
     } else {
         let db = db::Database::open_readonly(&cli.db_path)?;
@@ -147,7 +149,7 @@ fn get_backend_with_prompt(cli: &Cli) -> Result<backend::Backend> {
 
     // If using remote API, no need for local database
     if let Ok(url) = std::env::var("NXV_API_URL") {
-        let client = client::ApiClient::new(&url)?;
+        let client = client::ApiClient::new_with_timeout(&url, cli.api_timeout)?;
         return Ok(Backend::Remote(client));
     }
 
@@ -170,6 +172,8 @@ fn get_backend_with_prompt(cli: &Cli) -> Result<backend::Backend> {
                     let update_args = cli::UpdateArgs {
                         force: false,
                         manifest_url: None,
+                        skip_verify: false,
+                        public_key: None,
                     };
                     cmd_update(cli, &update_args)?;
 
@@ -379,7 +383,15 @@ fn cmd_update(cli: &Cli, args: &cli::UpdateArgs) -> Result<()> {
         eprintln!("Checking for updates...");
     }
 
-    let status = perform_update(manifest_url, &cli.db_path, args.force, show_progress)?;
+    let status = perform_update(
+        manifest_url,
+        &cli.db_path,
+        args.force,
+        show_progress,
+        args.skip_verify,
+        args.public_key.as_deref(),
+        Some(cli.api_timeout),
+    )?;
 
     match status {
         UpdateStatus::UpToDate { commit } => {
@@ -1137,7 +1149,11 @@ fn cmd_backfill(cli: &Cli, args: &cli::BackfillArgs) -> Result<()> {
     eprintln!();
 
     let config = BackfillConfig {
-        fields: args.fields.clone().unwrap_or_default(),
+        fields: args
+            .fields
+            .as_ref()
+            .map(|f| f.iter().map(|field| field.as_str().to_string()).collect())
+            .unwrap_or_default(),
         limit: args.limit,
         dry_run: args.dry_run,
         use_history: args.history,
@@ -1269,7 +1285,35 @@ fn cmd_publish(cli: &Cli, args: &cli::PublishArgs) -> Result<()> {
         &args.output,
         args.url_prefix.as_deref(),
         !cli.quiet,
+        args.secret_key.as_deref(),
     )?;
+
+    Ok(())
+}
+
+/// Generate a new minisign keypair for signing manifests.
+#[cfg(feature = "indexer")]
+fn cmd_keygen(cli: &Cli, args: &cli::KeygenArgs) -> Result<()> {
+    use crate::index::publisher::generate_keypair;
+
+    // generate_keypair handles force check atomically to avoid TOCTOU race
+    let pk_base64 = generate_keypair(
+        &args.secret_key,
+        &args.public_key,
+        &args.comment,
+        args.force,
+    )?;
+
+    if !cli.quiet {
+        eprintln!("Generated keypair:");
+        eprintln!("  Secret key: {}", args.secret_key.display());
+        eprintln!("  Public key: {}", args.public_key.display());
+        eprintln!();
+        eprintln!("Public key (for embedding in manifest.rs):");
+        eprintln!("  {}", pk_base64);
+        eprintln!();
+        eprintln!("Keep the secret key safe! You'll need it to sign manifests.");
+    }
 
     Ok(())
 }

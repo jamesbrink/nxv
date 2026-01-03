@@ -11,6 +11,59 @@ use std::path::Path;
 pub const DEFAULT_MANIFEST_URL: &str =
     "https://github.com/jamesbrink/nxv/releases/download/index-latest/manifest.json";
 
+/// Default timeout for manifest requests in seconds.
+const DEFAULT_MANIFEST_TIMEOUT_SECS: u64 = 30;
+
+/// Resolve a public key argument to its content.
+///
+/// The key can be either:
+/// - A path to a .pub file containing the key (checked first)
+/// - A raw minisign public key (starts with "untrusted comment:" or "RW")
+///
+/// File paths are checked first to avoid ambiguity with paths that happen
+/// to start with "RW" (e.g., "RWkeys/signing.pub").
+fn resolve_public_key(key: &str) -> Result<String> {
+    // Check if it's a file path first (handles paths like "RWkeys/signing.pub")
+    let path = Path::new(key);
+    if path.exists() {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| NxvError::PublicKey(format!("failed to read '{}': {}", key, e)))?;
+        return Ok(content);
+    }
+
+    // Check if it looks like a raw key (inline key content)
+    if key.starts_with("untrusted comment:") || key.starts_with("RW") {
+        return Ok(key.to_string());
+    }
+
+    // Provide helpful error message based on what the input looks like
+    if key.contains('/') || key.contains('\\') || key.ends_with(".pub") {
+        Err(NxvError::PublicKey(format!("file '{}' not found", key)))
+    } else {
+        Err(NxvError::PublicKey(format!(
+            "'{}' is not a valid minisign public key (expected format: RW...)",
+            key
+        )))
+    }
+}
+
+/// Build the signature URL by appending .minisig to the path component.
+///
+/// Handles URLs with query parameters correctly by modifying only the path.
+/// For example: `https://example.com/manifest.json?token=abc` becomes
+/// `https://example.com/manifest.json.minisig?token=abc`
+fn build_signature_url(manifest_url: &str) -> String {
+    // Try to parse as URL to handle query params correctly
+    if let Ok(mut parsed) = reqwest::Url::parse(manifest_url) {
+        let new_path = format!("{}.minisig", parsed.path());
+        parsed.set_path(&new_path);
+        parsed.to_string()
+    } else {
+        // Fallback for non-standard URLs
+        format!("{}.minisig", manifest_url)
+    }
+}
+
 /// Update status after checking for updates.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -34,11 +87,20 @@ pub fn check_for_updates<P: AsRef<Path>>(
     db_path: P,
     manifest_url: Option<&str>,
     show_progress: bool,
+    skip_verify: bool,
+    public_key: Option<&str>,
+    timeout_secs: Option<u64>,
 ) -> Result<UpdateStatus> {
     let manifest_url = manifest_url.unwrap_or(DEFAULT_MANIFEST_URL);
 
     // Fetch the manifest
-    let manifest = fetch_manifest(manifest_url, show_progress)?;
+    let manifest = fetch_manifest(
+        manifest_url,
+        show_progress,
+        skip_verify,
+        public_key,
+        timeout_secs,
+    )?;
 
     // Check if local index exists
     let db_path = db_path.as_ref();
@@ -80,12 +142,23 @@ pub fn check_for_updates<P: AsRef<Path>>(
     }
 }
 
-/// Fetch and parse the remote manifest.
-fn fetch_manifest(url: &str, _show_progress: bool) -> Result<Manifest> {
+/// Fetch, verify, and parse the remote manifest.
+///
+/// When `skip_verify` is false, downloads the `.minisig` signature file
+/// and verifies the manifest using the embedded public key.
+fn fetch_manifest(
+    url: &str,
+    show_progress: bool,
+    skip_verify: bool,
+    public_key: Option<&str>,
+    timeout_secs: Option<u64>,
+) -> Result<Manifest> {
+    let timeout = timeout_secs.unwrap_or(DEFAULT_MANIFEST_TIMEOUT_SECS);
     let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(timeout))
         .build()?;
 
+    // Download manifest JSON
     let response = client.get(url).send()?;
 
     if !response.status().is_success() {
@@ -95,7 +168,60 @@ fn fetch_manifest(url: &str, _show_progress: bool) -> Result<Manifest> {
         )));
     }
 
-    let manifest: Manifest = response.json()?;
+    let manifest_json = response.text()?;
+
+    // Verify signature unless skipped
+    if skip_verify {
+        if show_progress {
+            eprintln!("⚠ Warning: Skipping manifest signature verification (--skip-verify)");
+        }
+    } else {
+        // Try to download signature file
+        // Handle URLs with query params by appending .minisig to path only
+        let sig_url = build_signature_url(url);
+        match client.get(&sig_url).send() {
+            Ok(sig_response) if sig_response.status().is_success() => {
+                let signature = sig_response.text()?;
+
+                // Verify signature using custom or embedded public key
+                if let Some(key) = public_key {
+                    // Resolve key: could be raw key or path to .pub file
+                    let key_content = resolve_public_key(key)?;
+                    crate::remote::manifest::verify_manifest_signature_with_key(
+                        manifest_json.as_bytes(),
+                        &signature,
+                        &key_content,
+                    )?;
+                } else {
+                    // Use embedded public key
+                    Manifest::parse_and_verify(&manifest_json, &signature)?;
+                }
+
+                // Signature valid, return parsed manifest
+                let manifest: Manifest = serde_json::from_str(&manifest_json)?;
+                if manifest.version > 2 {
+                    return Err(NxvError::InvalidManifestVersion(manifest.version));
+                }
+                return Ok(manifest);
+            }
+            Ok(sig_response) => {
+                // Signature file not found - fail unless skip_verify
+                return Err(NxvError::NetworkMessage(format!(
+                    "Manifest signature not found (HTTP {}). Use --skip-verify to bypass.",
+                    sig_response.status()
+                )));
+            }
+            Err(e) => {
+                return Err(NxvError::NetworkMessage(format!(
+                    "Failed to fetch manifest signature: {}. Use --skip-verify to bypass.",
+                    e
+                )));
+            }
+        }
+    }
+
+    // Parse without verification (skip_verify mode)
+    let manifest: Manifest = serde_json::from_str(&manifest_json)?;
 
     // Validate manifest version
     if manifest.version > 2 {
@@ -110,9 +236,18 @@ pub fn apply_full_update<P: AsRef<Path>>(
     manifest_url: Option<&str>,
     db_path: P,
     show_progress: bool,
+    skip_verify: bool,
+    public_key: Option<&str>,
+    timeout_secs: Option<u64>,
 ) -> Result<()> {
     let manifest_url = manifest_url.unwrap_or(DEFAULT_MANIFEST_URL);
-    let manifest = fetch_manifest(manifest_url, show_progress)?;
+    let manifest = fetch_manifest(
+        manifest_url,
+        show_progress,
+        skip_verify,
+        public_key,
+        timeout_secs,
+    )?;
 
     let db_path = db_path.as_ref();
 
@@ -148,11 +283,20 @@ pub fn apply_delta_update<P: AsRef<Path>>(
     db_path: P,
     from_commit: &str,
     show_progress: bool,
+    skip_verify: bool,
+    public_key: Option<&str>,
+    timeout_secs: Option<u64>,
 ) -> Result<()> {
     use crate::db::import::import_delta_sql;
 
     let manifest_url = manifest_url.unwrap_or(DEFAULT_MANIFEST_URL);
-    let manifest = fetch_manifest(manifest_url, show_progress)?;
+    let manifest = fetch_manifest(
+        manifest_url,
+        show_progress,
+        skip_verify,
+        public_key,
+        timeout_secs,
+    )?;
 
     let delta = manifest.find_delta(from_commit).ok_or_else(|| {
         NxvError::NetworkMessage(format!("No delta available from commit {}", from_commit))
@@ -202,8 +346,18 @@ pub fn perform_update<P: AsRef<Path>>(
     db_path: P,
     force_full: bool,
     show_progress: bool,
+    skip_verify: bool,
+    public_key: Option<&str>,
+    timeout_secs: Option<u64>,
 ) -> Result<UpdateStatus> {
-    let status = check_for_updates(&db_path, manifest_url, show_progress)?;
+    let status = check_for_updates(
+        &db_path,
+        manifest_url,
+        show_progress,
+        skip_verify,
+        public_key,
+        timeout_secs,
+    )?;
 
     match &status {
         UpdateStatus::UpToDate { commit } => {
@@ -212,13 +366,35 @@ pub fn perform_update<P: AsRef<Path>>(
             }
         }
         UpdateStatus::NoLocalIndex { .. } | UpdateStatus::FullDownloadNeeded { .. } => {
-            apply_full_update(manifest_url, &db_path, show_progress)?;
+            apply_full_update(
+                manifest_url,
+                &db_path,
+                show_progress,
+                skip_verify,
+                public_key,
+                timeout_secs,
+            )?;
         }
         UpdateStatus::DeltaAvailable { from_commit, .. } => {
             if force_full {
-                apply_full_update(manifest_url, &db_path, show_progress)?;
+                apply_full_update(
+                    manifest_url,
+                    &db_path,
+                    show_progress,
+                    skip_verify,
+                    public_key,
+                    timeout_secs,
+                )?;
             } else {
-                apply_delta_update(manifest_url, &db_path, from_commit, show_progress)?;
+                apply_delta_update(
+                    manifest_url,
+                    &db_path,
+                    from_commit,
+                    show_progress,
+                    skip_verify,
+                    public_key,
+                    timeout_secs,
+                )?;
             }
         }
     }
@@ -467,5 +643,72 @@ COMMIT;
             )
             .unwrap();
         assert_eq!(commit, "commit_v3");
+    }
+
+    #[test]
+    fn test_resolve_public_key_raw_key() {
+        // Test with a raw key starting with "RW"
+        let key = "RWSBt4RfZg0FEiiDheTd5vYE60LQTeDH+MHrgWDR6TtIHuGMAuJjMIaL";
+        let result = resolve_public_key(key).unwrap();
+        assert_eq!(result, key);
+    }
+
+    #[test]
+    fn test_resolve_public_key_with_comment() {
+        // Test with a full key including untrusted comment
+        let key = "untrusted comment: minisign public key\nRWSBt4RfZg0FEiiDheTd5vYE60LQTeDH";
+        let result = resolve_public_key(key).unwrap();
+        assert_eq!(result, key);
+    }
+
+    #[test]
+    fn test_resolve_public_key_from_file() {
+        let dir = tempdir().unwrap();
+        let key_path = dir.path().join("test.pub");
+        let key_content = "untrusted comment: test key\nRWTest123";
+        fs::write(&key_path, key_content).unwrap();
+
+        let result = resolve_public_key(key_path.to_str().unwrap()).unwrap();
+        assert_eq!(result, key_content);
+    }
+
+    #[test]
+    fn test_resolve_public_key_invalid_path() {
+        let result = resolve_public_key("/nonexistent/path/to/key.pub");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Public key error"));
+        assert!(err.contains("file") && err.contains("not found"));
+    }
+
+    #[test]
+    fn test_resolve_public_key_invalid_format() {
+        // Not a file path and not a valid key format
+        let result = resolve_public_key("invalid_key_string");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Public key error"));
+        assert!(err.contains("not a valid minisign public key"));
+    }
+
+    #[test]
+    fn test_build_signature_url_simple() {
+        let url = build_signature_url("https://example.com/manifest.json");
+        assert_eq!(url, "https://example.com/manifest.json.minisig");
+    }
+
+    #[test]
+    fn test_build_signature_url_with_query_params() {
+        let url = build_signature_url("https://example.com/manifest.json?token=abc&version=2");
+        assert_eq!(
+            url,
+            "https://example.com/manifest.json.minisig?token=abc&version=2"
+        );
+    }
+
+    #[test]
+    fn test_build_signature_url_with_fragment() {
+        let url = build_signature_url("https://example.com/manifest.json#section");
+        assert_eq!(url, "https://example.com/manifest.json.minisig#section");
     }
 }

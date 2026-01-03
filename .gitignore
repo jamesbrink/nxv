@@ -28,6 +28,9 @@ Thumbs.db
 .env
 .env.local
 
+# Signing keys (keep secret key private!)
+*.key
+keys/nxv.key
 
 # Added by cargo
 

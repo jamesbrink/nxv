@@ -6,18 +6,18 @@ use std::io::Cursor;
 
 /// Embedded public key for verifying manifest signatures.
 /// This is the minisign public key used to sign official nxv manifests.
+/// Loaded at compile time from `keys/nxv.pub`.
 ///
-/// To generate a new keypair:
+/// To generate a new keypair (requires `--features indexer`):
 /// ```sh
-/// minisign -G -p nxv.pub -s nxv.key -c "nxv manifest signing key"
+/// nxv keygen --secret-key nxv.key --public-key nxv.pub
 /// ```
 ///
-/// To sign a manifest:
+/// To sign a manifest during publish:
 /// ```sh
-/// minisign -S -s nxv.key -m manifest.json
+/// nxv publish --sign --secret-key nxv.key <index.db>
 /// ```
-#[allow(dead_code)]
-pub const MANIFEST_PUBLIC_KEY: &str = "untrusted comment: nxv manifest signing key\nRWTHy8Hb+LSqSJNRMBXPzXl8J5F5WTWmYu5J0CxmZWQ3z8rLnVJk9ABC";
+pub const MANIFEST_PUBLIC_KEY: &str = include_str!("../../keys/nxv.pub");
 
 /// Remote index manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,7 +51,6 @@ pub struct DeltaFile {
 
 impl Manifest {
     /// Parse a manifest from JSON content.
-    #[allow(dead_code)]
     pub fn parse(json: &str) -> Result<Self> {
         let manifest: Manifest = serde_json::from_str(json)?;
         Ok(manifest)
@@ -60,25 +59,12 @@ impl Manifest {
     /// Parse and verify a manifest from JSON content and its signature.
     ///
     /// The signature should be in minisign format.
-    #[allow(dead_code)]
     pub fn parse_and_verify(json: &str, signature: &str) -> Result<Self> {
         // Verify signature first
         verify_manifest_signature(json.as_bytes(), signature)?;
 
         // Then parse the manifest
         Self::parse(json)
-    }
-
-    /// Fetch and parse a manifest from a URL.
-    #[allow(dead_code)]
-    pub fn fetch(_url: &str) -> Result<Self> {
-        // TODO: Implement in Phase 7
-        // This will:
-        // 1. Download the manifest JSON
-        // 2. Download the signature file
-        // 3. Verify the signature
-        // 4. Parse and validate
-        unimplemented!("Manifest fetch not yet implemented")
     }
 
     /// Find a delta that can update from the given commit.
@@ -88,11 +74,12 @@ impl Manifest {
 }
 
 /// Verify a manifest signature using the embedded public key.
-#[allow(dead_code)]
 pub fn verify_manifest_signature(manifest_data: &[u8], signature_str: &str) -> Result<()> {
-    // Parse the public key
-    let pk = minisign::PublicKey::from_base64(MANIFEST_PUBLIC_KEY)
+    // Parse the public key using from_box (expects comment + base64 format)
+    let pk_box = minisign::PublicKeyBox::from_string(MANIFEST_PUBLIC_KEY)
         .map_err(|_| NxvError::InvalidManifestSignature)?;
+    let pk =
+        minisign::PublicKey::from_box(pk_box).map_err(|_| NxvError::InvalidManifestSignature)?;
 
     // Parse the signature
     let sig_box = minisign::SignatureBox::from_string(signature_str)
@@ -106,25 +93,50 @@ pub fn verify_manifest_signature(manifest_data: &[u8], signature_str: &str) -> R
     Ok(())
 }
 
-/// Verify a manifest signature with a custom public key (for testing).
-#[allow(dead_code)]
+/// Normalize a public key string to minisign format.
+///
+/// If the key is just raw base64 (starts with "RW"), prepends a default comment.
+/// If already in full format (starts with "untrusted comment:"), returns as-is.
+fn normalize_public_key(key: &str) -> String {
+    let trimmed = key.trim();
+    if trimmed.starts_with("untrusted comment:") {
+        trimmed.to_string()
+    } else if trimmed.starts_with("RW") {
+        format!("untrusted comment: minisign public key\n{}", trimmed)
+    } else {
+        // Return as-is, let the parser give a proper error
+        trimmed.to_string()
+    }
+}
+
+/// Verify a manifest signature with a custom public key.
+///
+/// Used for self-hosted indexes with custom signing keys.
+/// Accepts either:
+/// - Full minisign format with comment (untrusted comment: ...\nRW...)
+/// - Raw base64 key only (RW...)
 pub fn verify_manifest_signature_with_key(
     manifest_data: &[u8],
     signature_str: &str,
     public_key_str: &str,
 ) -> Result<()> {
-    // Parse the public key
-    let pk = minisign::PublicKey::from_base64(public_key_str)
-        .map_err(|_| NxvError::InvalidManifestSignature)?;
+    // Normalize the key: add default comment if only raw base64 provided
+    let normalized_key = normalize_public_key(public_key_str);
+
+    // Parse the public key using from_box (expects comment + base64 format)
+    let pk_box = minisign::PublicKeyBox::from_string(&normalized_key)
+        .map_err(|e| NxvError::PublicKey(format!("failed to parse public key: {}", e)))?;
+    let pk = minisign::PublicKey::from_box(pk_box)
+        .map_err(|e| NxvError::PublicKey(format!("failed to parse public key: {}", e)))?;
 
     // Parse the signature
     let sig_box = minisign::SignatureBox::from_string(signature_str)
-        .map_err(|_| NxvError::InvalidManifestSignature)?;
+        .map_err(|e| NxvError::PublicKey(format!("failed to parse signature: {}", e)))?;
 
     // Verify
     let mut cursor = Cursor::new(manifest_data);
     minisign::verify(&pk, &sig_box, &mut cursor, true, false, true)
-        .map_err(|_| NxvError::InvalidManifestSignature)?;
+        .map_err(|e| NxvError::PublicKey(format!("signature verification failed: {}", e)))?;
 
     Ok(())
 }
@@ -132,6 +144,62 @@ pub fn verify_manifest_signature_with_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_embedded_public_key_parses() {
+        // The embedded public key should be parseable using from_box
+        let pk_box = minisign::PublicKeyBox::from_string(MANIFEST_PUBLIC_KEY);
+        assert!(
+            pk_box.is_ok(),
+            "Embedded public key box should parse: {:?}",
+            pk_box.err()
+        );
+
+        let pk = minisign::PublicKey::from_box(pk_box.unwrap());
+        assert!(
+            pk.is_ok(),
+            "Embedded public key should parse: {:?}",
+            pk.err()
+        );
+    }
+
+    #[test]
+    fn test_normalize_public_key_raw_base64() {
+        let raw_key = "RWRBBg3BOtB6V0YjlII702+pQeXUsdIk3mzZRmopwRlutFAW9Bl/naMV";
+        let normalized = normalize_public_key(raw_key);
+
+        // Should add a default comment
+        assert!(normalized.starts_with("untrusted comment:"));
+        assert!(normalized.contains(raw_key));
+
+        // Should be parseable by minisign
+        let pk_box = minisign::PublicKeyBox::from_string(&normalized);
+        assert!(
+            pk_box.is_ok(),
+            "Normalized key should parse: {:?}",
+            pk_box.err()
+        );
+    }
+
+    #[test]
+    fn test_normalize_public_key_full_format() {
+        let full_key =
+            "untrusted comment: my key\nRWRBBg3BOtB6V0YjlII702+pQeXUsdIk3mzZRmopwRlutFAW9Bl/naMV";
+        let normalized = normalize_public_key(full_key);
+
+        // Should preserve the original format
+        assert_eq!(normalized, full_key);
+    }
+
+    #[test]
+    fn test_normalize_public_key_with_whitespace() {
+        let key_with_whitespace = "  RWRBBg3BOtB6V0YjlII702+pQeXUsdIk3mzZRmopwRlutFAW9Bl/naMV  \n";
+        let normalized = normalize_public_key(key_with_whitespace);
+
+        // Should trim and add comment
+        assert!(normalized.starts_with("untrusted comment:"));
+        assert!(!normalized.starts_with("  ")); // No leading whitespace
+    }
 
     #[test]
     fn test_manifest_parse() {

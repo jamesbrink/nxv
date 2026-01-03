@@ -1,5 +1,5 @@
 {
-  description = "nxv - Nix Versions CLI tool";
+  description = "nxv - Nix Version Index";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -36,12 +36,13 @@
         # Create crane lib with our toolchain
         craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
 
-        # Common source filtering - include frontend directory for embedded assets
+        # Common source filtering - include frontend and keys directories for embedded assets
         src = pkgs.lib.cleanSourceWith {
           src = ./.;
           filter = path: type:
             (craneLib.filterCargoSources path type) ||
-            (builtins.match ".*frontend.*" path != null);
+            (builtins.match ".*frontend.*" path != null) ||
+            (builtins.match ".*keys/.*\\.pub$" path != null);
         };
 
         # Read crate metadata from Cargo.toml
@@ -84,7 +85,7 @@
           postInstall = installCompletions;
 
           meta = {
-            description = "CLI tool for finding specific versions of Nix packages";
+            description = "Nix Version Index";
             homepage = "https://github.com/jamesbrink/nxv";
             license = pkgs.lib.licenses.mit;
             maintainers = [ ];
@@ -110,7 +111,7 @@
           postInstall = installCompletions;
 
           meta = {
-            description = "CLI tool for finding specific versions of Nix packages (with indexer)";
+            description = "Nix Version Index (with indexer feature)";
             homepage = "https://github.com/jamesbrink/nxv";
             license = pkgs.lib.licenses.mit;
             maintainers = [ ];
@@ -186,7 +187,7 @@
           postInstall = installCompletions;
 
           meta = {
-            description = "CLI tool for finding specific versions of Nix packages (static musl binary)";
+            description = "Nix Version Index (static musl binary)";
             homepage = "https://github.com/jamesbrink/nxv";
             license = pkgs.lib.licenses.mit;
             maintainers = [ ];

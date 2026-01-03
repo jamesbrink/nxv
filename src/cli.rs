@@ -7,7 +7,7 @@ use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use std::path::PathBuf;
 
-/// CLI tool for finding specific versions of Nix packages.
+/// nxv - Nix Version Index
 #[derive(Parser, Debug)]
 #[command(name = "nxv")]
 #[command(author, version, about, long_about = None)]
@@ -27,6 +27,10 @@ pub struct Cli {
     /// Disable colored output.
     #[arg(long, env = "NO_COLOR")]
     pub no_color: bool,
+
+    /// API request timeout in seconds (when using remote backend).
+    #[arg(long, env = "NXV_API_TIMEOUT", default_value_t = 30)]
+    pub api_timeout: u64,
 
     #[command(subcommand)]
     pub command: Commands,
@@ -65,6 +69,10 @@ pub enum Commands {
     /// Generate publishable index artifacts (compressed DB, bloom filter, manifest).
     #[cfg(feature = "indexer")]
     Publish(PublishArgs),
+
+    /// Generate a new minisign keypair for signing manifests.
+    #[cfg(feature = "indexer")]
+    Keygen(KeygenArgs),
 
     /// Start the API server.
     Serve(ServeArgs),
@@ -165,6 +173,15 @@ pub struct UpdateArgs {
     /// Custom manifest URL (for testing or alternate index sources).
     #[arg(long, env = "NXV_MANIFEST_URL", hide = true)]
     pub manifest_url: Option<String>,
+
+    /// Skip manifest signature verification (INSECURE - use only for development/testing).
+    #[arg(long, env = "NXV_SKIP_VERIFY")]
+    pub skip_verify: bool,
+
+    /// Custom public key for manifest signature verification (for self-hosted indexes).
+    /// Can be the raw key (RW...) or path to a .pub file.
+    #[arg(long, env = "NXV_PUBLIC_KEY")]
+    pub public_key: Option<String>,
 }
 
 /// Arguments for the history command.
@@ -260,11 +277,11 @@ pub struct ServeArgs {
     #[arg(short, long, default_value_t = 8080, env = "NXV_PORT")]
     pub port: u16,
 
-    /// Enable CORS for all origins.
+    /// Enable CORS for all origins (insecure, use --cors-origins for production).
     #[arg(long)]
     pub cors: bool,
 
-    /// Specific CORS origins (comma-separated). Implies --cors.
+    /// Specific CORS origins (comma-separated, recommended for production).
     #[arg(long, value_delimiter = ',')]
     pub cors_origins: Option<Vec<String>>,
 }
@@ -302,6 +319,30 @@ pub struct IndexArgs {
     pub max_commits: Option<usize>,
 }
 
+/// Fields that can be backfilled from nixpkgs.
+#[cfg(feature = "indexer")]
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackfillField {
+    /// Source path (e.g., pkgs/development/python-modules/foo/default.nix)
+    SourcePath,
+    /// Homepage URL
+    Homepage,
+    /// Known security vulnerabilities (CVEs)
+    KnownVulnerabilities,
+}
+
+#[cfg(feature = "indexer")]
+impl BackfillField {
+    /// Convert to the string representation used in the database.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BackfillField::SourcePath => "source_path",
+            BackfillField::Homepage => "homepage",
+            BackfillField::KnownVulnerabilities => "known_vulnerabilities",
+        }
+    }
+}
+
 /// Arguments for the backfill command (feature-gated).
 ///
 /// Backfill updates existing database records with metadata extracted from nixpkgs.
@@ -321,10 +362,10 @@ pub struct IndexArgs {
 ///
 /// Examples:
 ///   # Fast backfill from current HEAD (only updates packages that still exist)
-///   nxv backfill --nixpkgs-path ./nixpkgs --fields known_vulnerabilities
+///   nxv backfill --nixpkgs-path ./nixpkgs --fields known-vulnerabilities
 ///
 ///   # Full historical backfill (slower, but updates old/removed packages)
-///   nxv backfill --nixpkgs-path ./nixpkgs --fields known_vulnerabilities --history
+///   nxv backfill --nixpkgs-path ./nixpkgs --fields known-vulnerabilities --history
 #[cfg(feature = "indexer")]
 #[derive(Parser, Debug)]
 pub struct BackfillArgs {
@@ -333,10 +374,9 @@ pub struct BackfillArgs {
     pub nixpkgs_path: PathBuf,
 
     /// Comma-separated list of fields to backfill.
-    /// Available: source_path, homepage, known_vulnerabilities.
     /// Default: all fields.
-    #[arg(long, value_delimiter = ',')]
-    pub fields: Option<Vec<String>>,
+    #[arg(long, value_enum, value_delimiter = ',')]
+    pub fields: Option<Vec<BackfillField>>,
 
     /// Limit the number of packages to backfill (for testing).
     #[arg(long)]
@@ -381,6 +421,36 @@ pub struct PublishArgs {
     /// Base URL prefix for manifest URLs (e.g., https://github.com/user/repo/releases/download/index-latest).
     #[arg(long)]
     pub url_prefix: Option<String>,
+
+    /// Sign the manifest with a minisign secret key.
+    #[arg(long)]
+    pub sign: bool,
+
+    /// Secret key for signing (file path or raw key content).
+    /// Can also be set via NXV_SECRET_KEY environment variable.
+    #[arg(long, env = "NXV_SECRET_KEY", required_if_eq("sign", "true"))]
+    pub secret_key: Option<String>,
+}
+
+/// Arguments for the keygen command (feature-gated).
+#[cfg(feature = "indexer")]
+#[derive(Parser, Debug)]
+pub struct KeygenArgs {
+    /// Output path for the secret key file.
+    #[arg(short, long, default_value = "./nxv.key")]
+    pub secret_key: PathBuf,
+
+    /// Output path for the public key file.
+    #[arg(short, long, default_value = "./nxv.pub")]
+    pub public_key: PathBuf,
+
+    /// Comment to embed in the key files.
+    #[arg(short, long, default_value = "nxv signing key")]
+    pub comment: String,
+
+    /// Overwrite existing key files if they exist.
+    #[arg(short, long)]
+    pub force: bool,
 }
 
 /// Output format argument.
@@ -531,6 +601,30 @@ mod tests {
     }
 
     #[test]
+    fn test_update_public_key() {
+        let args = Cli::try_parse_from(["nxv", "update", "--public-key", "RWTest123"]).unwrap();
+        match args.command {
+            Commands::Update(update) => {
+                assert_eq!(update.public_key, Some("RWTest123".to_string()));
+                assert!(!update.skip_verify);
+            }
+            _ => panic!("Expected Update command"),
+        }
+    }
+
+    #[test]
+    fn test_update_public_key_file() {
+        let args =
+            Cli::try_parse_from(["nxv", "update", "--public-key", "/path/to/key.pub"]).unwrap();
+        match args.command {
+            Commands::Update(update) => {
+                assert_eq!(update.public_key, Some("/path/to/key.pub".to_string()));
+            }
+            _ => panic!("Expected Update command"),
+        }
+    }
+
+    #[test]
     fn test_info_command() {
         let args = Cli::try_parse_from(["nxv", "info", "python"]).unwrap();
         match args.command {
@@ -617,5 +711,49 @@ mod tests {
             }
             _ => panic!("Expected Index command"),
         }
+    }
+
+    #[cfg(feature = "indexer")]
+    #[test]
+    fn test_publish_command() {
+        let args = Cli::try_parse_from(["nxv", "publish", "--output", "/tmp/publish"]).unwrap();
+        match args.command {
+            Commands::Publish(publish) => {
+                assert_eq!(publish.output.to_string_lossy(), "/tmp/publish");
+                assert!(!publish.sign);
+                assert!(publish.secret_key.is_none());
+            }
+            _ => panic!("Expected Publish command"),
+        }
+    }
+
+    #[cfg(feature = "indexer")]
+    #[test]
+    fn test_publish_with_signing() {
+        let args = Cli::try_parse_from([
+            "nxv",
+            "publish",
+            "--sign",
+            "--secret-key",
+            "/path/to/key.key",
+        ])
+        .unwrap();
+        match args.command {
+            Commands::Publish(publish) => {
+                assert!(publish.sign);
+                assert_eq!(publish.secret_key.unwrap(), "/path/to/key.key");
+            }
+            _ => panic!("Expected Publish command"),
+        }
+    }
+
+    #[cfg(feature = "indexer")]
+    #[test]
+    fn test_publish_sign_requires_secret_key() {
+        // --sign without --secret-key should fail
+        let result = Cli::try_parse_from(["nxv", "publish", "--sign"]);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("secret-key"));
     }
 }

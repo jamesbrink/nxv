@@ -252,7 +252,12 @@ pub async fn run_server(config: ServerConfig) -> Result<()> {
     let state = Arc::new(AppState::new(config.db_path));
 
     // Configure CORS
-    let cors = if config.cors {
+    let cors = if config.cors && config.cors_origins.is_none() {
+        // Warn about permissive CORS when no specific origins are set
+        eprintln!(
+            "⚠ Warning: CORS enabled for all origins. \
+            For production, use --cors-origins to restrict to specific domains."
+        );
         Some(
             CorsLayer::new()
                 .allow_origin(Any)

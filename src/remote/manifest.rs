@@ -6,6 +6,7 @@ use std::io::Cursor;
 
 /// Embedded public key for verifying manifest signatures.
 /// This is the minisign public key used to sign official nxv manifests.
+/// Loaded at compile time from `keys/nxv.pub`.
 ///
 /// To generate a new keypair (requires `--features indexer`):
 /// ```sh
@@ -16,9 +17,7 @@ use std::io::Cursor;
 /// ```sh
 /// nxv publish --sign --secret-key nxv.key <index.db>
 /// ```
-pub const MANIFEST_PUBLIC_KEY: &str =
-    "untrusted comment: nxv manifest signing key - public key: 577AD03AC10D0641
-RWRBBg3BOtB6V0YjlII702+pQeXUsdIk3mzZRmopwRlutFAW9Bl/naMV";
+pub const MANIFEST_PUBLIC_KEY: &str = include_str!("../../keys/nxv.pub");
 
 /// Remote index manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]

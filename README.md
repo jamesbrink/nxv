@@ -39,9 +39,9 @@ Or visit **<https://nxv.urandom.io>** to search in your browser.
 
 - **Fast search** — Bloom filter for instant "not found" responses, SQLite FTS5 for full-text search
 - **Version history** — See when each version was introduced and when it was superseded
-- **Multiple interfaces** — CLI tool, HTTP API server with web UI, or use as a library
+- **Multiple interfaces** — CLI tool, HTTP API server with web UI, or query via remote API
 - **NixOS module** — Run as a systemd service with automatic index updates
-- **Lightweight** — ~10MB static binary, ~100MB compressed index
+- **Lightweight** — ~7MB static binary, ~100MB compressed index
 
 ## How It Works
 
@@ -64,8 +64,24 @@ Users download a pre-built compressed index (~100MB) and query it locally or via
 
 ## Installation
 
+### Quick Install
+
 ```bash
-# Run directly with Nix
+curl -sSfL https://raw.githubusercontent.com/jamesbrink/nxv/main/install.sh | sh
+```
+
+This installs a pre-built binary to `~/.local/bin`. For extra safety, download and review the script first. Set `NXV_VERIFY=1` to enforce checksum verification against GitHub Releases.
+
+### Cargo
+
+```bash
+cargo install nxv
+```
+
+### Nix
+
+```bash
+# Run directly
 nix run github:jamesbrink/nxv -- search python
 
 # Install to profile
@@ -89,20 +105,6 @@ Or add to your flake:
 }
 ```
 
-### Quick Install (curl)
-
-```bash
-curl -sSfL https://raw.githubusercontent.com/jamesbrink/nxv/main/install.sh | sh
-```
-
-For extra safety, download the script first, review it, and verify release checksums from GitHub Releases. You can also set `NXV_VERIFY=1` to enforce checksum verification.
-
-### Cargo
-
-```bash
-cargo install nxv
-```
-
 ### Pre-built Binaries
 
 Download from [GitHub Releases](https://github.com/jamesbrink/nxv/releases):
@@ -124,7 +126,7 @@ Shell completions for bash, zsh, and fish are included via `nxv completions <she
 nxv search python                    # Find all python packages
 nxv search python 3.11               # Filter by version prefix
 nxv search python --exact            # Exact name match only
-nxv search --desc "json parser"      # Search descriptions (FTS)
+nxv search "json parser" --desc      # Search descriptions (FTS)
 nxv search python --format json      # JSON output
 ```
 
@@ -172,6 +174,9 @@ nxv serve --host 0.0.0.0 --port 3000 --cors  # Public with CORS
 | `GET /api/v1/search/description?q=json` | Search descriptions |
 | `GET /api/v1/packages/{attr}` | Package details |
 | `GET /api/v1/packages/{attr}/history` | Version history |
+| `GET /api/v1/packages/{attr}/versions/{version}` | Specific version info |
+| `GET /api/v1/packages/{attr}/versions/{version}/first` | First occurrence commit |
+| `GET /api/v1/packages/{attr}/versions/{version}/last` | Last occurrence commit |
 | `GET /api/v1/stats` | Index statistics |
 | `GET /api/v1/health` | Health check |
 
@@ -288,8 +293,8 @@ Requires the `indexer` feature and a local nixpkgs clone:
 nix build .#nxv-indexer
 # or: cargo build --release --features indexer
 
-# Clone nixpkgs
-git clone --depth 1000 https://github.com/NixOS/nixpkgs.git
+# Clone nixpkgs (full history needed for complete index)
+git clone https://github.com/NixOS/nixpkgs.git
 
 # Build the index (takes hours for full history)
 nxv index --nixpkgs-path ./nixpkgs --full
@@ -462,7 +467,7 @@ Run `nxv serve` to provide a web UI and REST API. Clients query remotely without
 nxv serve --host 0.0.0.0 --port 8080
 
 # Client side
-export NXV_API_URL=https://your-server.com:8080
+export NXV_API_URL=http://your-server:8080
 nxv search python  # Queries remote API
 ```
 
@@ -537,12 +542,19 @@ cargo clippy -- -D warnings         # Lint
 src/
 ├── main.rs          # Entry point, command dispatch
 ├── cli.rs           # Clap command definitions
+├── backend.rs       # Backend abstraction (local/remote)
+├── client.rs        # HTTP client for remote API
+├── completions.rs   # Shell completion generation
 ├── db/              # SQLite database layer
 ├── remote/          # Index download/update
 ├── server/          # HTTP API (axum)
 ├── output/          # Table/JSON/plain formatters
 ├── bloom.rs         # Bloom filter
+├── search.rs        # Search/filter/sort logic
+├── paths.rs         # Platform-specific paths
+├── error.rs         # Error types
 └── index/           # Indexer (feature-gated)
+    ├── mod.rs       # Indexer orchestration
     ├── git.rs       # Git history traversal
     ├── extractor.rs # Nix evaluation
     ├── backfill.rs  # Metadata backfill

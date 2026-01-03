@@ -74,8 +74,7 @@ impl Database {
                 "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='meta'",
                 [],
                 |row| row.get(0),
-            )
-            .unwrap_or(false);
+            )?;
 
         if !has_meta {
             return Err(NxvError::CorruptIndex("missing meta table".to_string()));
@@ -83,7 +82,13 @@ impl Database {
 
         // Check schema version
         let version_str = self.get_meta("schema_version")?;
-        let db_version: u32 = version_str.as_deref().unwrap_or("0").parse().unwrap_or(0);
+        let version_str = version_str.as_deref().unwrap_or("0");
+        let db_version: u32 = version_str.parse().map_err(|_| {
+            NxvError::CorruptIndex(format!(
+                "invalid schema_version '{}': expected integer",
+                version_str
+            ))
+        })?;
 
         if db_version > SCHEMA_VERSION {
             return Err(NxvError::CorruptIndex(format!(

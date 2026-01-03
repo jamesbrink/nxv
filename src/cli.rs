@@ -319,6 +319,30 @@ pub struct IndexArgs {
     pub max_commits: Option<usize>,
 }
 
+/// Fields that can be backfilled from nixpkgs.
+#[cfg(feature = "indexer")]
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackfillField {
+    /// Source path (e.g., pkgs/development/python-modules/foo/default.nix)
+    SourcePath,
+    /// Homepage URL
+    Homepage,
+    /// Known security vulnerabilities (CVEs)
+    KnownVulnerabilities,
+}
+
+#[cfg(feature = "indexer")]
+impl BackfillField {
+    /// Convert to the string representation used in the database.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BackfillField::SourcePath => "source_path",
+            BackfillField::Homepage => "homepage",
+            BackfillField::KnownVulnerabilities => "known_vulnerabilities",
+        }
+    }
+}
+
 /// Arguments for the backfill command (feature-gated).
 ///
 /// Backfill updates existing database records with metadata extracted from nixpkgs.
@@ -338,10 +362,10 @@ pub struct IndexArgs {
 ///
 /// Examples:
 ///   # Fast backfill from current HEAD (only updates packages that still exist)
-///   nxv backfill --nixpkgs-path ./nixpkgs --fields known_vulnerabilities
+///   nxv backfill --nixpkgs-path ./nixpkgs --fields known-vulnerabilities
 ///
 ///   # Full historical backfill (slower, but updates old/removed packages)
-///   nxv backfill --nixpkgs-path ./nixpkgs --fields known_vulnerabilities --history
+///   nxv backfill --nixpkgs-path ./nixpkgs --fields known-vulnerabilities --history
 #[cfg(feature = "indexer")]
 #[derive(Parser, Debug)]
 pub struct BackfillArgs {
@@ -350,10 +374,9 @@ pub struct BackfillArgs {
     pub nixpkgs_path: PathBuf,
 
     /// Comma-separated list of fields to backfill.
-    /// Available: source_path, homepage, known_vulnerabilities.
     /// Default: all fields.
-    #[arg(long, value_delimiter = ',')]
-    pub fields: Option<Vec<String>>,
+    #[arg(long, value_enum, value_delimiter = ',')]
+    pub fields: Option<Vec<BackfillField>>,
 
     /// Limit the number of packages to backfill (for testing).
     #[arg(long)]

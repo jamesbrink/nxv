@@ -1149,7 +1149,11 @@ fn cmd_backfill(cli: &Cli, args: &cli::BackfillArgs) -> Result<()> {
     eprintln!();
 
     let config = BackfillConfig {
-        fields: args.fields.clone().unwrap_or_default(),
+        fields: args
+            .fields
+            .as_ref()
+            .map(|f| f.iter().map(|field| field.as_str().to_string()).collect())
+            .unwrap_or_default(),
         limit: args.limit,
         dry_run: args.dry_run,
         use_history: args.history,

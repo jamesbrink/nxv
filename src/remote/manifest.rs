@@ -79,8 +79,8 @@ pub fn verify_manifest_signature(manifest_data: &[u8], signature_str: &str) -> R
     // Parse the public key using from_box (expects comment + base64 format)
     let pk_box = minisign::PublicKeyBox::from_string(MANIFEST_PUBLIC_KEY)
         .map_err(|_| NxvError::InvalidManifestSignature)?;
-    let pk = minisign::PublicKey::from_box(pk_box)
-        .map_err(|_| NxvError::InvalidManifestSignature)?;
+    let pk =
+        minisign::PublicKey::from_box(pk_box).map_err(|_| NxvError::InvalidManifestSignature)?;
 
     // Parse the signature
     let sig_box = minisign::SignatureBox::from_string(signature_str)
@@ -129,10 +129,18 @@ mod tests {
     fn test_embedded_public_key_parses() {
         // The embedded public key should be parseable using from_box
         let pk_box = minisign::PublicKeyBox::from_string(MANIFEST_PUBLIC_KEY);
-        assert!(pk_box.is_ok(), "Embedded public key box should parse: {:?}", pk_box.err());
+        assert!(
+            pk_box.is_ok(),
+            "Embedded public key box should parse: {:?}",
+            pk_box.err()
+        );
 
         let pk = minisign::PublicKey::from_box(pk_box.unwrap());
-        assert!(pk.is_ok(), "Embedded public key should parse: {:?}", pk.err());
+        assert!(
+            pk.is_ok(),
+            "Embedded public key should parse: {:?}",
+            pk.err()
+        );
     }
 
     #[test]

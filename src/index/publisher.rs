@@ -89,7 +89,8 @@ pub fn generate_keypair<P: AsRef<Path>, Q: AsRef<Path>>(
     // We replace the first line (the untrusted comment) regardless of its content,
     // making this robust against upstream format changes.
     let sk_str = sk_box.to_string();
-    let sk_with_comment = replace_untrusted_comment(&sk_str, &format!("untrusted comment: {}", comment));
+    let sk_with_comment =
+        replace_untrusted_comment(&sk_str, &format!("untrusted comment: {}", comment));
 
     let pk_str = pk_box.to_string();
     let pk_with_comment = replace_untrusted_comment(
@@ -1036,8 +1037,11 @@ mod tests {
         let sig_content = fs::read_to_string(&sig_path).unwrap();
 
         // Verify the signature
-        let result =
-            verify_manifest_signature_with_key(manifest_content.as_bytes(), &sig_content, &pk_content);
+        let result = verify_manifest_signature_with_key(
+            manifest_content.as_bytes(),
+            &sig_content,
+            &pk_content,
+        );
 
         assert!(
             result.is_ok(),

@@ -31,102 +31,189 @@ Create a robust worktree management system for parallel extraction.
 `create_worktrees()`, and `cleanup_worktrees()` (prunes `nxv-worktree-*` entries).
 This phase builds on that foundation.
 
-### 1.1 WorktreePool Implementation
+### 1.1 Worker-Owned Worktree Architecture
+
+**Critical Design Decision**: Workers OWN worktrees rather than borrowing from a pool.
+
+**Problem with pool borrowing**: `WorktreeHandle<'pool>` with a borrow from pool cannot be
+moved into worker threads. Rust's ownership rules prevent sending borrowed references across
+thread boundaries. Additionally, `git2::Repository` is not `Sync`, so `NixpkgsRepo` cannot be
+shared across threads.
+
+**Solution**: Each worker thread creates and owns its worktree at startup:
 
 - [ ] Create `src/index/worktree_pool.rs` module (separate from `git.rs` worktree primitives)
-- [ ] Implement `WorktreePool` struct with configurable worker count
-- [ ] **Naming convention (Critical)**: Worktree **basenames** must be `nxv-worktree-{pool_id}-{worker_id}`
-  - `pool_id`: Unique identifier per pool instance (e.g., timestamp or random)
+- [ ] Implement `WorktreeManager` struct (not a pool—no acquire/release)
+- [ ] **Naming convention (Critical)**: Worktree **basenames** must be `nxv-worktree-{session_id}-{worker_id}`
+  - `session_id`: Unique identifier per indexing session (e.g., timestamp or random)
   - Git records the **basename** of the worktree path as the worktree name
-  - `cleanup_worktrees()` at `git.rs:809` filters `name.starts_with("nxv-worktree-")`
-  - Current `create_worktrees()` at `git.rs:761` uses `worker-{i}` which **never matches cleanup**
-- [ ] Pool creates worktrees at: `/tmp/nxv-worktrees-{pool_id}/nxv-worktree-{pool_id}-{worker_id}/`
+  - `cleanup_worktrees()` at `git.rs:844` filters `name.starts_with("nxv-worktree-")`
+  - Current `create_worktrees()` at `git.rs:799` uses `worker-{i}` which **never matches cleanup**
+- [ ] Each worker creates its worktree at: `/tmp/nxv-worktrees-{session_id}/nxv-worktree-{session_id}-{worker_id}/`
   - Full path example: `/tmp/nxv-worktrees-abc123/nxv-worktree-abc123-0/`
   - Git sees basename: `nxv-worktree-abc123-0` ✓ matches cleanup prefix
 - [ ] **Do NOT use existing `create_worktrees()`** - it has wrong naming; use `create_worktree()` directly
 - [ ] Each worktree is created with `git worktree add --detach`
-- [ ] Implement `acquire()` method that returns a `WorktreeHandle`
-- [ ] Implement `release()` method to return worktree to pool
+- [ ] Workers own their worktree path for the entire session (no acquire/release)
 - [ ] Worktrees are reused across commits (checkout new commit, don't recreate)
-- [ ] Implement `Drop` for `WorktreePool` that:
-  - Calls `git worktree remove` for each managed worktree
-  - Removes the temp directory
-  - Calls `git worktree prune` on the main repo
+- [ ] On shutdown, each worker cleans up its own worktree via `Drop`
 
-### 1.2 WorktreeHandle and Drop Semantics (Critical)
+```rust
+/// A worktree owned by a worker thread for the duration of the session.
+pub struct OwnedWorktree {
+    /// Path to the worktree directory.
+    pub path: PathBuf,
+    /// Path to the main repository (for git commands).
+    repo_path: PathBuf,
+    /// Current commit checked out (for skip-checkout optimization).
+    current_commit: Option<String>,
+}
 
-**Problem**: Current `Worktree` struct at `git.rs:54-87` has `cleanup: bool` and deletes
-the worktree directory on `Drop`. The pool design expects handles to return worktrees
-for reuse. If `WorktreeHandle` wraps `Worktree` and drops it, the worktree is destroyed
-and cannot be reused. Pool's `Drop` would then double-remove.
+impl OwnedWorktree {
+    /// Create a new worktree for this worker.
+    /// MUST be called from the main thread before spawning workers.
+    pub fn create(repo_path: &Path, session_id: &str, worker_id: usize) -> Result<Self>;
 
-**Solution**: Separate ownership from cleanup:
+    /// Checkout a commit. Skips if already at this commit.
+    pub fn checkout(&mut self, commit_hash: &str) -> Result<()>;
+}
 
-- [ ] `PooledWorktree` (internal to pool): Owns the worktree path, **never** cleans up on drop
+impl Drop for OwnedWorktree {
+    fn drop(&mut self) {
+        // Remove worktree using git -C <repo_path> worktree remove --force <path>
+        let _ = Command::new("git")
+            .arg("-C").arg(&self.repo_path)  // Critical: specify repo context
+            .args(["worktree", "remove", "--force"])
+            .arg(&self.path)
+            .output();
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+```
 
-  ```rust
-  struct PooledWorktree {
-      path: PathBuf,
-      repo_path: PathBuf,
-      // NO cleanup on Drop - pool manages lifecycle
-  }
-  ```
+### 1.2 Worker Thread Architecture (Critical)
 
-- [ ] `WorktreeHandle` (returned to workers): Borrows from pool, returns on drop
+**Problem**: The original pool-based design with `WorktreeHandle<'pool>` borrows cannot work
+because Rust's borrow checker prevents moving borrowed references into threads. Additionally,
+`git2::Repository` is `!Sync`, so we cannot share `NixpkgsRepo` across threads.
 
-  ```rust
-  pub struct WorktreeHandle<'pool> {
-      worktree: &'pool PooledWorktree,
-      pool: &'pool WorktreePool,
-      current_commit: Option<String>,
-  }
+**Solution**: Workers run as independent processes/threads with owned worktrees:
 
-  impl Drop for WorktreeHandle<'_> {
-      fn drop(&mut self) {
-          self.pool.return_worktree(self.worktree);
-      }
-  }
-  ```
+```rust
+/// Configuration for spawning workers.
+pub struct WorkerConfig {
+    /// Path to the main nixpkgs repository.
+    pub repo_path: PathBuf,
+    /// Unique session ID for worktree naming.
+    pub session_id: String,
+    /// Worker's ID (0..num_workers).
+    pub worker_id: usize,
+    /// Systems to evaluate.
+    pub systems: Vec<String>,
+}
 
-- [ ] `WorktreePool::Drop`: Explicitly removes all worktrees and temp directory
+/// Each worker owns its resources completely.
+pub struct Worker {
+    /// Owned worktree for this worker.
+    worktree: OwnedWorktree,
+    /// Worker configuration.
+    config: WorkerConfig,
+}
 
-  ```rust
-  impl Drop for WorktreePool {
-      fn drop(&mut self) {
-          for wt in &self.worktrees {
-              let _ = Command::new("git")
-                  .args(["worktree", "remove", "--force"])
-                  .arg(&wt.path)
-                  .output();
-          }
-          let _ = fs::remove_dir_all(&self.temp_dir);
-      }
-  }
-  ```
+impl Worker {
+    /// Create a new worker. Worktree is created before the thread spawns.
+    pub fn new(config: WorkerConfig) -> Result<Self> {
+        let worktree = OwnedWorktree::create(
+            &config.repo_path,
+            &config.session_id,
+            config.worker_id,
+        )?;
+        Ok(Self { worktree, config })
+    }
 
-- [ ] **Do NOT use existing `Worktree` struct** - its auto-cleanup conflicts with pool reuse
-- [ ] Implements `checkout(&self, commit_hash: &str) -> Result<()>`
-- [ ] Tracks current commit to avoid redundant checkouts
-- [ ] Returns to pool on `Drop` (does not delete worktree)
+    /// Process a single commit and return extraction result.
+    pub fn process_commit(&mut self, task: CommitTask) -> Result<ExtractionResult> {
+        self.worktree.checkout(&task.commit_hash)?;
+        // Build file→attr map for THIS commit (no shared state)
+        let file_attr_map = build_file_attr_map(&self.worktree.path, &self.config.systems)?;
+        // Resolve target attrs from changed paths
+        let target_attr_paths = resolve_targets(&task.changed_paths, &file_attr_map)?;
+        // Extract packages
+        let packages = extract_packages_for_attr_paths(
+            &self.worktree.path,
+            &self.config.systems[0],
+            &target_attr_paths,
+        )?;
+        Ok(ExtractionResult {
+            commit_seq: task.commit_seq,
+            packages,
+            target_attr_paths,
+            changed_paths: task.changed_paths,
+        })
+    }
+}
+```
+
+**Key design points**:
+- [ ] **Do NOT use existing `Worktree` struct** - its auto-cleanup conflicts with our ownership model
+- [ ] Each worker creates its worktree BEFORE thread spawn (main thread creates worktrees)
+- [ ] Workers receive ownership of `OwnedWorktree` via move
+- [ ] Workers rebuild file→attr map per commit (no shared state, no races)
+- [ ] Workers clean up their worktrees via `Drop` when thread terminates
+- [ ] Main thread uses channels to send `CommitTask` and receive `ExtractionResult`
 
 ### 1.3 Safety Guarantees
 
 - [ ] Original nixpkgs path is **never** modified (read-only after initial clone check)
 - [ ] All git operations happen on worktrees in temp directory
 - [ ] Worktree cleanup on panic via `Drop` implementation
-- [ ] **Startup cleanup**: On pool creation, call existing `cleanup_worktrees()` (`git.rs:802-817`)
+- [ ] **Startup cleanup**: On session creation, call existing `cleanup_worktrees()` (`git.rs:844-858`)
   to prune stale `nxv-worktree-*` refs from previous crashed runs
 - [ ] **Orphan detection**: Scan `/tmp/nxv-worktrees-*/` for directories not associated with
-  running processes (check PID if encoded in pool_id)
-- [ ] Register signal handlers (SIGTERM, SIGINT) to trigger cleanup before exit
+  running processes (check PID if encoded in session_id)
 
-### 1.4 Success Criteria
+### 1.4 Signal Handling (Critical)
 
-- [ ] Unit tests for `WorktreePool` creation and cleanup
+**Problem**: The original spec proposed registering SIGTERM/SIGINT handlers in the pool, but
+`main.rs:1119` and `main.rs:1217` already install global `ctrlc` handlers. Multiple handlers
+conflict and cleanup in a signal handler is unsafe (allocations, locks, etc.).
+
+**Solution**: Reuse the existing shutdown infrastructure:
+
+- [ ] **Do NOT install new signal handlers** in the worktree manager or workers
+- [ ] Use the existing `Indexer::shutdown_flag()` (`mod.rs:574-576`)
+- [ ] Workers check `shutdown.load(Ordering::SeqCst)` periodically
+- [ ] On shutdown request, workers:
+  1. Complete their current commit (if any) or abandon gracefully
+  2. Send a final result or abort message to the main thread
+  3. Let `Drop` handle worktree cleanup naturally
+- [ ] Main thread:
+  1. Stops dispatching new commits
+  2. Waits for in-flight workers with timeout
+  3. Saves checkpoint at last fully-processed commit
+  4. Worker `Drop` implementations clean up worktrees
+
+```rust
+// In worker loop:
+while let Ok(task) = receiver.recv() {
+    if shutdown.load(Ordering::SeqCst) {
+        // Send abort message and exit loop cleanly
+        break;
+    }
+    let result = self.process_commit(task)?;
+    sender.send(result)?;
+}
+// OwnedWorktree::Drop handles cleanup automatically
+```
+
+### 1.5 Success Criteria
+
+- [ ] Unit tests for `OwnedWorktree` creation and cleanup
 - [ ] Test that original nixpkgs is never modified during extraction
-- [ ] Test worktree reuse across multiple checkouts
+- [ ] Test worktree reuse across multiple checkouts in the same worker
 - [ ] Test cleanup happens on normal exit and panic
-- [ ] Integration test: create pool, checkout 10 different commits, verify all worktrees cleaned up
+- [ ] Integration test: spawn 4 workers, process 10 commits each, verify all worktrees cleaned up
+- [ ] Test that existing shutdown flag (`Indexer::shutdown_flag()`) properly signals workers
 
 ---
 
@@ -181,7 +268,7 @@ packages without this change.
   pub fn extract_packages_for_attr_paths<P: AsRef<Path>>(
       repo_path: P,
       system: &str,
-      attr_paths: &[AttrPath],  // e.g., ["python3Packages.numpy", "beam.packages.erlang_26.rebar3"]
+      attr_paths: &[AttrPath],  // e.g., [AttrPath(["python3Packages", "numpy"]), ...]
   ) -> Result<Vec<PackageInfo>>
   ```
 
@@ -189,67 +276,106 @@ packages without this change.
 
   ```rust
   /// Represents a full attribute path like "beam.packages.erlang_26.rebar3"
+  /// Stored as a list of segments for unambiguous representation.
   #[derive(Clone, Debug, PartialEq, Eq, Hash)]
   pub struct AttrPath(Vec<String>);
 
   impl AttrPath {
       /// Parse from dotted string: "a.b.c" -> ["a", "b", "c"]
       pub fn parse(s: &str) -> Self { Self(s.split('.').map(String::from).collect()) }
+      /// Create from segments directly
+      pub fn from_segments(segments: Vec<String>) -> Self { Self(segments) }
       /// Get segments
       pub fn segments(&self) -> &[String] { &self.0 }
       /// Top-level attr (single segment)
       pub fn is_top_level(&self) -> bool { self.0.len() == 1 }
-      /// Convert back to dotted string
+      /// Convert back to dotted string for display/database storage
       pub fn to_dotted(&self) -> String { self.0.join(".") }
   }
   ```
 
-- [ ] Update `EXTRACT_NIX` to accept `attrPaths` parameter:
+- [ ] **JSON serialization** (for passing to Nix):
+  - Rust → JSON: `[["beam", "packages", "erlang_26"], ["python3Packages", "numpy"]]`
+  - This is list-of-lists format, unambiguous for paths with dots in segment names
+  - Nix reads as `attrPaths` and uses `builtins.getAttrByPath` directly
+
+- [ ] Update `EXTRACT_NIX` to accept `attrPaths` parameter (list of segment lists):
 
   ```nix
-  # Navigate path segments: ["beam", "packages", "erlang_26", "rebar3"]
-  # -> pkgs.beam.packages.erlang_26.rebar3
-  getAttrByPath = path: set:
-    builtins.foldl' (acc: seg: acc.${seg}) set path;
+  # attrPaths: [["beam", "packages", "erlang_26", "rebar3"], ["python3Packages", "numpy"]]
+  { nixpkgsPath, system, attrPaths ? null }:
+  let
+    # Navigate path segments using builtins
+    getAttrByPath = builtins.foldl' (acc: seg: acc.${seg});
+    hasAttrByPath = path: set:
+      builtins.foldl' (acc: seg:
+        acc && (if builtins.isAttrs (getAttrByPath (builtins.head path) set)
+                then builtins.hasAttr seg (getAttrByPath (builtins.head path) set)
+                else false)
+      ) true path;
+  in ...
   ```
 
-- [ ] `hasAttr` check traverses path: `builtins.hasAttrByPath ["beam" "packages" "erlang_26" "rebar3"] pkgs`
 - [ ] Keep `extract_packages_for_attrs()` as convenience wrapper for top-level only
-- [ ] Update call sites in `mod.rs:985` and `backfill.rs:250,423` to use path-based API
+- [ ] Update call sites:
+  - `mod.rs:983` → use `extract_packages_for_attr_paths()`
+  - `backfill.rs:250` → use `extract_packages_for_attr_paths()`
+  - `backfill.rs:423` → use `extract_packages_for_attr_paths()`
+- [ ] **NOTE**: The spec previously referenced `extract_packages_for_scoped_attrs()` which does
+  not exist. Use `extract_packages_for_attr_paths()` consistently throughout.
 
-**Why not `(Option<String>, String)`**: Real nixpkgs paths go 3+ levels deep:
+**Why not `(Option<String>, String)` or dotted strings?**
 
-- `beam.packages.erlang_26.rebar3`
-- `linuxPackages_6_6.nvidia_x11`
-- `gnome.gnome-terminal` (actually `gnome.gnome-terminal.server` in some cases)
-
-A `Vec<String>` representation handles arbitrary depth.
+- Real nixpkgs paths go 3+ levels deep: `beam.packages.erlang_26.rebar3`
+- Some attr names contain dots (rare but possible)
+- `Vec<String>` representation is unambiguous and handles arbitrary depth
 
 ### 2.4 Change Detection for Nested Packages (Critical)
 
-**Problem**: The file→attr map is built from `unsafeGetAttrPos` over top-level names only
-(`extractor.rs:269-322`). Edits to `pkgs/development/python-modules/numpy/default.nix`
-won't map to `python3Packages.numpy`, so incremental indexing skips nested packages entirely.
+**Problem**: `unsafeGetAttrPos` (`extractor.rs:272-322`) reports where an attribute is *defined*
+in the parent scope (e.g., `python-packages.nix`), NOT where the package implementation lives
+(e.g., `pkgs/development/python-modules/numpy/default.nix`). This means file changes to nested
+packages won't trigger updates because the file→attr map points to the wrong locations.
 
-**Solution**: Extend position extraction to cover nested scopes:
+**Architectural Decision**: Use `meta.position`/`source_path` based mapping instead of `unsafeGetAttrPos`.
 
-- [ ] Create `POSITIONS_RECURSIVE_NIX` expression that:
-  - Iterates top-level attrs as before
-  - For whitelisted scopes, also iterates their children
-  - Returns `{ attrPath = "python3Packages.numpy"; file = "/path/to/numpy/default.nix"; }`
-- [ ] Update `build_file_attr_map()` to use recursive positions when recursion is enabled
-- [ ] File→attr map keys remain file paths; values become full dotted attr paths
+The existing `EXTRACT_NIX` already extracts `meta.position` via `getSourcePath` (`extractor.rs:190-209`),
+which correctly resolves to the package's actual definition file. While this requires evaluating
+each package (slower), it provides accurate file mapping essential for incremental indexing.
+
+**Solution**: Build file→attr map from package extraction, not position introspection:
+
+- [ ] Create `POSITIONS_FROM_META_NIX` expression that:
+  - Evaluates each package (top-level and nested scopes)
+  - Extracts `meta.position` to get the actual source file
+  - Returns `{ attrPath = "python3Packages.numpy"; file = "pkgs/development/python-modules/numpy/default.nix"; }`
+- [ ] **Do NOT rely on `unsafeGetAttrPos`** for nested packages—it gives wrong files
+- [ ] Update `build_file_attr_map()` to use the meta.position-based approach
+- [ ] File→attr map keys are relative file paths; values are full dotted attr paths
 - [ ] Target path resolution in `mod.rs:942-966` works unchanged (file lookup returns dotted path)
-- [ ] Add `--no-recurse-positions` flag to skip nested position extraction (faster but less accurate)
+- [ ] Workers build this map per-commit (no stale map issues in parallel mode)
 
-**Performance consideration**: Recursive position extraction adds evaluation time. Consider:
+**Performance trade-off**: `meta.position` requires evaluating packages (slower than `unsafeGetAttrPos`).
+Mitigation strategies:
 
-- Cache position maps per-commit in memory
-- Only rebuild when `all-packages.nix` or scope definition files change
+- Workers build maps per-commit in parallel (amortized across workers)
+- Cache position maps by commit hash if needed for very large indexes
+- Only extract positions for whitelisted scopes to limit scope
+
+**Why not `unsafeGetAttrPos`**: For a package like `python3Packages.numpy`:
+
+- `unsafeGetAttrPos "numpy" python3Packages` → returns `python-packages.nix:12345`
+- `pkgs.python3Packages.numpy.meta.position` → returns `pkgs/development/python-modules/numpy/default.nix:1`
+
+The latter is what we need for change detection.
 
 ### 2.5 File Map Refresh for Nested Scopes (Critical)
 
-**Problem**: `should_refresh_file_map()` at `mod.rs:1187-1198` only checks top-level files:
+**Problem**: The current `should_refresh_file_map()` at `mod.rs:1185-1196` relies on stateful
+logic (`mapping_commit` at `mod.rs:840`) that assumes sequential commit processing. In parallel
+mode, workers processing commits out of order would use stale maps, leading to missed updates.
+
+Additionally, the trigger list only includes top-level files:
 
 ```rust
 const TOP_LEVEL_FILES: [&str; 4] = [
@@ -260,33 +386,48 @@ const TOP_LEVEL_FILES: [&str; 4] = [
 ];
 ```
 
-Nested scope definitions live in other files (`python-packages.nix`, `haskell-packages.nix`, etc.),
-so the map stays stale when new nested packages are added.
+Nested scope definitions (`python-packages.nix`, etc.) are not checked.
 
-**Solution**: Extend refresh triggers or rebuild per-commit:
+**Architectural Decision**: Workers rebuild file→attr map per commit (Option B).
 
-- [ ] **Option A (Extend triggers)**: Add scope definition files to `TOP_LEVEL_FILES`:
+This is slower but eliminates all stale map issues and race conditions in parallel mode.
+Since workers already evaluate packages to extract metadata, the marginal cost of also
+extracting positions is acceptable.
 
-  ```rust
-  const SCOPE_DEFINITION_FILES: [&str; 8] = [
-      "pkgs/top-level/python-packages.nix",
-      "pkgs/top-level/haskell-packages.nix",
-      "pkgs/top-level/node-packages.nix",
-      "pkgs/top-level/perl-packages.nix",
-      "pkgs/development/beam-modules/default.nix",
-      "pkgs/os-specific/linux/kernel-packages.nix",
-      // ... etc
-  ];
-  ```
+**Solution**: Per-commit map rebuild in workers:
 
-- [ ] **Option B (Per-commit in workers)**: Workers rebuild file→attr map for each commit
-  - More accurate but slower
-  - Eliminates stale map issues entirely
-  - Map is built in worktree, not main repo
+- [ ] **Remove** stateful `mapping_commit` tracking from main indexer
+- [ ] **Remove** `should_refresh_file_map()` check—workers always rebuild for their commit
+- [ ] Each worker calls `build_file_attr_map()` in its worktree for its current commit
+- [ ] Map is computed fresh, contains only packages that exist at that commit
+- [ ] `target_attr_paths` is resolved locally by the worker, then sent in `ExtractionResult`
+- [ ] Main thread receives resolved targets—no shared map state
 
-- [ ] **Recommended**: Use Option A for incremental indexing (fast), Option B for initial full index
-- [ ] Workers pass rebuilt `file_attr_map` in `ExtractionResult` or compute `target_attr_paths` directly
-- [ ] Document which scope files trigger refresh in CLI help
+```rust
+// In Worker::process_commit():
+fn process_commit(&mut self, task: CommitTask) -> Result<ExtractionResult> {
+    self.worktree.checkout(&task.commit_hash)?;
+
+    // Always rebuild map for this commit (no shared state, no races)
+    let file_attr_map = build_file_attr_map(&self.worktree.path, &self.config.systems)?;
+
+    // Resolve targets using freshly built map
+    let target_attr_paths = resolve_targets(&task.changed_paths, &file_attr_map)?;
+
+    // Extract packages
+    let packages = extract_packages_for_attr_paths(...)?;
+
+    Ok(ExtractionResult {
+        commit_seq: task.commit_seq,
+        packages,
+        target_attr_paths,  // Resolved by worker
+        changed_paths: task.changed_paths,
+    })
+}
+```
+
+**Why not Option A (extend triggers)?** Even with an extended trigger list, parallel workers
+would still race on a shared map. Per-commit rebuild is the only safe approach for parallelism.
 
 ### 2.6 Attribute Path Handling
 
@@ -308,7 +449,7 @@ so the map stays stale when new nested packages are added.
 - [ ] Integration test: extract `python3Packages.numpy` from real nixpkgs HEAD
 - [ ] Test that deeply nested packages (>2 levels) are handled correctly
 - [ ] Benchmark: extraction time increase is <3x compared to top-level only
-- [ ] Test: `extract_packages_for_scoped_attrs()` correctly extracts `("python3Packages", "numpy")`
+- [ ] Test: `extract_packages_for_attr_paths()` correctly extracts `AttrPath(["python3Packages", "numpy"])`
 - [ ] Test: file→attr map includes `python3Packages.numpy` for `pkgs/development/python-modules/numpy/default.nix`
 - [ ] Test: incremental index detects change to nested package file and updates correctly
 
@@ -355,7 +496,7 @@ on the user's nixpkgs. These must be refactored to use `WorktreeHandle` exclusiv
 - Computes `changed_paths` via `git diff-tree` in worktree
 - Builds file→attr map if needed (in worktree, not main repo)
 - Resolves `target_attr_paths` from changed files
-- Runs extraction via `extract_packages_for_scoped_attrs()`
+- Runs extraction via `extract_packages_for_attr_paths()`
 - Sends `ExtractionResult { commit_seq, packages, target_attr_paths, changed_paths }` back
 
 ### 3.3 ExtractionResult Type (Critical)
@@ -825,3 +966,142 @@ to return worktrees for reuse. Dropping handle would destroy worktree; pool Drop
 - `WorktreeHandle<'pool>`: Borrows from pool, returns on drop (doesn't delete)
 - `WorktreePool::Drop`: Explicitly removes all worktrees
 - **Do NOT use existing `Worktree` struct** - conflicts with pool reuse
+
+---
+
+### Review Round 3 (Codex Validation)
+
+This round addressed critical thread-safety and correctness issues that would have prevented
+the implementation from working.
+
+#### Architectural Questions Resolved
+
+##### Q1: Worker ownership model
+
+**Question**: Do you want each worker to own a single worktree for its entire lifetime
+(simpler, avoids pool acquire/release) or a true pool with per-task checkout?
+
+**Decision**: **Workers own worktrees for their lifetime.**
+
+Rationale:
+
+- `WorktreeHandle<'pool>` with borrow semantics cannot be moved into threads
+- `git2::Repository` is `!Sync`, so `NixpkgsRepo` cannot be shared across threads
+- Owned worktrees are simpler and avoid all lifetime issues
+- Workers create worktree at startup, clean up via `Drop` on shutdown
+
+Updated **Sections 1.1-1.2** with `OwnedWorktree` and `Worker` architecture.
+
+##### Q2: Position extraction approach
+
+**Question**: For nested change detection, is `meta.position`/`source_path`-based mapping
+acceptable despite extra eval cost, or keep the faster-but-coarser `unsafeGetAttrPos`
+mapping and accept misses?
+
+**Decision**: **Use `meta.position`/`source_path`-based mapping.**
+
+Rationale:
+
+- `unsafeGetAttrPos` reports where attr is *defined* (e.g., `python-packages.nix`)
+- `meta.position` reports where package is *implemented* (e.g., `numpy/default.nix`)
+- Accurate mapping is essential for incremental indexing to work correctly
+- Extra eval cost is amortized across parallel workers
+
+Updated **Section 2.4** with `POSITIONS_FROM_META_NIX` approach.
+
+##### Q3: File→attr map rebuild strategy
+
+**Question**: In parallel mode, should we rebuild the file→attr map per commit (safe)
+or precompute it sequentially and cache by commit hash?
+
+**Decision**: **Rebuild per commit (safe).**
+
+Rationale:
+
+- Stateful `mapping_commit` tracking assumes sequential processing
+- Parallel workers would race on shared map state
+- Per-commit rebuild in each worker eliminates all race conditions
+- Map building is part of package evaluation anyway (marginal additional cost)
+
+Updated **Section 2.5** with per-commit rebuild strategy.
+
+#### High Priority (Round 3)
+
+##### 12. WorktreeHandle<'pool> cannot be moved into threads
+
+**Issue**: The spec described `WorktreeHandle<'pool>` as borrowing from pool, but borrowed
+references cannot be moved across thread boundaries. Additionally, `git2::Repository` is
+`!Sync`, so `NixpkgsRepo` cannot be shared.
+
+**Resolution**: Replaced pool-borrowing with worker-owned worktrees:
+
+- **Section 1.1**: Changed `WorktreePool` to `WorktreeManager` concept
+- **Section 1.2**: New `OwnedWorktree` and `Worker` types with move semantics
+- Workers own their worktree for the entire session, no acquire/release
+
+##### 13. unsafeGetAttrPos reports wrong file for nested packages
+
+**Issue**: `unsafeGetAttrPos` returns the file where the attribute is defined in the scope
+(e.g., `python-packages.nix:12345`), not where the package implementation lives
+(e.g., `pkgs/development/python-modules/numpy/default.nix`).
+
+**Resolution**: Updated **Section 2.4** to use `meta.position` instead:
+
+- Use existing `getSourcePath` logic from `EXTRACT_NIX`
+- Build file→attr map from package metadata, not position introspection
+- Accurate mapping enables correct incremental updates for nested packages
+
+##### 14. Parallel workers need per-commit file→attr map
+
+**Issue**: The `mapping_commit` stateful logic at `mod.rs:840` assumes sequential processing.
+Parallel workers processing out-of-order would use stale maps, causing incorrect updates.
+
+**Resolution**: Updated **Section 2.5** with per-commit rebuild:
+
+- Remove `should_refresh_file_map()` logic from main thread
+- Each worker rebuilds `file_attr_map` for its commit in its worktree
+- Workers send resolved `target_attr_paths` in `ExtractionResult`
+- No shared map state, no races
+
+#### Medium Priority (Round 3)
+
+##### 15. Signal handler conflicts with existing ctrlc handlers
+
+**Issue**: The spec proposed registering SIGTERM/SIGINT handlers in the pool, but
+`main.rs:1119` and `main.rs:1217` already install global `ctrlc` handlers. Multiple
+handlers conflict and signal-handler cleanup is unsafe.
+
+**Resolution**: Added **Section 1.4 (Signal Handling)** with:
+
+- Do NOT install new handlers in worktree manager or workers
+- Use existing `Indexer::shutdown_flag()` (`mod.rs:574-576`)
+- Workers check shutdown flag periodically
+- `Drop` handles cleanup naturally
+
+##### 16. AttrPath encoding and missing function reference
+
+**Issue**: The spec referenced `extract_packages_for_scoped_attrs()` which doesn't exist.
+AttrPath encoding was ambiguous (dotted strings vs list-of-segments).
+
+**Resolution**: Updated **Section 2.3** with:
+
+- Consistent use of `extract_packages_for_attr_paths()` throughout
+- `AttrPath(Vec<String>)` for Rust representation
+- JSON: `[["beam", "packages", "erlang_26"], ...]` (list of segment lists)
+- Nix: Uses `builtins.getAttrByPath` directly with segment lists
+
+#### Low Priority (Round 3)
+
+##### 17. WorktreePool::Drop missing repo context
+
+**Issue**: The spec example called `git worktree remove` without specifying the repository
+context, which would fail if the current working directory isn't the repo.
+
+**Resolution**: Updated **Section 1.1** code example to use:
+
+```rust
+Command::new("git")
+    .arg("-C").arg(&self.repo_path)  // Critical: specify repo context
+    .args(["worktree", "remove", "--force"])
+    .arg(&self.path)
+```

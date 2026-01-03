@@ -397,6 +397,8 @@ pub fn generate_full_index<P: AsRef<Path>, Q: AsRef<Path>>(
     let last_commit = db.get_meta("last_indexed_commit")?.unwrap_or_default();
     // Set the indexed date to now (publish time) so it matches the manifest
     db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
+    // Flush WAL to ensure the meta update is in the main DB file before compression
+    db.checkpoint()?;
     let input_size = fs::metadata(db_path)?.len();
 
     if show_progress {

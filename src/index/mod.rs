@@ -671,10 +671,8 @@ impl Indexer {
                             );
                             eprintln!();
                             eprintln!("To fix this, either:");
-                            eprintln!("  1. Update your nixpkgs repository to a newer commit:");
-                            eprintln!(
-                                "     git -C <nixpkgs-path> fetch origin && git -C <nixpkgs-path> checkout origin/master"
-                            );
+                            eprintln!("  1. Update your nixpkgs repository to nixpkgs-unstable:");
+                            eprintln!("     nxv reset --nixpkgs-path <path> --fetch");
                             eprintln!();
                             eprintln!(
                                 "  2. Or use --full to rebuild the index from the current state:"

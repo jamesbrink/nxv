@@ -1269,8 +1269,9 @@ fn cmd_backfill(cli: &Cli, args: &cli::BackfillArgs) -> Result<()> {
 /// Resets the local nixpkgs git repository to a given reference, optionally fetching from origin first.
 ///
 /// If `args.fetch` is true, the repository will be fetched from origin before performing a hard reset.
-/// The repository is reset to `args.to` when provided, otherwise to `origin/master`. Progress and the
-/// resulting HEAD short hash are printed to stderr. Errors from repository operations are propagated.
+/// The repository is reset to `args.to` when provided, otherwise to the current nixpkgs-unstable
+/// channel commit (fetched from channels.nixos.org). This ensures indexed commits have passed
+/// Hydra CI and have binaries available in the cache.
 ///
 /// # Examples
 ///
@@ -1283,7 +1284,7 @@ fn cmd_backfill(cli: &Cli, args: &cli::BackfillArgs) -> Result<()> {
 /// ```
 #[cfg(feature = "indexer")]
 fn cmd_reset(_cli: &Cli, args: &cli::ResetArgs) -> Result<()> {
-    use crate::index::git::NixpkgsRepo;
+    use crate::index::git::{NixpkgsRepo, fetch_nixpkgs_unstable_commit};
 
     let nixpkgs_path = paths::expand_tilde(&args.nixpkgs_path);
     eprintln!("Resetting nixpkgs repository at {:?}", nixpkgs_path);
@@ -1296,11 +1297,18 @@ fn cmd_reset(_cli: &Cli, args: &cli::ResetArgs) -> Result<()> {
         eprintln!("Fetch complete.");
     }
 
-    let target = args.to.as_deref();
-    let target_display = target.unwrap_or("origin/master");
-    eprintln!("Resetting to {}...", target_display);
+    // Use provided target, or fetch current nixpkgs-unstable commit
+    let (target, target_display) = if let Some(ref to) = args.to {
+        (to.clone(), to.clone())
+    } else {
+        eprintln!("Fetching nixpkgs-unstable channel commit...");
+        let commit = fetch_nixpkgs_unstable_commit()?;
+        let display = format!("nixpkgs-unstable ({})", &commit[..12]);
+        (commit, display)
+    };
 
-    repo.reset_hard(target)?;
+    eprintln!("Resetting to {}...", target_display);
+    repo.reset_hard(Some(&target))?;
 
     eprintln!("Reset complete.");
     eprintln!("  Repository is now at: {}", target_display);

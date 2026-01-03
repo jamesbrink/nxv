@@ -416,7 +416,7 @@ pub struct ResetArgs {
     #[arg(long)]
     pub nixpkgs_path: PathBuf,
 
-    /// Reset to a specific commit or ref (default: origin/master).
+    /// Reset to a specific commit or ref (default: nixpkgs-unstable channel).
     #[arg(long)]
     pub to: Option<String>,
 

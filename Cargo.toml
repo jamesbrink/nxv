@@ -1,12 +1,21 @@
 [package]
 name = "nxv"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Nix Version Index"
 license = "MIT"
 repository = "https://github.com/jamesbrink/nxv"
 keywords = ["nix", "nixpkgs", "package", "version"]
 categories = ["command-line-utilities"]
+exclude = [
+    "nixpkgs/",
+    "publish/",
+    "docs/",
+    ".github/",
+    ".claude/",
+    "benches/",
+    "*.gif",
+]
 
 [dependencies]
 # CLI

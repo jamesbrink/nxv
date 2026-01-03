@@ -119,12 +119,13 @@ jobs:
             exit 1
           fi
 
-          # Use GitHub API to count commits ahead
+          # Use GitHub API to count commits ahead on master branch
+          # Note: We index from master, not nixos-unstable, as it has more packages
           echo "Querying GitHub API for commit count..."
-          AHEAD=$(gh api "repos/NixOS/nixpkgs/compare/${LAST_COMMIT}...nixos-unstable" --jq '.ahead_by' 2>/dev/null || echo "")
+          AHEAD=$(gh api "repos/NixOS/nixpkgs/compare/${LAST_COMMIT}...master" --jq '.ahead_by' 2>/dev/null || echo "")
 
           if [ -z "$AHEAD" ] || [ "$AHEAD" = "null" ]; then
-            echo "::error::GitHub API failed or commit ${LAST_COMMIT} not found in nixos-unstable."
+            echo "::error::GitHub API failed or commit ${LAST_COMMIT} not found in master."
             echo "The indexed commit may have been garbage collected or rebased out."
             exit 1
           fi
@@ -136,10 +137,9 @@ jobs:
             exit 0
           fi
 
-          # Add 20% buffer plus minimum of 100 to ensure we don't miss commits
-          BUFFER=$(( (AHEAD * 20 / 100) + 100 ))
-          DEPTH=$((AHEAD + BUFFER))
-          echo "Commits ahead: ${AHEAD}, buffer: ${BUFFER}, clone depth: ${DEPTH}"
+          # Add fixed buffer of 1000 to ensure we don't miss commits
+          DEPTH=$((AHEAD + 1000))
+          echo "Commits ahead: ${AHEAD}, buffer: 1000, clone depth: ${DEPTH}"
           echo "depth=${DEPTH}" >> $GITHUB_OUTPUT
           echo "strategy=shallow" >> $GITHUB_OUTPUT
 
@@ -148,14 +148,14 @@ jobs:
         run: |
           echo "Index is already up to date, nothing to do!"
           echo "## Index Already Current" >> $GITHUB_STEP_SUMMARY
-          echo "The index is already up to date with nixos-unstable. No update needed." >> $GITHUB_STEP_SUMMARY
+          echo "The index is already up to date with nixpkgs master. No update needed." >> $GITHUB_STEP_SUMMARY
 
       - name: Clone nixpkgs (shallow)
         if: ${{ steps.clone-strategy.outputs.strategy != 'skip' }}
         run: |
           echo "Performing shallow clone with depth ${{ steps.clone-strategy.outputs.depth }}..."
           git clone --depth ${{ steps.clone-strategy.outputs.depth }} \
-            --single-branch --branch nixos-unstable \
+            --single-branch --branch master \
             https://github.com/NixOS/nixpkgs.git nixpkgs
 
           echo "Clone complete. Commit count in clone:"

@@ -426,9 +426,10 @@ pub struct PublishArgs {
     #[arg(long)]
     pub sign: bool,
 
-    /// Path to minisign secret key file (required if --sign is used).
-    #[arg(long, required_if_eq("sign", "true"))]
-    pub secret_key: Option<PathBuf>,
+    /// Secret key for signing (file path or raw key content).
+    /// Can also be set via NXV_SECRET_KEY environment variable.
+    #[arg(long, env = "NXV_SECRET_KEY", required_if_eq("sign", "true"))]
+    pub secret_key: Option<String>,
 }
 
 /// Arguments for the keygen command (feature-gated).
@@ -740,10 +741,7 @@ mod tests {
         match args.command {
             Commands::Publish(publish) => {
                 assert!(publish.sign);
-                assert_eq!(
-                    publish.secret_key.unwrap().to_string_lossy(),
-                    "/path/to/key.key"
-                );
+                assert_eq!(publish.secret_key.unwrap(), "/path/to/key.key");
             }
             _ => panic!("Expected Publish command"),
         }

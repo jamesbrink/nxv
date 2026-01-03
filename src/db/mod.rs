@@ -68,13 +68,11 @@ impl Database {
     /// Validate that the database schema is compatible with this version of nxv.
     fn validate_schema_version(&self) -> Result<()> {
         // Check if meta table exists (very old or corrupt database)
-        let has_meta: bool = self
-            .conn
-            .query_row(
-                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='meta'",
-                [],
-                |row| row.get(0),
-            )?;
+        let has_meta: bool = self.conn.query_row(
+            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='meta'",
+            [],
+            |row| row.get(0),
+        )?;
 
         if !has_meta {
             return Err(NxvError::CorruptIndex("missing meta table".to_string()));

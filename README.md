@@ -306,6 +306,10 @@ nxv keygen --secret-key nxv.key --public-key nxv.pub
 # Publish with signing in one step
 nxv publish --output ./publish --url-prefix https://your-server/nxv --sign --secret-key ./nxv.key
 
+# Or use NXV_SECRET_KEY environment variable (useful for CI/CD)
+export NXV_SECRET_KEY=/path/to/nxv.key  # Can also be raw key content
+nxv publish --output ./publish --url-prefix https://your-server/nxv --sign
+
 # Files created:
 #   publish/index.db.zst       - Compressed database
 #   publish/bloom.bin          - Bloom filter
@@ -472,6 +476,7 @@ The `manifest.json` format:
 | `NXV_API_URL` | Remote API URL (CLI uses remote instead of local DB when set) |
 | `NXV_MANIFEST_URL` | Custom manifest URL for index downloads |
 | `NXV_PUBLIC_KEY` | Custom public key for manifest verification (path or raw key) |
+| `NXV_SECRET_KEY` | Secret key for manifest signing (path or raw key content) |
 | `NXV_SKIP_VERIFY` | Skip manifest signature verification (set to any value) |
 | `NXV_API_TIMEOUT` | API request timeout in seconds (default: 30) |
 | `NO_COLOR` | Disable colored output |

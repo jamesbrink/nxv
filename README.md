@@ -1,7 +1,6 @@
 # nxv — Nix Version Index
 
 [![CI](https://github.com/jamesbrink/nxv/actions/workflows/ci.yml/badge.svg)](https://github.com/jamesbrink/nxv/actions/workflows/ci.yml)
-[![Release](https://github.com/jamesbrink/nxv/actions/workflows/release.yml/badge.svg)](https://github.com/jamesbrink/nxv/actions/workflows/release.yml)
 [![Crates.io](https://img.shields.io/crates/v/nxv.svg)](https://crates.io/crates/nxv)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)

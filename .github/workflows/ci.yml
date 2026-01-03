@@ -75,5 +75,67 @@ jobs:
       - name: Run integration tests
         run: cargo test --test integration
 
+  nix:
+    name: Nix Flake Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Setup Cachix
+        uses: cachix/cachix-action@v15
+        with:
+          name: nxv
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+
+      - name: Flake check
+        run: nix flake check
+
+  docker:
+    name: Build & Push Docker (latest)
+    runs-on: ubuntu-latest
+    # Only push on main branch, not PRs
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [test, nix]
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Setup Cachix
+        uses: cachix/cachix-action@v15
+        with:
+          name: nxv
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+
+      - name: Build Docker image
+        run: nix build .#packages.x86_64-linux.nxv-docker
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push to GHCR
+        run: |
+          # Load the image built by Nix
+          docker load < result
+
+          # Get the image name from the tarball
+          IMAGE_NAME=$(docker images --format '{{.Repository}}:{{.Tag}}' | head -1)
+
+          # Tag and push as latest
+          docker tag "$IMAGE_NAME" ghcr.io/${{ github.repository }}:latest
+          docker push ghcr.io/${{ github.repository }}:latest
+
   # Note: Release builds with static binaries are handled by .github/workflows/release.yml
   # which triggers on tag pushes (v*) and uses Nix for reproducible static musl builds

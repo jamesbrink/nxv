@@ -10,47 +10,48 @@ permissions:
   packages: write
 
 jobs:
-  build-static:
-    name: Build Static Binaries
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-musl
-            artifact: nxv-linux-x86_64-musl
-            system: x86_64-linux
-          - target: aarch64-unknown-linux-musl
-            artifact: nxv-linux-aarch64-musl
-            system: aarch64-linux
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
-
-      - name: Setup Cachix
-        uses: cachix/cachix-action@v16
-        with:
-          name: nxv
-          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
-
-      - name: Build static binary
-        run: |
-          nix build .#nxv-static --system ${{ matrix.system }}
-          cp result/bin/nxv nxv-${{ matrix.system }}
-          chmod +x nxv-${{ matrix.system }}
-
-      - name: Verify static linking
-        run: |
-          file nxv-${{ matrix.system }}
-          ldd nxv-${{ matrix.system }} || echo "Static binary confirmed"
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact }}
-          path: nxv-${{ matrix.system }}
+  # TODO: Re-enable static builds once cross-compilation is fixed
+  # build-static:
+  #   name: Build Static Binaries
+  #   runs-on: ubuntu-latest
+  #   strategy:
+  #     matrix:
+  #       include:
+  #         - target: x86_64-unknown-linux-musl
+  #           artifact: nxv-linux-x86_64-musl
+  #           system: x86_64-linux
+  #         - target: aarch64-unknown-linux-musl
+  #           artifact: nxv-linux-aarch64-musl
+  #           system: aarch64-linux
+  #
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #
+  #     - name: Install Nix
+  #       uses: DeterminateSystems/nix-installer-action@main
+  #
+  #     - name: Setup Cachix
+  #       uses: cachix/cachix-action@v16
+  #       with:
+  #         name: nxv
+  #         authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+  #
+  #     - name: Build static binary
+  #       run: |
+  #         nix build .#nxv-static --system ${{ matrix.system }}
+  #         cp result/bin/nxv nxv-${{ matrix.system }}
+  #         chmod +x nxv-${{ matrix.system }}
+  #
+  #     - name: Verify static linking
+  #       run: |
+  #         file nxv-${{ matrix.system }}
+  #         ldd nxv-${{ matrix.system }} || echo "Static binary confirmed"
+  #
+  #     - name: Upload artifact
+  #       uses: actions/upload-artifact@v4
+  #       with:
+  #         name: ${{ matrix.artifact }}
+  #         path: nxv-${{ matrix.system }}
 
   build-macos:
     name: Build macOS Binaries
@@ -58,7 +59,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: macos-13
+          - os: macos-13-large
             target: x86_64-apple-darwin
             artifact: nxv-darwin-x86_64
           - os: macos-14
@@ -91,7 +92,7 @@ jobs:
 
   release:
     name: Create Release
-    needs: [build-static, build-macos]
+    needs: [build-macos]
     runs-on: ubuntu-latest
 
     steps:
@@ -105,9 +106,9 @@ jobs:
       - name: Prepare release assets
         run: |
           mkdir -p release
-          # Linux static binaries
-          cp artifacts/nxv-linux-x86_64-musl/nxv-x86_64-linux release/nxv-x86_64-linux-musl
-          cp artifacts/nxv-linux-aarch64-musl/nxv-aarch64-linux release/nxv-aarch64-linux-musl
+          # Linux static binaries (disabled for now)
+          # cp artifacts/nxv-linux-x86_64-musl/nxv-x86_64-linux release/nxv-x86_64-linux-musl
+          # cp artifacts/nxv-linux-aarch64-musl/nxv-aarch64-linux release/nxv-aarch64-linux-musl
           # macOS binaries
           cp artifacts/nxv-darwin-x86_64/nxv-x86_64-apple-darwin release/nxv-x86_64-apple-darwin
           cp artifacts/nxv-darwin-aarch64/nxv-aarch64-apple-darwin release/nxv-aarch64-apple-darwin
@@ -132,7 +133,7 @@ jobs:
 
   publish-crate:
     name: Publish to crates.io
-    needs: [build-static, build-macos]
+    needs: [build-macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -173,7 +174,7 @@ jobs:
 
   publish-docker:
     name: Publish Docker Image
-    needs: [build-static, build-macos]
+    needs: [build-macos]
     runs-on: ubuntu-latest
 
     steps:

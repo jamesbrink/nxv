@@ -199,6 +199,78 @@
           exit 1
         '';
 
+        # Cross-compile to aarch64-linux-musl from x86_64-linux
+        # This allows building ARM64 Linux binaries on x86_64 without QEMU
+        nxv-static-aarch64 = let
+          isLinuxX86 = pkgs.stdenv.isLinux && system == "x86_64-linux";
+          target = "aarch64-unknown-linux-musl";
+
+          # aarch64 musl cross-compilation pkgs
+          pkgsMusl = pkgs.pkgsCross.aarch64-multiplatform-musl;
+
+          # Get the musl C compiler for aarch64
+          muslCC = "${pkgsMusl.stdenv.cc}/bin/${pkgsMusl.stdenv.cc.targetPrefix}cc";
+
+          # Toolchain with aarch64-musl target added
+          rustToolchainMusl = pkgs.rust-bin.stable.latest.default.override {
+            targets = [ target ];
+          };
+
+          # Crane lib with musl toolchain
+          craneLibMusl = (crane.mkLib pkgs).overrideToolchain rustToolchainMusl;
+
+          # Cross-compilation build args
+          muslBuildArgs = {
+            inherit src;
+            inherit (crateInfo) pname version;
+            strictDeps = true;
+
+            CARGO_BUILD_TARGET = target;
+            CARGO_BUILD_RUSTFLAGS = "-C target-feature=+crt-static -C linker=${muslCC}";
+
+            HOST_CC = "${pkgs.stdenv.cc}/bin/cc";
+            TARGET_CC = muslCC;
+            CC_aarch64_unknown_linux_musl = muslCC;
+
+            hardeningDisable = [ "fortify" ];
+
+            nativeBuildInputs = [
+              pkgs.pkg-config
+              pkgsMusl.stdenv.cc
+            ];
+
+            buildInputs = [ ];
+          };
+
+          cargoArtifactsMusl = craneLibMusl.buildDepsOnly muslBuildArgs;
+
+        in if isLinuxX86 then craneLibMusl.buildPackage (muslBuildArgs // {
+          pname = "nxv-static-aarch64";
+          cargoArtifacts = cargoArtifactsMusl;
+
+          # Skip tests - can't run aarch64 binary on x86_64 without QEMU
+          doCheck = false;
+
+          nativeBuildInputs = muslBuildArgs.nativeBuildInputs ++ [
+            pkgs.installShellFiles
+          ];
+
+          # Skip shell completions - can't run aarch64 binary on x86_64
+          postInstall = "";
+
+          meta = {
+            description = "Nix Version Index (static aarch64 musl binary)";
+            homepage = "https://github.com/jamesbrink/nxv";
+            license = pkgs.lib.licenses.mit;
+            maintainers = [ ];
+            mainProgram = "nxv";
+            platforms = [ "x86_64-linux" ];
+          };
+        }) else pkgs.runCommand "nxv-static-aarch64-unavailable" {} ''
+          echo "nxv-static-aarch64 cross-compilation is only available on x86_64-linux" >&2
+          exit 1
+        '';
+
         # Docker image for nxv-indexer (Linux only)
         nxv-docker = if pkgs.stdenv.isLinux then pkgs.dockerTools.buildLayeredImage {
           name = "nxv";
@@ -238,7 +310,7 @@
       {
         # Packages
         packages = {
-          inherit nxv nxv-indexer nxv-static nxv-docker;
+          inherit nxv nxv-indexer nxv-static nxv-static-aarch64 nxv-docker;
           default = nxv;
         };
 

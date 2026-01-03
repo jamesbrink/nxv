@@ -10,61 +10,41 @@ permissions:
   packages: write
 
 jobs:
-  # TODO: Re-enable static builds once cross-compilation is fixed
-  # build-static:
-  #   name: Build Static Binaries
-  #   runs-on: ubuntu-latest
-  #   strategy:
-  #     matrix:
-  #       include:
-  #         - target: x86_64-unknown-linux-musl
-  #           artifact: nxv-linux-x86_64-musl
-  #           system: x86_64-linux
-  #         - target: aarch64-unknown-linux-musl
-  #           artifact: nxv-linux-aarch64-musl
-  #           system: aarch64-linux
-  #
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #
-  #     - name: Install Nix
-  #       uses: DeterminateSystems/nix-installer-action@main
-  #
-  #     - name: Setup Cachix
-  #       uses: cachix/cachix-action@v16
-  #       with:
-  #         name: nxv
-  #         authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
-  #
-  #     - name: Build static binary
-  #       run: |
-  #         nix build .#nxv-static --system ${{ matrix.system }}
-  #         cp result/bin/nxv nxv-${{ matrix.system }}
-  #         chmod +x nxv-${{ matrix.system }}
-  #
-  #     - name: Verify static linking
-  #       run: |
-  #         file nxv-${{ matrix.system }}
-  #         ldd nxv-${{ matrix.system }} || echo "Static binary confirmed"
-  #
-  #     - name: Upload artifact
-  #       uses: actions/upload-artifact@v4
-  #       with:
-  #         name: ${{ matrix.artifact }}
-  #         path: nxv-${{ matrix.system }}
+  build-linux:
+    name: Build Linux Binary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Setup Cachix
+        uses: cachix/cachix-action@v16
+        with:
+          name: nxv
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+
+      - name: Build static binary
+        run: |
+          nix build .#nxv-static
+          cp result/bin/nxv nxv-x86_64-linux
+          chmod +x nxv-x86_64-linux
+
+      - name: Verify static linking
+        run: |
+          file nxv-x86_64-linux
+          ldd nxv-x86_64-linux 2>&1 || echo "Static binary confirmed"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nxv-linux-x86_64-musl
+          path: nxv-x86_64-linux
 
   build-macos:
-    name: Build macOS Binaries
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          - os: macos-15-large
-            target: x86_64-apple-darwin
-            artifact: nxv-darwin-x86_64
-          - os: macos-15
-            target: aarch64-apple-darwin
-            artifact: nxv-darwin-aarch64
+    name: Build macOS Binary
+    runs-on: macos-14  # Free tier ARM64 runner
 
     steps:
       - uses: actions/checkout@v4
@@ -81,18 +61,18 @@ jobs:
       - name: Build binary
         run: |
           nix build .#nxv
-          cp result/bin/nxv nxv-${{ matrix.target }}
-          chmod +x nxv-${{ matrix.target }}
+          cp result/bin/nxv nxv-aarch64-apple-darwin
+          chmod +x nxv-aarch64-apple-darwin
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: nxv-${{ matrix.target }}
+          name: nxv-darwin-aarch64
+          path: nxv-aarch64-apple-darwin
 
   release:
     name: Create Release
-    needs: [build-macos]
+    needs: [build-linux, build-macos]
     runs-on: ubuntu-latest
 
     steps:
@@ -106,11 +86,9 @@ jobs:
       - name: Prepare release assets
         run: |
           mkdir -p release
-          # Linux static binaries (disabled for now)
-          # cp artifacts/nxv-linux-x86_64-musl/nxv-x86_64-linux release/nxv-x86_64-linux-musl
-          # cp artifacts/nxv-linux-aarch64-musl/nxv-aarch64-linux release/nxv-aarch64-linux-musl
-          # macOS binaries
-          cp artifacts/nxv-darwin-x86_64/nxv-x86_64-apple-darwin release/nxv-x86_64-apple-darwin
+          # Linux static binary
+          cp artifacts/nxv-linux-x86_64-musl/nxv-x86_64-linux release/nxv-x86_64-linux-musl
+          # macOS binary (ARM64 only for now - free tier)
           cp artifacts/nxv-darwin-aarch64/nxv-aarch64-apple-darwin release/nxv-aarch64-apple-darwin
 
           # Create checksums
@@ -133,7 +111,7 @@ jobs:
 
   publish-crate:
     name: Publish to crates.io
-    needs: [build-macos]
+    needs: [build-linux, build-macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -174,7 +152,7 @@ jobs:
 
   publish-docker:
     name: Publish Docker Image
-    needs: [build-macos]
+    needs: [build-linux, build-macos]
     runs-on: ubuntu-latest
 
     steps:

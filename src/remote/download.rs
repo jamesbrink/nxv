@@ -286,7 +286,6 @@ pub fn compress_zstd<P: AsRef<Path>, Q: AsRef<Path>>(src: P, dest: Q, level: i32
 }
 
 /// Calculate SHA256 hash of a file.
-#[allow(dead_code)]
 pub fn file_sha256<P: AsRef<Path>>(path: P) -> Result<String> {
     let file = File::open(path)?;
     let mut reader = BufReader::new(file);

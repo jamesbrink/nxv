@@ -50,14 +50,37 @@ impl PackageVersion {
         let first_commit_ts: i64 = row.get("first_commit_date")?;
         let last_commit_ts: i64 = row.get("last_commit_date")?;
 
+        // Use single() instead of unwrap() to safely handle invalid timestamps
+        let first_commit_date =
+            Utc.timestamp_opt(first_commit_ts, 0)
+                .single()
+                .ok_or_else(|| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Integer,
+                        format!("Invalid first_commit_date timestamp: {}", first_commit_ts).into(),
+                    )
+                })?;
+
+        let last_commit_date = Utc
+            .timestamp_opt(last_commit_ts, 0)
+            .single()
+            .ok_or_else(|| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Integer,
+                    format!("Invalid last_commit_date timestamp: {}", last_commit_ts).into(),
+                )
+            })?;
+
         Ok(Self {
             id: row.get("id")?,
             name: row.get("name")?,
             version: row.get("version")?,
             first_commit_hash: row.get("first_commit_hash")?,
-            first_commit_date: Utc.timestamp_opt(first_commit_ts, 0).unwrap(),
+            first_commit_date,
             last_commit_hash: row.get("last_commit_hash")?,
-            last_commit_date: Utc.timestamp_opt(last_commit_ts, 0).unwrap(),
+            last_commit_date,
             attribute_path: row.get("attribute_path")?,
             description: row.get("description")?,
             license: row.get("license")?,

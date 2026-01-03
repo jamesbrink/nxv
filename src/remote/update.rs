@@ -34,11 +34,12 @@ pub fn check_for_updates<P: AsRef<Path>>(
     db_path: P,
     manifest_url: Option<&str>,
     show_progress: bool,
+    skip_verify: bool,
 ) -> Result<UpdateStatus> {
     let manifest_url = manifest_url.unwrap_or(DEFAULT_MANIFEST_URL);
 
     // Fetch the manifest
-    let manifest = fetch_manifest(manifest_url, show_progress)?;
+    let manifest = fetch_manifest(manifest_url, show_progress, skip_verify)?;
 
     // Check if local index exists
     let db_path = db_path.as_ref();
@@ -80,12 +81,16 @@ pub fn check_for_updates<P: AsRef<Path>>(
     }
 }
 
-/// Fetch and parse the remote manifest.
-fn fetch_manifest(url: &str, _show_progress: bool) -> Result<Manifest> {
+/// Fetch, verify, and parse the remote manifest.
+///
+/// When `skip_verify` is false, downloads the `.minisig` signature file
+/// and verifies the manifest using the embedded public key.
+fn fetch_manifest(url: &str, show_progress: bool, skip_verify: bool) -> Result<Manifest> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
 
+    // Download manifest JSON
     let response = client.get(url).send()?;
 
     if !response.status().is_success() {
@@ -95,7 +100,46 @@ fn fetch_manifest(url: &str, _show_progress: bool) -> Result<Manifest> {
         )));
     }
 
-    let manifest: Manifest = response.json()?;
+    let manifest_json = response.text()?;
+
+    // Verify signature unless skipped
+    if skip_verify {
+        if show_progress {
+            eprintln!("⚠ Warning: Skipping manifest signature verification (--skip-verify)");
+        }
+    } else {
+        // Try to download signature file
+        let sig_url = format!("{}.minisig", url);
+        match client.get(&sig_url).send() {
+            Ok(sig_response) if sig_response.status().is_success() => {
+                let signature = sig_response.text()?;
+                // Verify signature using embedded public key
+                Manifest::parse_and_verify(&manifest_json, &signature)?;
+                // Signature valid, return parsed manifest
+                let manifest: Manifest = serde_json::from_str(&manifest_json)?;
+                if manifest.version > 2 {
+                    return Err(NxvError::InvalidManifestVersion(manifest.version));
+                }
+                return Ok(manifest);
+            }
+            Ok(sig_response) => {
+                // Signature file not found - fail unless skip_verify
+                return Err(NxvError::NetworkMessage(format!(
+                    "Manifest signature not found (HTTP {}). Use --skip-verify to bypass.",
+                    sig_response.status()
+                )));
+            }
+            Err(e) => {
+                return Err(NxvError::NetworkMessage(format!(
+                    "Failed to fetch manifest signature: {}. Use --skip-verify to bypass.",
+                    e
+                )));
+            }
+        }
+    }
+
+    // Parse without verification (skip_verify mode)
+    let manifest: Manifest = serde_json::from_str(&manifest_json)?;
 
     // Validate manifest version
     if manifest.version > 2 {
@@ -110,9 +154,10 @@ pub fn apply_full_update<P: AsRef<Path>>(
     manifest_url: Option<&str>,
     db_path: P,
     show_progress: bool,
+    skip_verify: bool,
 ) -> Result<()> {
     let manifest_url = manifest_url.unwrap_or(DEFAULT_MANIFEST_URL);
-    let manifest = fetch_manifest(manifest_url, show_progress)?;
+    let manifest = fetch_manifest(manifest_url, show_progress, skip_verify)?;
 
     let db_path = db_path.as_ref();
 
@@ -148,11 +193,12 @@ pub fn apply_delta_update<P: AsRef<Path>>(
     db_path: P,
     from_commit: &str,
     show_progress: bool,
+    skip_verify: bool,
 ) -> Result<()> {
     use crate::db::import::import_delta_sql;
 
     let manifest_url = manifest_url.unwrap_or(DEFAULT_MANIFEST_URL);
-    let manifest = fetch_manifest(manifest_url, show_progress)?;
+    let manifest = fetch_manifest(manifest_url, show_progress, skip_verify)?;
 
     let delta = manifest.find_delta(from_commit).ok_or_else(|| {
         NxvError::NetworkMessage(format!("No delta available from commit {}", from_commit))
@@ -202,8 +248,9 @@ pub fn perform_update<P: AsRef<Path>>(
     db_path: P,
     force_full: bool,
     show_progress: bool,
+    skip_verify: bool,
 ) -> Result<UpdateStatus> {
-    let status = check_for_updates(&db_path, manifest_url, show_progress)?;
+    let status = check_for_updates(&db_path, manifest_url, show_progress, skip_verify)?;
 
     match &status {
         UpdateStatus::UpToDate { commit } => {
@@ -212,13 +259,19 @@ pub fn perform_update<P: AsRef<Path>>(
             }
         }
         UpdateStatus::NoLocalIndex { .. } | UpdateStatus::FullDownloadNeeded { .. } => {
-            apply_full_update(manifest_url, &db_path, show_progress)?;
+            apply_full_update(manifest_url, &db_path, show_progress, skip_verify)?;
         }
         UpdateStatus::DeltaAvailable { from_commit, .. } => {
             if force_full {
-                apply_full_update(manifest_url, &db_path, show_progress)?;
+                apply_full_update(manifest_url, &db_path, show_progress, skip_verify)?;
             } else {
-                apply_delta_update(manifest_url, &db_path, from_commit, show_progress)?;
+                apply_delta_update(
+                    manifest_url,
+                    &db_path,
+                    from_commit,
+                    show_progress,
+                    skip_verify,
+                )?;
             }
         }
     }

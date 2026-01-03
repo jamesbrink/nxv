@@ -1186,6 +1186,7 @@ fn test_update_with_mock_http_server() {
             "--db-path",
             db_path.to_str().unwrap(),
             "update",
+            "--skip-verify",
             "--manifest-url",
             &manifest_url,
         ])
@@ -1281,6 +1282,7 @@ fn test_update_already_up_to_date() {
             "--db-path",
             db_path.to_str().unwrap(),
             "update",
+            "--skip-verify",
             "--manifest-url",
             &manifest_url,
         ])
@@ -1420,6 +1422,7 @@ COMMIT;
             "--db-path",
             db_path.to_str().unwrap(),
             "update",
+            "--skip-verify",
             "--manifest-url",
             &manifest_url,
         ])
@@ -1481,6 +1484,7 @@ fn test_update_network_error_handling() {
             "--db-path",
             db_path.to_str().unwrap(),
             "update",
+            "--skip-verify",
             "--manifest-url",
             &manifest_url,
         ])
@@ -1543,6 +1547,7 @@ fn test_update_checksum_mismatch() {
             "--db-path",
             db_path.to_str().unwrap(),
             "update",
+            "--skip-verify",
             "--manifest-url",
             &manifest_url,
         ])
@@ -1571,12 +1576,181 @@ fn test_update_unreachable_server() {
             "--db-path",
             db_path.to_str().unwrap(),
             "update",
+            "--skip-verify",
             "--manifest-url",
             manifest_url,
         ])
         .assert()
         .failure()
         .stderr(predicate::str::contains("error"));
+}
+
+// ============================================================================
+// Signature Verification Tests
+// ============================================================================
+
+#[test]
+fn test_update_fails_without_signature_when_verify_enabled() {
+    // This test verifies that manifest signature verification is enforced by default.
+    // When no signature file is available, the update should fail unless --skip-verify is used.
+
+    // Create test artifacts
+    let (compressed_db, db_hash) = create_compressed_test_db();
+    let (bloom_data, bloom_hash) = create_test_bloom_filter();
+
+    // Start mock server that serves manifest but NO .minisig file
+    let mut server = mockito::Server::new();
+
+    let manifest = format!(
+        r#"{{
+        "version": 2,
+        "latest_commit": "abc123def456",
+        "latest_commit_date": "2024-01-15T12:00:00Z",
+        "full_index": {{
+            "url": "{}/index.db.zst",
+            "size_bytes": {},
+            "sha256": "{}"
+        }},
+        "bloom_filter": {{
+            "url": "{}/index.bloom",
+            "size_bytes": {},
+            "sha256": "{}"
+        }},
+        "deltas": []
+    }}"#,
+        server.url(),
+        compressed_db.len(),
+        db_hash,
+        server.url(),
+        bloom_data.len(),
+        bloom_hash
+    );
+
+    let _manifest_mock = server
+        .mock("GET", "/manifest.json")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(&manifest)
+        .create();
+
+    // Signature file returns 404 - simulating no signature available
+    let _signature_mock = server
+        .mock("GET", "/manifest.json.minisig")
+        .with_status(404)
+        .create();
+
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("index.db");
+    let manifest_url = format!("{}/manifest.json", server.url());
+
+    // Update should FAIL because signature verification is enabled by default
+    // and no signature is available
+    nxv()
+        .args([
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "update",
+            "--manifest-url",
+            &manifest_url,
+        ])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("Manifest signature not found")
+                .or(predicate::str::contains("--skip-verify")),
+        );
+
+    // Database should NOT be created since update failed
+    assert!(
+        !db_path.exists(),
+        "Database should not be created when signature verification fails"
+    );
+}
+
+#[test]
+fn test_update_skip_verify_shows_warning() {
+    // This test verifies that --skip-verify allows updates but shows a warning
+
+    // Create test artifacts
+    let (compressed_db, db_hash) = create_compressed_test_db();
+    let (bloom_data, bloom_hash) = create_test_bloom_filter();
+
+    // Start mock server
+    let mut server = mockito::Server::new();
+
+    let manifest = format!(
+        r#"{{
+        "version": 2,
+        "latest_commit": "abc123def456",
+        "latest_commit_date": "2024-01-15T12:00:00Z",
+        "full_index": {{
+            "url": "{}/index.db.zst",
+            "size_bytes": {},
+            "sha256": "{}"
+        }},
+        "bloom_filter": {{
+            "url": "{}/index.bloom",
+            "size_bytes": {},
+            "sha256": "{}"
+        }},
+        "deltas": []
+    }}"#,
+        server.url(),
+        compressed_db.len(),
+        db_hash,
+        server.url(),
+        bloom_data.len(),
+        bloom_hash
+    );
+
+    let _manifest_mock = server
+        .mock("GET", "/manifest.json")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(&manifest)
+        .create();
+
+    let _db_mock = server
+        .mock("GET", "/index.db.zst")
+        .with_status(200)
+        .with_header("content-type", "application/octet-stream")
+        .with_body(compressed_db)
+        .create();
+
+    let _bloom_mock = server
+        .mock("GET", "/index.bloom")
+        .with_status(200)
+        .with_header("content-type", "application/octet-stream")
+        .with_body(bloom_data)
+        .create();
+
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("index.db");
+    let bloom_path = dir.path().join("index.bloom");
+    let manifest_url = format!("{}/manifest.json", server.url());
+
+    // Update with --skip-verify should succeed but show a warning
+    nxv()
+        .args([
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "update",
+            "--skip-verify",
+            "--manifest-url",
+            &manifest_url,
+        ])
+        .env("NXV_BLOOM_PATH", bloom_path.to_str().unwrap())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "Skipping manifest signature verification",
+        ));
+
+    // Database should be created
+    assert!(
+        db_path.exists(),
+        "Database should be created with --skip-verify"
+    );
 }
 
 // ============================================================================
@@ -1672,6 +1846,7 @@ fn test_clear_error_message_invalid_manifest_version() {
             "--db-path",
             db_path.to_str().unwrap(),
             "update",
+            "--skip-verify",
             "--manifest-url",
             &manifest_url,
         ])
@@ -1782,6 +1957,7 @@ fn test_no_data_corruption_on_failed_download() {
             "--db-path",
             db_path.to_str().unwrap(),
             "update",
+            "--skip-verify",
             "--manifest-url",
             &manifest_url,
             "--force", // Force full download to test failure path
@@ -1855,6 +2031,7 @@ fn test_temp_files_cleaned_up_on_failure() {
             "--db-path",
             db_path.to_str().unwrap(),
             "update",
+            "--skip-verify",
             "--manifest-url",
             &manifest_url,
         ])
@@ -1999,6 +2176,7 @@ fn test_full_delta_update_workflow() {
             "--db-path",
             db_path.to_str().unwrap(),
             "update",
+            "--skip-verify",
             "--manifest-url",
             &manifest_url,
         ])
@@ -2109,6 +2287,7 @@ UPDATE meta SET value = 'delta789012345678901234567890abcdef12' WHERE key = 'las
             "--db-path",
             db_path.to_str().unwrap(),
             "update",
+            "--skip-verify",
             "--manifest-url",
             &manifest_url,
         ])

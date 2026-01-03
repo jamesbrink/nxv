@@ -52,6 +52,8 @@ pub struct ApiClient {
 }
 
 /// Default timeout for API requests in seconds.
+/// Used by `ApiClient::new()` when `NXV_API_TIMEOUT` is not set.
+#[allow(dead_code)] // Used by new() which is public API for library consumers
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
 impl ApiClient {
@@ -70,12 +72,30 @@ impl ApiClient {
     /// ```
     ///
     /// Returns `Ok(ApiClient)` on success, or `Err(NxvError::Network)` if building the HTTP client fails.
+    #[allow(dead_code)] // Public API for library consumers, CLI uses new_with_timeout
     pub fn new(base_url: impl Into<String>) -> Result<Self> {
-        let base_url = base_url.into().trim_end_matches('/').to_string();
         let timeout_secs = std::env::var("NXV_API_TIMEOUT")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(DEFAULT_TIMEOUT_SECS);
+        Self::new_with_timeout(base_url, timeout_secs)
+    }
+
+    /// Creates a new ApiClient with a specified timeout.
+    ///
+    /// The `base_url` is normalized by removing a trailing slash if present.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use nxv::client::ApiClient;
+    /// let client = ApiClient::new_with_timeout("https://example.com", 60).unwrap();
+    /// // client is ready to make API requests with 60s timeout
+    /// ```
+    ///
+    /// Returns `Ok(ApiClient)` on success, or `Err(NxvError::Network)` if building the HTTP client fails.
+    pub fn new_with_timeout(base_url: impl Into<String>, timeout_secs: u64) -> Result<Self> {
+        let base_url = base_url.into().trim_end_matches('/').to_string();
         let client = Client::builder()
             .timeout(Duration::from_secs(timeout_secs))
             .build()

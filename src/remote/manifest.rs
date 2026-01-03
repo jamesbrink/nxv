@@ -16,8 +16,13 @@ use std::io::Cursor;
 /// ```sh
 /// minisign -S -s nxv.key -m manifest.json
 /// ```
-#[allow(dead_code)]
-pub const MANIFEST_PUBLIC_KEY: &str = "untrusted comment: nxv manifest signing key\nRWTHy8Hb+LSqSJNRMBXPzXl8J5F5WTWmYu5J0CxmZWQ3z8rLnVJk9ABC";
+///
+/// To verify a manifest:
+/// ```sh
+/// minisign -Vm manifest.json -P RWSBt4RfZg0FEiiDheTd5vYE60LQTeDH+MHrgWDR6TtIHuGMAuJjMIaL
+/// ```
+pub const MANIFEST_PUBLIC_KEY: &str = "untrusted comment: minisign public key 12050D665F84B781
+RWSBt4RfZg0FEiiDheTd5vYE60LQTeDH+MHrgWDR6TtIHuGMAuJjMIaL";
 
 /// Remote index manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,7 +56,6 @@ pub struct DeltaFile {
 
 impl Manifest {
     /// Parse a manifest from JSON content.
-    #[allow(dead_code)]
     pub fn parse(json: &str) -> Result<Self> {
         let manifest: Manifest = serde_json::from_str(json)?;
         Ok(manifest)
@@ -60,25 +64,12 @@ impl Manifest {
     /// Parse and verify a manifest from JSON content and its signature.
     ///
     /// The signature should be in minisign format.
-    #[allow(dead_code)]
     pub fn parse_and_verify(json: &str, signature: &str) -> Result<Self> {
         // Verify signature first
         verify_manifest_signature(json.as_bytes(), signature)?;
 
         // Then parse the manifest
         Self::parse(json)
-    }
-
-    /// Fetch and parse a manifest from a URL.
-    #[allow(dead_code)]
-    pub fn fetch(_url: &str) -> Result<Self> {
-        // TODO: Implement in Phase 7
-        // This will:
-        // 1. Download the manifest JSON
-        // 2. Download the signature file
-        // 3. Verify the signature
-        // 4. Parse and validate
-        unimplemented!("Manifest fetch not yet implemented")
     }
 
     /// Find a delta that can update from the given commit.
@@ -88,7 +79,6 @@ impl Manifest {
 }
 
 /// Verify a manifest signature using the embedded public key.
-#[allow(dead_code)]
 pub fn verify_manifest_signature(manifest_data: &[u8], signature_str: &str) -> Result<()> {
     // Parse the public key
     let pk = minisign::PublicKey::from_base64(MANIFEST_PUBLIC_KEY)

@@ -110,7 +110,7 @@ fn get_backend(cli: &Cli) -> Result<backend::Backend> {
     use backend::Backend;
 
     if let Ok(url) = std::env::var("NXV_API_URL") {
-        let client = client::ApiClient::new(&url)?;
+        let client = client::ApiClient::new_with_timeout(&url, cli.api_timeout)?;
         Ok(Backend::Remote(client))
     } else {
         let db = db::Database::open_readonly(&cli.db_path)?;
@@ -147,7 +147,7 @@ fn get_backend_with_prompt(cli: &Cli) -> Result<backend::Backend> {
 
     // If using remote API, no need for local database
     if let Ok(url) = std::env::var("NXV_API_URL") {
-        let client = client::ApiClient::new(&url)?;
+        let client = client::ApiClient::new_with_timeout(&url, cli.api_timeout)?;
         return Ok(Backend::Remote(client));
     }
 
@@ -170,6 +170,7 @@ fn get_backend_with_prompt(cli: &Cli) -> Result<backend::Backend> {
                     let update_args = cli::UpdateArgs {
                         force: false,
                         manifest_url: None,
+                        skip_verify: false,
                     };
                     cmd_update(cli, &update_args)?;
 
@@ -379,7 +380,13 @@ fn cmd_update(cli: &Cli, args: &cli::UpdateArgs) -> Result<()> {
         eprintln!("Checking for updates...");
     }
 
-    let status = perform_update(manifest_url, &cli.db_path, args.force, show_progress)?;
+    let status = perform_update(
+        manifest_url,
+        &cli.db_path,
+        args.force,
+        show_progress,
+        args.skip_verify,
+    )?;
 
     match status {
         UpdateStatus::UpToDate { commit } => {

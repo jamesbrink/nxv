@@ -28,6 +28,10 @@ pub struct Cli {
     #[arg(long, env = "NO_COLOR")]
     pub no_color: bool,
 
+    /// API request timeout in seconds (when using remote backend).
+    #[arg(long, env = "NXV_API_TIMEOUT", default_value_t = 30)]
+    pub api_timeout: u64,
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -165,6 +169,10 @@ pub struct UpdateArgs {
     /// Custom manifest URL (for testing or alternate index sources).
     #[arg(long, env = "NXV_MANIFEST_URL", hide = true)]
     pub manifest_url: Option<String>,
+
+    /// Skip manifest signature verification (INSECURE - use only for development/testing).
+    #[arg(long, env = "NXV_SKIP_VERIFY")]
+    pub skip_verify: bool,
 }
 
 /// Arguments for the history command.
@@ -260,11 +268,11 @@ pub struct ServeArgs {
     #[arg(short, long, default_value_t = 8080, env = "NXV_PORT")]
     pub port: u16,
 
-    /// Enable CORS for all origins.
+    /// Enable CORS for all origins (insecure, use --cors-origins for production).
     #[arg(long)]
     pub cors: bool,
 
-    /// Specific CORS origins (comma-separated). Implies --cors.
+    /// Specific CORS origins (comma-separated, recommended for production).
     #[arg(long, value_delimiter = ',')]
     pub cors_origins: Option<Vec<String>>,
 }

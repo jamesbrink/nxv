@@ -242,8 +242,8 @@ pub fn sign_manifest<P: AsRef<Path>>(
         None,
         &sk,
         &mut cursor,
-        Some("nxv manifest signature"),
         Some(&trusted_comment),
+        Some("nxv manifest signature"),
     )
     .map_err(|e| NxvError::Signing(format!("failed to sign manifest: {}", e)))?;
 
@@ -999,6 +999,57 @@ mod tests {
         let sig_content = fs::read_to_string(&sig_path).unwrap();
         assert!(sig_content.contains("untrusted comment:"));
         assert!(sig_content.contains("trusted comment:"));
+    }
+
+    #[test]
+    fn test_sign_manifest_comment_placement() {
+        // Verify that the trusted comment contains the timestamp (cryptographically protected)
+        // and the untrusted comment contains the description.
+        // Per minisign convention, timestamps should be in trusted comments to prevent tampering.
+        let dir = tempdir().unwrap();
+        let sk_path = dir.path().join("test.key");
+        let pk_path = dir.path().join("test.pub");
+        let manifest_path = dir.path().join("manifest.json");
+
+        generate_keypair(&sk_path, &pk_path, "comment test", false).unwrap();
+        fs::write(&manifest_path, r#"{"version":1}"#).unwrap();
+
+        let sig_path = sign_manifest(&manifest_path, sk_path.to_str().unwrap()).unwrap();
+        let sig_content = fs::read_to_string(&sig_path).unwrap();
+
+        // Parse the signature file lines
+        let lines: Vec<&str> = sig_content.lines().collect();
+        assert!(lines.len() >= 4, "Signature should have at least 4 lines");
+
+        // Line 0: untrusted comment
+        // Line 1: base64 signature
+        // Line 2: trusted comment
+        // Line 3: base64 global signature
+        let untrusted_line = lines[0];
+        let trusted_line = lines[2];
+
+        assert!(
+            untrusted_line.starts_with("untrusted comment:"),
+            "First line should be untrusted comment"
+        );
+        assert!(
+            trusted_line.starts_with("trusted comment:"),
+            "Third line should be trusted comment"
+        );
+
+        // The timestamp should be in the TRUSTED comment (cryptographically protected)
+        assert!(
+            trusted_line.contains("timestamp:"),
+            "Trusted comment should contain timestamp, got: {}",
+            trusted_line
+        );
+
+        // The description should be in the UNTRUSTED comment
+        assert!(
+            untrusted_line.contains("nxv manifest signature"),
+            "Untrusted comment should contain 'nxv manifest signature', got: {}",
+            untrusted_line
+        );
     }
 
     #[test]

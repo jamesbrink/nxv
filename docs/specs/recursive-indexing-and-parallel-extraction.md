@@ -1,5 +1,7 @@
 # Recursive Package Indexing and Parallel Extraction
 
+**Tracking Issue**: [#5 - Add support for nested package sets](https://github.com/jamesbrink/nxv/issues/5)
+
 ## Overview
 
 This spec addresses two critical limitations in the current nxv indexer:
@@ -25,16 +27,27 @@ This spec addresses two critical limitations in the current nxv indexer:
 
 Create a robust worktree management system for parallel extraction.
 
+**Existing code**: `git.rs:722-817` already has `Worktree`, `create_worktree()`,
+`create_worktrees()`, and `cleanup_worktrees()` (prunes `nxv-worktree-*` entries).
+This phase builds on that foundation.
+
 ### 1.1 WorktreePool Implementation
 
-- [ ] Create `src/index/worktree.rs` module
+- [ ] Create `src/index/worktree_pool.rs` module (separate from `git.rs` worktree primitives)
 - [ ] Implement `WorktreePool` struct with configurable worker count
-- [ ] Pool creates worktrees in system temp directory (e.g., `/tmp/nxv-worktrees-{pid}/`)
+- [ ] **Naming convention**: Use `nxv-worktree-{pool_id}-{worker_id}` format
+  - `pool_id`: Unique identifier per pool instance (e.g., timestamp or random)
+  - Aligns with existing `cleanup_worktrees()` prefix matching (`git.rs:809`)
+- [ ] Pool creates worktrees in system temp directory: `/tmp/nxv-worktrees-{pool_id}/`
+- [ ] Use existing `NixpkgsRepo::create_worktree()` internally (`git.rs:726-751`)
 - [ ] Each worktree is created with `git worktree add --detach`
 - [ ] Implement `acquire()` method that returns a `WorktreeHandle`
 - [ ] Implement `release()` method to return worktree to pool
 - [ ] Worktrees are reused across commits (checkout new commit, don't recreate)
-- [ ] Implement `Drop` for `WorktreePool` that cleans up all worktrees
+- [ ] Implement `Drop` for `WorktreePool` that:
+  - Calls `git worktree remove` for each managed worktree
+  - Removes the temp directory
+  - Calls `git worktree prune` on the main repo
 
 ### 1.2 WorktreeHandle Implementation
 
@@ -48,7 +61,11 @@ Create a robust worktree management system for parallel extraction.
 - [ ] Original nixpkgs path is **never** modified (read-only after initial clone check)
 - [ ] All git operations happen on worktrees in temp directory
 - [ ] Worktree cleanup on panic via `Drop` implementation
-- [ ] Stale worktree detection and cleanup on startup
+- [ ] **Startup cleanup**: On pool creation, call existing `cleanup_worktrees()` (`git.rs:802-817`)
+  to prune stale `nxv-worktree-*` refs from previous crashed runs
+- [ ] **Orphan detection**: Scan `/tmp/nxv-worktrees-*/` for directories not associated with
+  running processes (check PID if encoded in pool_id)
+- [ ] Register signal handlers (SIGTERM, SIGINT) to trigger cleanup before exit
 
 ### 1.4 Success Criteria
 
@@ -95,26 +112,83 @@ Modify the Nix extractor to discover and extract nested package scopes.
 - [ ] Add recursion depth tracking to prevent stack overflow
 - [ ] Handle cycles in package sets (some sets reference each other)
 
-### 2.3 Attribute Path Handling
+### 2.3 Dotted Attribute Path API (Critical)
+
+**Problem**: Current `EXTRACT_NIX` only accepts top-level attribute names. The expression
+uses `builtins.attrNames pkgs` and `pkgs ? name` checks (`extractor.rs:245-265`), which
+fail for dotted paths like `python3Packages.numpy`. Incremental indexing and backfill
+pass attribute lists directly to the extractor, so they cannot selectively update nested
+packages without this change.
+
+**Solution**: Extend the extractor API to support scope+path filtering:
+
+- [ ] Add new `extract_packages_for_scoped_attrs()` function signature:
+
+  ```rust
+  pub fn extract_packages_for_scoped_attrs<P: AsRef<Path>>(
+      repo_path: P,
+      system: &str,
+      scoped_attrs: &[ScopedAttr],  // e.g., [("python3Packages", "numpy"), ("qt6", "qtwebengine")]
+  ) -> Result<Vec<PackageInfo>>
+  ```
+
+- [ ] Create `ScopedAttr` type: `(Option<String>, String)` where `None` scope = top-level
+- [ ] Update `EXTRACT_NIX` to accept `scopedAttrs` parameter alongside `attrNames`:
+
+  ```nix
+  # When scopedAttrs is provided, navigate to scope first
+  # e.g., for ("python3Packages", "numpy"): pkgs.python3Packages.numpy
+  ```
+
+- [ ] `hasAttr` check becomes: `scope ? name` instead of `pkgs ? name`
+- [ ] Keep `extract_packages_for_attrs()` as convenience wrapper for top-level only
+- [ ] Update call sites in `mod.rs:985` and `backfill.rs:423` to use scoped API
+
+### 2.4 Change Detection for Nested Packages (Critical)
+
+**Problem**: The file→attr map is built from `unsafeGetAttrPos` over top-level names only
+(`extractor.rs:269-322`). Edits to `pkgs/development/python-modules/numpy/default.nix`
+won't map to `python3Packages.numpy`, so incremental indexing skips nested packages entirely.
+
+**Solution**: Extend position extraction to cover nested scopes:
+
+- [ ] Create `POSITIONS_RECURSIVE_NIX` expression that:
+  - Iterates top-level attrs as before
+  - For whitelisted scopes, also iterates their children
+  - Returns `{ attrPath = "python3Packages.numpy"; file = "/path/to/numpy/default.nix"; }`
+- [ ] Update `build_file_attr_map()` to use recursive positions when recursion is enabled
+- [ ] File→attr map keys remain file paths; values become full dotted attr paths
+- [ ] Target path resolution in `mod.rs:942-966` works unchanged (file lookup returns dotted path)
+- [ ] Add `--no-recurse-positions` flag to skip nested position extraction (faster but less accurate)
+
+**Performance consideration**: Recursive position extraction adds evaluation time. Consider:
+
+- Cache position maps per-commit in memory
+- Only rebuild when `all-packages.nix` or scope definition files change
+
+### 2.5 Attribute Path Handling
 
 - [ ] Store full dotted attribute path in database (already supported by schema)
 - [ ] Ensure `name` field remains the package name (pname), not the full path
 - [ ] Update bloom filter to include full attribute paths
 - [ ] Verify search still works for both name and attribute path queries
 
-### 2.4 Extraction Performance
+### 2.6 Extraction Performance
 
 - [ ] Profile extraction time with recursion enabled
 - [ ] Add `--no-recurse` flag to skip nested packages (for faster incremental updates)
 - [ ] Consider caching which scopes exist at each commit to avoid re-evaluation
 
-### 2.5 Success Criteria
+### 2.7 Success Criteria
 
 - [ ] Unit test: extract from mock nixpkgs with nested derivation, verify full path stored
 - [ ] Integration test: extract `qt6.qtwebengine` from real nixpkgs HEAD
 - [ ] Integration test: extract `python3Packages.numpy` from real nixpkgs HEAD
 - [ ] Test that deeply nested packages (>2 levels) are handled correctly
 - [ ] Benchmark: extraction time increase is <3x compared to top-level only
+- [ ] Test: `extract_packages_for_scoped_attrs()` correctly extracts `("python3Packages", "numpy")`
+- [ ] Test: file→attr map includes `python3Packages.numpy` for `pkgs/development/python-modules/numpy/default.nix`
+- [ ] Test: incremental index detects change to nested package file and updates correctly
 
 ---
 
@@ -122,54 +196,91 @@ Modify the Nix extractor to discover and extract nested package scopes.
 
 Refactor the indexer to use worker threads with worktree pool.
 
+**Call-site migration required**: Currently `process_commits()` (`mod.rs:837-934`) and
+`run_backfill_historical()` (`backfill.rs:331-444`) directly call `repo.checkout_commit()`
+on the user's nixpkgs. These must be refactored to use `WorktreeHandle` exclusively.
+
 ### 3.1 Indexer Refactoring
 
-- [ ] Extract commit processing logic into standalone function
+- [ ] Extract commit processing logic into standalone `process_single_commit()` function
 - [ ] Create `IndexerWorker` struct that owns a `WorktreeHandle`
 - [ ] Worker receives commits via channel, processes them, sends results back
 - [ ] Main thread coordinates workers and handles database writes
+- [ ] **Remove** all `repo.checkout_commit()` calls from main indexer code path
+- [ ] **Migrate call sites**:
+  - `mod.rs:840` - initial checkout → use first worker's worktree
+  - `mod.rs:902` - per-commit checkout → worker handles via `WorktreeHandle`
+  - `mod.rs:931` - file map rebuild → worker provides changed paths
+  - `backfill.rs:412` - historical checkout → use worktree pool
 
-### 3.2 Parallel Commit Processing
+### 3.2 Responsibility Contract
+
+**Main thread responsibilities**:
+
+- Maintains the commit queue (ordered by date)
+- Dispatches commit+target_attrs tuples to workers
+- Receives `ExtractionResult` from workers
+- Buffers out-of-order results in `pending_results: BTreeMap<CommitSeq, ExtractionResult>`
+- Processes results in sequence order for open-range bookkeeping (`mod.rs:1008-1044`)
+- Writes to database (single writer, no contention)
+- Handles checkpointing and graceful shutdown
+
+**Worker thread responsibilities**:
+
+- Owns a `WorktreeHandle` from the pool
+- Receives `(commit_hash, target_attrs, commit_seq)` from channel
+- Calls `handle.checkout(commit_hash)`
+- Computes `changed_paths` via `git diff-tree` in worktree
+- Builds file→attr map if needed (in worktree, not main repo)
+- Resolves `target_attr_paths` from changed files
+- Runs extraction via `extract_packages_for_scoped_attrs()`
+- Sends `ExtractionResult { commit_seq, packages, changed_paths }` back
+
+### 3.3 Parallel Commit Processing
 
 - [ ] Add `--workers N` CLI option (default: number of CPUs / 2, min 1)
 - [ ] Distribute commits across workers using work-stealing queue
 - [ ] Each worker:
   1. Acquires worktree from pool
   2. Checks out assigned commit
-  3. Runs extraction (with recursion if enabled)
-  4. Sends extracted packages back via channel
+  3. Computes changed paths and target attrs (in worker, not main thread)
+  4. Runs extraction (with recursion if enabled)
+  5. Sends `ExtractionResult` back via channel
 - [ ] Main thread:
-  1. Receives extracted packages from workers
-  2. Maintains open ranges state (sequential by commit order)
-  3. Batches database writes
+  1. Receives extraction results from workers
+  2. Buffers out-of-order results until predecessor commits complete
+  3. Processes results in commit-order for open-range state
+  4. Batches database writes
 
-### 3.3 Ordering Guarantees
+### 3.4 Ordering Guarantees
 
 - [ ] Commits must be processed in chronological order for range tracking
 - [ ] Use commit sequence numbers to ensure correct ordering
 - [ ] Buffer out-of-order results until preceding commits complete
 - [ ] Checkpoint only after all preceding commits are processed
 
-### 3.4 Graceful Shutdown
+### 3.5 Graceful Shutdown
 
 - [ ] Signal workers to stop on Ctrl+C
 - [ ] Wait for in-flight extractions to complete (with timeout)
 - [ ] Checkpoint at last fully-processed commit
 - [ ] Clean up all worktrees before exit
 
-### 3.5 Progress Reporting
+### 3.6 Progress Reporting
 
 - [ ] Per-worker progress display
 - [ ] Overall ETA based on commits remaining
 - [ ] Show current commit being processed by each worker
 
-### 3.6 Success Criteria
+### 3.7 Success Criteria
 
 - [ ] Test parallel extraction with 4 workers processes commits correctly
 - [ ] Test ordering is maintained when workers complete out-of-order
 - [ ] Test graceful shutdown saves valid checkpoint
 - [ ] Test that database is consistent after parallel indexing
 - [ ] Benchmark: 4 workers should be ~3x faster than single-threaded (I/O bound)
+- [ ] Test: no `checkout_commit()` calls remain in main indexer code path
+- [ ] Test: original nixpkgs working directory unchanged after parallel indexing
 
 ---
 
@@ -177,17 +288,26 @@ Refactor the indexer to use worker threads with worktree pool.
 
 Update backfill to work with nested packages and use worktrees.
 
+**Current issue**: `run_backfill_historical()` (`backfill.rs:411-444`) calls
+`repo.checkout_commit()` directly, modifying the user's nixpkgs. It also passes
+attr_paths to `extract_packages_for_attrs()` which doesn't support dotted paths.
+
 ### 4.1 Nested Package Support
 
 - [ ] Update `get_attrs_needing_backfill()` to return full attribute paths
-- [ ] Handle dotted attribute paths in extraction calls
+- [ ] Parse dotted paths into `ScopedAttr` tuples for extraction
+- [ ] Use `extract_packages_for_scoped_attrs()` instead of `extract_packages_for_attrs()`
+- [ ] Update `backfill.rs:423` call site to use scoped API
 - [ ] Verify backfill correctly updates nested package records
 
 ### 4.2 Worktree-Based Backfill
 
-- [ ] Refactor `run_backfill_historical` to use `WorktreePool`
+- [ ] Refactor `run_backfill_historical()` to use `WorktreePool`
+- [ ] **Remove** `repo.checkout_commit()` call at `backfill.rs:412`
+- [ ] **Remove** `repo.restore_ref()` call at `backfill.rs:404` (no longer needed)
+- [ ] Acquire `WorktreeHandle` at start of backfill, release on completion
 - [ ] Never modify the main nixpkgs checkout
-- [ ] Support parallel backfill with multiple worktrees
+- [ ] Support parallel backfill with multiple worktrees for different commits
 
 ### 4.3 Historical Mode Improvements
 
@@ -201,6 +321,8 @@ Update backfill to work with nested packages and use worktrees.
 - [ ] Test backfill with `--history` mode uses worktrees
 - [ ] Test original nixpkgs is unmodified after backfill
 - [ ] Integration test: backfill missing source_path for nested packages
+- [ ] Test: no `checkout_commit()` or `restore_ref()` calls in backfill code path
+- [ ] Test: `ScopedAttr` parsing handles `python3Packages.numpy` → `("python3Packages", "numpy")`
 
 ---
 
@@ -388,3 +510,72 @@ Searching "numpy" matches `pname` (6.0 boost), while "python3Packages.numpy" mat
 4. Historical data for nested packages only goes back to when recursion was enabled
 
 This allows gradual adoption without requiring a full re-index of all commits.
+
+---
+
+## Appendix: Review Findings and Resolutions
+
+This section documents issues identified during spec review and how they are addressed.
+
+### High Priority
+
+#### 1. EXTRACT_NIX doesn't support dotted paths for filtered extraction
+
+**Issue**: Current `EXTRACT_NIX` uses `builtins.attrNames pkgs` and `pkgs ? name` checks
+(`extractor.rs:245-265`), which fail for dotted paths. Incremental/backfill pass attr
+lists directly, so they cannot selectively update nested packages.
+
+**Resolution**: Added **Section 2.3 (Dotted Attribute Path API)** with:
+
+- New `extract_packages_for_scoped_attrs()` function
+- `ScopedAttr` type for (scope, name) pairs
+- Updated Nix expression to navigate scopes
+- Call-site migration plan for `mod.rs:985` and `backfill.rs:423`
+
+#### 2. Change detection is top-level only
+
+**Issue**: File→attr map built from `unsafeGetAttrPos` over top-level names only
+(`extractor.rs:269-322`). Edits to nested package files won't trigger updates.
+
+**Resolution**: Added **Section 2.4 (Change Detection for Nested Packages)** with:
+
+- `POSITIONS_RECURSIVE_NIX` expression for nested scopes
+- Updated `build_file_attr_map()` to use recursive positions
+- File paths correctly map to full dotted attr paths
+
+### Medium Priority
+
+#### 3. "Never modify nixpkgs" needs call-site migration
+
+**Issue**: `process_commits()` and `run_backfill_historical()` call `checkout_commit()`
+on user's nixpkgs. Adding worktree pool doesn't help without refactoring these paths.
+
+**Resolution**: Added explicit migration in:
+
+- **Section 3.1**: Lists specific call sites to migrate (`mod.rs:840,902,931`, `backfill.rs:412`)
+- **Section 3.2**: Defines responsibility contract (workers own worktrees, main thread never checkouts)
+- **Section 4.2**: Backfill-specific migration with `checkout_commit()` and `restore_ref()` removal
+
+#### 4. Worktree lifecycle/cleanup under-specified
+
+**Issue**: Spec proposed `/tmp/nxv-worktrees-{pid}/` without naming rules or startup
+pruning. Misalignment with existing `cleanup_worktrees()` at `git.rs:802-817`.
+
+**Resolution**: Updated **Section 1.1** with:
+
+- Naming convention: `nxv-worktree-{pool_id}-{worker_id}` (aligns with existing prefix matching)
+- Uses existing `NixpkgsRepo::create_worktree()` internally
+- Updated **Section 1.3** with startup cleanup via existing `cleanup_worktrees()`
+- Orphan detection for temp directories
+
+#### 5. Parallel architecture responsibilities unclear
+
+**Issue**: Unspecified whether main thread or workers compute `changed_paths`/`target_attr_paths`.
+Open-range bookkeeping is order-sensitive.
+
+**Resolution**: Added **Section 3.2 (Responsibility Contract)** with:
+
+- Main thread: commit queue, result buffering, ordering, DB writes
+- Workers: checkout, changed_paths, target resolution, extraction
+- Explicit `ExtractionResult` type with `commit_seq` for ordering
+- `pending_results: BTreeMap<CommitSeq, ExtractionResult>` for buffering

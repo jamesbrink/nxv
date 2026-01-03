@@ -33,7 +33,7 @@ NXV_API_URL=https://nxv.urandom.io nix run github:jamesbrink/nxv -- search nodej
 NXV_API_URL=https://nxv.urandom.io nix run github:jamesbrink/nxv -- search python 2.7
 ```
 
-Or browse the web UI at [nxv.urandom.io](https://nxv.urandom.io).
+Or visit **https://nxv.urandom.io** to search in your browser.
 
 ## Features
 

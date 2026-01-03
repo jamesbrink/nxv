@@ -27,8 +27,9 @@ This spec addresses two critical limitations in the current nxv indexer:
 
 Create a robust worktree management system for parallel extraction.
 
-**Existing code**: `git.rs:722-817` already has `Worktree`, `create_worktree()`,
-`create_worktrees()`, and `cleanup_worktrees()` (prunes `nxv-worktree-*` entries).
+**Existing code**: `git.rs:96-129` defines `Worktree` struct with `cleanup` flag,
+`git.rs:764-830` has `create_worktree()`, `create_worktrees()`, and `remove_worktree()`,
+and `git.rs:844-859` has `cleanup_worktrees()` (prunes `nxv-worktree-*` entries).
 This phase builds on that foundation.
 
 ### 1.1 Worker-Owned Worktree Architecture
@@ -47,8 +48,8 @@ shared across threads.
 - [ ] **Naming convention (Critical)**: Worktree **basenames** must be `nxv-worktree-{session_id}-{worker_id}`
   - `session_id`: Unique identifier per indexing session (e.g., timestamp or random)
   - Git records the **basename** of the worktree path as the worktree name
-  - `cleanup_worktrees()` at `git.rs:844` filters `name.starts_with("nxv-worktree-")`
-  - Current `create_worktrees()` at `git.rs:799` uses `worker-{i}` which **never matches cleanup**
+  - `cleanup_worktrees()` at `git.rs:844-859` filters `name.starts_with("nxv-worktree-")`
+  - Current `create_worktrees()` at `git.rs:803` uses `worker-{i}` which **never matches cleanup**
 - [ ] Each worker creates its worktree at: `/tmp/nxv-worktrees-{session_id}/nxv-worktree-{session_id}-{worker_id}/`
   - Full path example: `/tmp/nxv-worktrees-abc123/nxv-worktree-abc123-0/`
   - Git sees basename: `nxv-worktree-abc123-0` ✓ matches cleanup prefix
@@ -162,15 +163,59 @@ impl Worker {
 - [ ] Workers clean up their worktrees via `Drop` when thread terminates
 - [ ] Main thread uses channels to send `CommitTask` and receive `ExtractionResult`
 
+**Worker spawn pattern (Critical)**: Workers MUST be created on the main thread, then moved into
+spawned threads. This ensures worktree creation happens before thread spawn:
+
+```rust
+// CORRECT: Create workers on main thread, then move into spawned threads
+let (task_tx, task_rx) = crossbeam_channel::unbounded::<CommitTask>();
+let (result_tx, result_rx) = crossbeam_channel::unbounded::<ExtractionResult>();
+
+let mut handles = Vec::new();
+for worker_id in 0..num_workers {
+    // Worker::new() called on MAIN THREAD - worktree is created here
+    let mut worker = Worker::new(WorkerConfig {
+        repo_path: repo_path.clone(),
+        session_id: session_id.clone(),
+        worker_id,
+        systems: systems.clone(),
+    })?;
+
+    let rx = task_rx.clone();
+    let tx = result_tx.clone();
+    let shutdown = shutdown_flag.clone();
+
+    // Worker ownership transferred to spawned thread
+    handles.push(std::thread::spawn(move || {
+        while let Ok(task) = rx.recv() {
+            if shutdown.load(Ordering::SeqCst) {
+                break;
+            }
+            if let Ok(result) = worker.process_commit(task) {
+                let _ = tx.send(result);
+            }
+        }
+        // Worker::Drop cleans up worktree when thread exits
+    }));
+}
+```
+
 ### 1.3 Safety Guarantees
 
 - [ ] Original nixpkgs path is **never** modified (read-only after initial clone check)
 - [ ] All git operations happen on worktrees in temp directory
 - [ ] Worktree cleanup on panic via `Drop` implementation
-- [ ] **Startup cleanup**: On session creation, call existing `cleanup_worktrees()` (`git.rs:844-858`)
+- [ ] **Startup cleanup**: On session creation, call existing `cleanup_worktrees()` (`git.rs:844-859`)
   to prune stale `nxv-worktree-*` refs from previous crashed runs
-- [ ] **Orphan detection**: Scan `/tmp/nxv-worktrees-*/` for directories not associated with
-  running processes (check PID if encoded in session_id)
+- [ ] **Orphan detection via lock files** (preferred over PID encoding):
+  - Create `/tmp/nxv-worktrees-{session_id}/.lock` when session starts
+  - Use `flock(LOCK_EX | LOCK_NB)` to acquire exclusive lock
+  - Lock is automatically released when process exits (even on crash)
+  - On startup, scan `/tmp/nxv-worktrees-*/`:
+    1. Try to acquire lock on each `.lock` file
+    2. If lock succeeds → orphan directory, safe to delete
+    3. If lock fails → active session, skip
+  - This is more reliable than PID checking (PIDs can wrap)
 
 ### 1.4 Signal Handling (Critical)
 
@@ -255,7 +300,7 @@ Modify the Nix extractor to discover and extract nested package scopes.
 ### 2.3 Dotted Attribute Path API (Critical)
 
 **Problem**: Current `EXTRACT_NIX` only accepts top-level attribute names. The expression
-uses `builtins.attrNames pkgs` and `pkgs ? name` checks (`extractor.rs:245-265`), which
+uses `builtins.attrNames pkgs` and `pkgs ? name` checks (`extractor.rs:234-264`), which
 fail for dotted paths like `python3Packages.numpy`. Incremental indexing and backfill
 pass attribute lists directly to the extractor, so they cannot selectively update nested
 packages without this change.
@@ -298,6 +343,11 @@ packages without this change.
   - Rust → JSON: `[["beam", "packages", "erlang_26"], ["python3Packages", "numpy"]]`
   - This is list-of-lists format, unambiguous for paths with dots in segment names
   - Nix reads as `attrPaths` and uses `builtins.getAttrByPath` directly
+  - **Escaping rules**: Use `serde_json::to_string()` which handles:
+    - Quotes in attr names: `"foo\"bar"` → `"foo\"bar"` (escaped)
+    - Backslashes: `"foo\\bar"` → `"foo\\bar"` (escaped)
+    - Unicode: Preserved as-is (JSON is UTF-8)
+    - Nixpkgs attr names are typically `[a-zA-Z0-9_-]` so escaping is rarely needed
 
 - [ ] Update `EXTRACT_NIX` to accept `attrPaths` parameter (list of segment lists):
 
@@ -318,9 +368,9 @@ packages without this change.
 
 - [ ] Keep `extract_packages_for_attrs()` as convenience wrapper for top-level only
 - [ ] Update call sites:
-  - `mod.rs:983` → use `extract_packages_for_attr_paths()`
-  - `backfill.rs:250` → use `extract_packages_for_attr_paths()`
-  - `backfill.rs:423` → use `extract_packages_for_attr_paths()`
+  - `mod.rs:982-984` → use `extract_packages_for_attr_paths()`
+  - `backfill.rs:249-250` → use `extract_packages_for_attr_paths()`
+  - `backfill.rs:422-423` → use `extract_packages_for_attr_paths()`
 - [ ] **NOTE**: The spec previously referenced `extract_packages_for_scoped_attrs()` which does
   not exist. Use `extract_packages_for_attr_paths()` consistently throughout.
 
@@ -332,14 +382,14 @@ packages without this change.
 
 ### 2.4 Change Detection for Nested Packages (Critical)
 
-**Problem**: `unsafeGetAttrPos` (`extractor.rs:272-322`) reports where an attribute is *defined*
+**Problem**: `unsafeGetAttrPos` (`extractor.rs:269-322` POSITIONS_NIX, line 294) reports where an attribute is *defined*
 in the parent scope (e.g., `python-packages.nix`), NOT where the package implementation lives
 (e.g., `pkgs/development/python-modules/numpy/default.nix`). This means file changes to nested
 packages won't trigger updates because the file→attr map points to the wrong locations.
 
 **Architectural Decision**: Use `meta.position`/`source_path` based mapping instead of `unsafeGetAttrPos`.
 
-The existing `EXTRACT_NIX` already extracts `meta.position` via `getSourcePath` (`extractor.rs:190-209`),
+The existing `EXTRACT_NIX` already extracts `meta.position` via `getSourcePath` (`extractor.rs:187-209`),
 which correctly resolves to the package's actual definition file. While this requires evaluating
 each package (slower), it provides accurate file mapping essential for incremental indexing.
 
@@ -352,7 +402,7 @@ each package (slower), it provides accurate file mapping essential for increment
 - [ ] **Do NOT rely on `unsafeGetAttrPos`** for nested packages—it gives wrong files
 - [ ] Update `build_file_attr_map()` to use the meta.position-based approach
 - [ ] File→attr map keys are relative file paths; values are full dotted attr paths
-- [ ] Target path resolution in `mod.rs:942-966` works unchanged (file lookup returns dotted path)
+- [ ] Target path resolution in `mod.rs:935-966` works unchanged (file lookup returns dotted path)
 - [ ] Workers build this map per-commit (no stale map issues in parallel mode)
 
 **Performance trade-off**: `meta.position` requires evaluating packages (slower than `unsafeGetAttrPos`).
@@ -371,7 +421,7 @@ The latter is what we need for change detection.
 
 ### 2.5 File Map Refresh for Nested Scopes (Critical)
 
-**Problem**: The current `should_refresh_file_map()` at `mod.rs:1185-1196` relies on stateful
+**Problem**: The current `should_refresh_file_map()` at `mod.rs:1185-1197` relies on stateful
 logic (`mapping_commit` at `mod.rs:840`) that assumes sequential commit processing. In parallel
 mode, workers processing commits out of order would use stale maps, leading to missed updates.
 
@@ -459,8 +509,8 @@ would still race on a shared map. Per-commit rebuild is the only safe approach f
 
 Refactor the indexer to use worker threads with worktree pool.
 
-**Call-site migration required**: Currently `process_commits()` (`mod.rs:837-934`) and
-`run_backfill_historical()` (`backfill.rs:331-444`) directly call `repo.checkout_commit()`
+**Call-site migration required**: Currently `process_commits()` (`mod.rs:778-1139`) and
+`run_backfill_historical()` (`backfill.rs:321-483`) directly call `repo.checkout_commit()`
 on the user's nixpkgs. These must be refactored to use `WorktreeHandle` exclusively.
 
 ### 3.1 Indexer Refactoring
@@ -471,9 +521,9 @@ on the user's nixpkgs. These must be refactored to use `WorktreeHandle` exclusiv
 - [ ] Main thread coordinates workers and handles database writes
 - [ ] **Remove** all `repo.checkout_commit()` calls from main indexer code path
 - [ ] **Migrate call sites**:
-  - `mod.rs:840` - initial checkout → use first worker's worktree
-  - `mod.rs:902` - per-commit checkout → worker handles via `WorktreeHandle`
-  - `mod.rs:931` - file map rebuild → worker provides changed paths
+  - `mod.rs:838` - initial checkout → use first worker's worktree
+  - `mod.rs:900` - per-commit checkout → worker handles via `WorktreeHandle`
+  - `mod.rs:927-933` - file map rebuild → worker provides changed paths
   - `backfill.rs:412` - historical checkout → use worktree pool
 
 ### 3.2 Responsibility Contract
@@ -484,9 +534,23 @@ on the user's nixpkgs. These must be refactored to use `WorktreeHandle` exclusiv
 - Dispatches commit+target_attrs tuples to workers
 - Receives `ExtractionResult` from workers
 - Buffers out-of-order results in `pending_results: BTreeMap<CommitSeq, ExtractionResult>`
-- Processes results in sequence order for open-range bookkeeping (`mod.rs:1008-1044`)
+- Processes results in sequence order for open-range bookkeeping (`mod.rs:1010-1072`)
 - Writes to database (single writer, no contention)
 - Handles checkpointing and graceful shutdown
+
+**Database batching strategy**:
+
+- [ ] Batch size: 100 commits per transaction (configurable via `--batch-size`)
+- [ ] Use SQLite transactions: `BEGIN IMMEDIATE` → inserts → `COMMIT`
+- [ ] On transaction failure:
+  1. Roll back the failed batch
+  2. Retry the batch once with smaller size (50)
+  3. If still fails, fall back to single-commit transactions
+  4. Log the error but continue processing
+- [ ] Checkpoint after each successful batch (not per-commit)
+- [ ] On graceful shutdown, commit partial batch before exit
+- [ ] Use `INSERT OR REPLACE` for idempotent inserts (safe for restart)
+- [ ] WAL mode already enabled in `db/mod.rs` for better concurrent read performance
 
 **Worker thread responsibilities**:
 
@@ -502,7 +566,7 @@ on the user's nixpkgs. These must be refactored to use `WorktreeHandle` exclusiv
 ### 3.3 ExtractionResult Type (Critical)
 
 **Problem**: The original payload `{ commit_seq, packages, changed_paths }` omits `target_attr_paths`.
-The range bookkeeping in `mod.rs:937-966` uses `target_attr_paths` to detect when packages
+The range bookkeeping in `mod.rs:1056-1072` uses `target_attr_paths` to detect when packages
 disappear (present in targets but not in extraction results). Without this, the main thread
 cannot safely close ranges for deletions.
 
@@ -525,7 +589,7 @@ The main thread uses `target_attr_paths` to:
 
 1. Identify packages that were targeted but not returned (deleted/renamed)
 2. Close open ranges for those packages with `last_commit = prev_commit`
-3. This logic remains unchanged from `mod.rs:1008-1044`
+3. This logic remains unchanged from `mod.rs:1056-1072`
 
 ### 3.4 Parallel Commit Processing
 
@@ -551,12 +615,37 @@ The main thread uses `target_attr_paths` to:
 - [ ] Buffer out-of-order results until preceding commits complete
 - [ ] Checkpoint only after all preceding commits are processed
 
-### 3.6 Graceful Shutdown
+### 3.6 Graceful Shutdown and Panic Recovery
 
 - [ ] Signal workers to stop on Ctrl+C
 - [ ] Wait for in-flight extractions to complete (with timeout)
 - [ ] Checkpoint at last fully-processed commit
 - [ ] Clean up all worktrees before exit
+
+**Worker panic recovery strategy**:
+
+- [ ] Use `std::thread::spawn` which returns a `JoinHandle` that can detect panics
+- [ ] Main thread periodically checks if workers are alive via `JoinHandle::is_finished()`
+- [ ] If a worker panics:
+  1. Its `OwnedWorktree::Drop` still runs (Rust guarantees this during unwinding)
+  2. Main thread detects the finished handle and logs the panic
+  3. The commit that was in-flight is **not** marked complete (safe: will be retried on restart)
+  4. Main thread can optionally spawn a replacement worker with a new worktree
+  5. If too many workers fail (e.g., >50%), abort the indexing run with checkpoint
+- [ ] Use `std::panic::catch_unwind` inside worker loop for non-fatal panics:
+  ```rust
+  while let Ok(task) = rx.recv() {
+      let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+          worker.process_commit(task)
+      }));
+      match result {
+          Ok(Ok(extraction)) => { let _ = tx.send(extraction); }
+          Ok(Err(e)) => { warn!("Extraction error: {}", e); }
+          Err(_) => { warn!("Worker panic during commit, skipping"); }
+      }
+  }
+  ```
+- [ ] Worker panics should NOT crash the entire indexing process
 
 ### 3.7 Progress Reporting
 
@@ -581,20 +670,20 @@ The main thread uses `target_attr_paths` to:
 
 Update backfill to work with nested packages and use worktrees.
 
-**Current issue**: Both `run_backfill_head()` (`backfill.rs:172-280`) and
-`run_backfill_historical()` (`backfill.rs:331-444`) call `extract_packages_for_attrs()`
+**Current issue**: Both `run_backfill_head()` (`backfill.rs:172-300`) and
+`run_backfill_historical()` (`backfill.rs:321-483`) call `extract_packages_for_attrs()`
 which doesn't support dotted paths like `python3Packages.numpy`.
 
 ### 4.1 Head-Mode Backfill for Nested Attrs (Critical)
 
-**Problem**: Head-mode backfill (the default, no `--history` flag) at `backfill.rs:250`
+**Problem**: Head-mode backfill (the default, no `--history` flag) at `backfill.rs:249-250`
 calls `extract_packages_for_attrs()` with attribute paths from the database. When
 nested packages are indexed (e.g., `python3Packages.numpy`), this extraction fails
 silently because the extractor can't resolve dotted paths.
 
 **Solution**: Update head-mode backfill to use the new path-based API:
 
-- [ ] Change `backfill.rs:250` from `extract_packages_for_attrs()` to `extract_packages_for_attr_paths()`
+- [ ] Change `backfill.rs:249-250` from `extract_packages_for_attrs()` to `extract_packages_for_attr_paths()`
 - [ ] Parse `attr_list` entries into `AttrPath` instances before extraction
 - [ ] No worktree needed for head-mode (extracts from current HEAD only)
 - [ ] Test: backfill correctly fills `source_path`/`homepage` for `python3Packages.numpy`
@@ -604,14 +693,14 @@ silently because the extractor can't resolve dotted paths.
 - [ ] Update `get_attrs_needing_backfill()` to return full attribute paths
 - [ ] Parse dotted paths into `AttrPath` instances for extraction
 - [ ] Use `extract_packages_for_attr_paths()` instead of `extract_packages_for_attrs()`
-- [ ] Update `backfill.rs:423` call site to use path-based API
+- [ ] Update `backfill.rs:422-423` call site to use path-based API
 - [ ] Verify backfill correctly updates nested package records
 
 ### 4.3 Worktree-Based Historical Backfill
 
 - [ ] Refactor `run_backfill_historical()` to use `WorktreePool`
 - [ ] **Remove** `repo.checkout_commit()` call at `backfill.rs:412`
-- [ ] **Remove** `repo.restore_ref()` call at `backfill.rs:404` (no longer needed)
+- [ ] **Remove** `repo.restore_ref()` call at `backfill.rs:404,472-475` (no longer needed)
 - [ ] Acquire `WorktreeHandle` at start of backfill, release on completion
 - [ ] Never modify the main nixpkgs checkout
 - [ ] Support parallel backfill with multiple worktrees for different commits
@@ -647,7 +736,7 @@ silently because the extractor can't resolve dotted paths.
 ### 5.2 Configuration Validation
 
 - [ ] Validate nixpkgs path is a valid git repository
-- [ ] Check available disk space for worktrees (warn if <10GB)
+- [ ] Check available disk space for worktrees (warn if < N_workers × 2GB; each worktree is ~1.5GB)
 - [ ] Verify git version supports worktrees (>= 2.5)
 
 ### 5.3 Status and Diagnostics
@@ -753,6 +842,25 @@ silently because the extractor can't resolve dotted paths.
 | Database contention                          | Single writer thread, batch inserts             |
 | Memory pressure from large results           | Stream results, limit batch sizes               |
 | Inconsistent results from parallel execution | Strict ordering, deterministic merge            |
+| Parallel nix eval memory exhaustion          | Limit workers, monitor RSS, see guidance below  |
+
+### Memory Limit Guidance for Parallel Nix Eval
+
+Running N parallel `nix eval` processes can consume significant memory. Each evaluation of
+nixpkgs loads a substantial portion of the expression tree.
+
+**Recommendations**:
+
+- [ ] **Default worker count**: `min(num_cpus / 2, 4)` to balance parallelism vs memory
+- [ ] **Memory per worker**: Expect ~2-4GB peak RSS per `nix eval` on full nixpkgs
+- [ ] **System requirements**: Recommend 16GB RAM for 4 workers, 8GB for 2 workers
+- [ ] **CLI flag**: `--max-memory-per-worker` to set soft limit (requires external tooling)
+- [ ] **Monitoring**: Log peak RSS per worker for tuning guidance
+- [ ] **Graceful degradation**: If system memory pressure detected (via `/proc/meminfo`),
+      reduce active workers temporarily or pause new task dispatch
+- [ ] **Nix-specific**: Consider `--option max-jobs 1` in nix eval to prevent nested parallelism
+- [ ] **OOM killer protection**: Workers should be lower priority than main thread;
+      main thread checkpoints on worker OOM death
 
 ---
 
@@ -832,7 +940,7 @@ This section documents issues identified during spec review and how they are add
 ##### 1. EXTRACT_NIX doesn't support dotted paths for filtered extraction
 
 **Issue**: Current `EXTRACT_NIX` uses `builtins.attrNames pkgs` and `pkgs ? name` checks
-(`extractor.rs:245-265`), which fail for dotted paths. Incremental/backfill pass attr
+(`extractor.rs:234-264`), which fail for dotted paths. Incremental/backfill pass attr
 lists directly, so they cannot selectively update nested packages.
 
 **Resolution**: Added **Section 2.3 (Dotted Attribute Path API)** with:
@@ -840,12 +948,12 @@ lists directly, so they cannot selectively update nested packages.
 - New `extract_packages_for_attr_paths()` function
 - `AttrPath` type with `Vec<String>` segments for multi-level paths
 - Updated Nix expression using `builtins.hasAttrByPath` and `getAttrByPath`
-- Call-site migration plan for `mod.rs:985` and `backfill.rs:250,423`
+- Call-site migration plan for `mod.rs:982-984` and `backfill.rs:249-250,422-423`
 
 ##### 2. Change detection is top-level only
 
 **Issue**: File→attr map built from `unsafeGetAttrPos` over top-level names only
-(`extractor.rs:269-322`). Edits to nested package files won't trigger updates.
+(`extractor.rs:269-322` POSITIONS_NIX). Edits to nested package files won't trigger updates.
 
 **Resolution**: Added **Section 2.4 (Change Detection for Nested Packages)** with:
 
@@ -862,14 +970,14 @@ on user's nixpkgs. Adding worktree pool doesn't help without refactoring these p
 
 **Resolution**: Added explicit migration in:
 
-- **Section 3.1**: Lists specific call sites to migrate (`mod.rs:840,902,931`, `backfill.rs:412`)
+- **Section 3.1**: Lists specific call sites to migrate (`mod.rs:838,900,927-933`, `backfill.rs:412`)
 - **Section 3.2**: Defines responsibility contract (workers own worktrees, main thread never checkouts)
 - **Section 4.3**: Backfill-specific migration with `checkout_commit()` and `restore_ref()` removal
 
 ##### 4. Worktree lifecycle/cleanup under-specified
 
 **Issue**: Spec proposed `/tmp/nxv-worktrees-{pid}/` without naming rules or startup
-pruning. Misalignment with existing `cleanup_worktrees()` at `git.rs:802-817`.
+pruning. Misalignment with existing `cleanup_worktrees()` at `git.rs:844-859`.
 
 **Resolution**: Updated **Section 1.1** with:
 
@@ -899,14 +1007,14 @@ Open-range bookkeeping is order-sensitive.
 ##### 6. Result payload misses target attr set
 
 **Issue**: `ExtractionResult` only had `{ commit_seq, packages, changed_paths }`. The range
-bookkeeping at `mod.rs:937-966` uses `target_attr_paths` to detect when packages disappear.
+bookkeeping at `mod.rs:1056-1072` uses `target_attr_paths` to detect when packages disappear.
 Without returning resolved attr paths, main thread cannot close ranges for deletions.
 
 **Resolution**: Added **Section 3.3 (ExtractionResult Type)** with:
 
 - `target_attr_paths: HashSet<String>` field in `ExtractionResult`
 - Main thread uses this for deletion detection (packages targeted but not returned)
-- Range closing logic remains at `mod.rs:1008-1044`
+- Range closing logic remains at `mod.rs:1056-1072`
 
 ##### 7. ScopedAttr shape can't represent real paths
 
@@ -921,8 +1029,8 @@ paths go 3+ levels deep: `beam.packages.erlang_26.rebar3`, `linuxPackages_6_6.nv
 
 ##### 8. Worktree cleanup naming doesn't match current git code
 
-**Issue**: `create_worktrees()` produces `worker-{i}` basenames (`git.rs:761`), but
-`cleanup_worktrees()` filters for `nxv-worktree-` prefix (`git.rs:809`). Nothing is cleaned.
+**Issue**: `create_worktrees()` produces `worker-{i}` basenames (`git.rs:803`), but
+`cleanup_worktrees()` filters for `nxv-worktree-` prefix (`git.rs:851`). Nothing is cleaned.
 
 **Resolution**: Updated **Section 1.1** with:
 
@@ -935,18 +1043,18 @@ paths go 3+ levels deep: `beam.packages.erlang_26.rebar3`, `linuxPackages_6_6.nv
 
 ##### 9. Default backfill path still breaks for nested attrs
 
-**Issue**: Head-mode backfill (default) at `backfill.rs:250` calls `extract_packages_for_attrs()`
+**Issue**: Head-mode backfill (default) at `backfill.rs:249-250` calls `extract_packages_for_attrs()`
 which doesn't support dotted paths. Spec only mentioned historical mode in Phase 4.
 
 **Resolution**: Added **Section 4.1 (Head-Mode Backfill for Nested Attrs)** with:
 
-- Change `backfill.rs:250` to use `extract_packages_for_attr_paths()`
+- Change `backfill.rs:249-250` to use `extract_packages_for_attr_paths()`
 - Parse `attr_list` entries into `AttrPath` instances
 - No worktree needed for head-mode
 
 ##### 10. File→attr map refresh rules remain top-level-only
 
-**Issue**: `should_refresh_file_map()` at `mod.rs:1187-1198` only checks files like
+**Issue**: `should_refresh_file_map()` at `mod.rs:1185-1197` only checks files like
 `all-packages.nix`. Nested scope definitions live in other files, so map stays stale.
 
 **Resolution**: Added **Section 2.5 (File Map Refresh for Nested Scopes)** with:
@@ -1053,7 +1161,7 @@ references cannot be moved across thread boundaries. Additionally, `git2::Reposi
 
 ##### 14. Parallel workers need per-commit file→attr map
 
-**Issue**: The `mapping_commit` stateful logic at `mod.rs:840` assumes sequential processing.
+**Issue**: The `mapping_commit` stateful logic at `mod.rs:840` (within `process_commits()`) assumes sequential processing.
 Parallel workers processing out-of-order would use stale maps, causing incorrect updates.
 
 **Resolution**: Updated **Section 2.5** with per-commit rebuild:

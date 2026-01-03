@@ -76,8 +76,10 @@ impl Manifest {
 
 /// Verify a manifest signature using the embedded public key.
 pub fn verify_manifest_signature(manifest_data: &[u8], signature_str: &str) -> Result<()> {
-    // Parse the public key
-    let pk = minisign::PublicKey::from_base64(MANIFEST_PUBLIC_KEY)
+    // Parse the public key using from_box (expects comment + base64 format)
+    let pk_box = minisign::PublicKeyBox::from_string(MANIFEST_PUBLIC_KEY)
+        .map_err(|_| NxvError::InvalidManifestSignature)?;
+    let pk = minisign::PublicKey::from_box(pk_box)
         .map_err(|_| NxvError::InvalidManifestSignature)?;
 
     // Parse the signature
@@ -95,23 +97,26 @@ pub fn verify_manifest_signature(manifest_data: &[u8], signature_str: &str) -> R
 /// Verify a manifest signature with a custom public key.
 ///
 /// Used for self-hosted indexes with custom signing keys.
+/// The public_key_str should be in minisign format with comment and base64 key.
 pub fn verify_manifest_signature_with_key(
     manifest_data: &[u8],
     signature_str: &str,
     public_key_str: &str,
 ) -> Result<()> {
-    // Parse the public key
-    let pk = minisign::PublicKey::from_base64(public_key_str)
-        .map_err(|_| NxvError::InvalidManifestSignature)?;
+    // Parse the public key using from_box (expects comment + base64 format)
+    let pk_box = minisign::PublicKeyBox::from_string(public_key_str)
+        .map_err(|e| NxvError::PublicKey(format!("failed to parse public key: {}", e)))?;
+    let pk = minisign::PublicKey::from_box(pk_box)
+        .map_err(|e| NxvError::PublicKey(format!("failed to parse public key: {}", e)))?;
 
     // Parse the signature
     let sig_box = minisign::SignatureBox::from_string(signature_str)
-        .map_err(|_| NxvError::InvalidManifestSignature)?;
+        .map_err(|e| NxvError::PublicKey(format!("failed to parse signature: {}", e)))?;
 
     // Verify
     let mut cursor = Cursor::new(manifest_data);
     minisign::verify(&pk, &sig_box, &mut cursor, true, false, true)
-        .map_err(|_| NxvError::InvalidManifestSignature)?;
+        .map_err(|e| NxvError::PublicKey(format!("signature verification failed: {}", e)))?;
 
     Ok(())
 }
@@ -119,6 +124,16 @@ pub fn verify_manifest_signature_with_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_embedded_public_key_parses() {
+        // The embedded public key should be parseable using from_box
+        let pk_box = minisign::PublicKeyBox::from_string(MANIFEST_PUBLIC_KEY);
+        assert!(pk_box.is_ok(), "Embedded public key box should parse: {:?}", pk_box.err());
+
+        let pk = minisign::PublicKey::from_box(pk_box.unwrap());
+        assert!(pk.is_ok(), "Embedded public key should parse: {:?}", pk.err());
+    }
 
     #[test]
     fn test_manifest_parse() {

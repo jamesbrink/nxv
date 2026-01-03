@@ -52,8 +52,7 @@ pub struct ApiClient {
 }
 
 /// Default timeout for API requests in seconds.
-/// Used by `ApiClient::new()` when `NXV_API_TIMEOUT` is not set.
-#[allow(dead_code)] // Used by new() which is public API for library consumers
+#[cfg(test)]
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
 impl ApiClient {
@@ -72,7 +71,7 @@ impl ApiClient {
     /// ```
     ///
     /// Returns `Ok(ApiClient)` on success, or `Err(NxvError::Network)` if building the HTTP client fails.
-    #[allow(dead_code)] // Public API for library consumers, CLI uses new_with_timeout
+    #[cfg(test)]
     pub fn new(base_url: impl Into<String>) -> Result<Self> {
         let timeout_secs = std::env::var("NXV_API_TIMEOUT")
             .ok()

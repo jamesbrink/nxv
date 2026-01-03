@@ -25,6 +25,30 @@ pub const BLOOM_FILTER_NAME: &str = "bloom.bin";
 pub const MANIFEST_NAME: &str = "manifest.json";
 pub const MANIFEST_SIG_NAME: &str = "manifest.json.minisig";
 
+/// Replace the untrusted comment line in a minisign key string.
+///
+/// Minisign keys have the format:
+/// ```text
+/// untrusted comment: <comment>
+/// <base64 key data>
+/// ```
+///
+/// This function replaces the first line with a custom comment,
+/// making it robust against upstream format changes.
+fn replace_untrusted_comment(key_str: &str, new_comment: &str) -> String {
+    let mut lines = key_str.lines();
+    let first_line = lines.next().unwrap_or("");
+
+    // Only replace if the first line looks like an untrusted comment
+    if first_line.starts_with("untrusted comment:") {
+        let rest: Vec<&str> = lines.collect();
+        format!("{}\n{}", new_comment, rest.join("\n"))
+    } else {
+        // Unexpected format - prepend our comment but keep original intact
+        format!("{}\n{}", new_comment, key_str)
+    }
+}
+
 /// Generate a new minisign keypair for signing manifests.
 ///
 /// Creates an unencrypted keypair compatible with the minisign Rust crate.
@@ -62,21 +86,15 @@ pub fn generate_keypair<P: AsRef<Path>, Q: AsRef<Path>>(
         .map_err(|e| NxvError::Signing(format!("failed to serialize public key: {}", e)))?;
 
     // Replace minisign's default comments with custom ones.
-    // Note: These default strings are defined by the minisign crate's internal format.
-    // If the crate changes its default comment format in a future version, this
-    // replacement may silently fail to apply, but the keys will still function correctly.
+    // We replace the first line (the untrusted comment) regardless of its content,
+    // making this robust against upstream format changes.
     let sk_str = sk_box.to_string();
-    let sk_with_comment = sk_str.replacen(
-        "untrusted comment: rsign encrypted secret key",
-        &format!("untrusted comment: {}", comment),
-        1,
-    );
+    let sk_with_comment = replace_untrusted_comment(&sk_str, &format!("untrusted comment: {}", comment));
 
     let pk_str = pk_box.to_string();
-    let pk_with_comment = pk_str.replacen(
-        "untrusted comment: minisign public key:",
+    let pk_with_comment = replace_untrusted_comment(
+        &pk_str,
         &format!("untrusted comment: {} - public key:", comment),
-        1,
     );
 
     // Write key files atomically (use create_new to avoid TOCTOU race)
@@ -992,5 +1010,39 @@ mod tests {
         assert!(output_dir.join(BLOOM_FILTER_NAME).exists());
         assert!(output_dir.join(MANIFEST_NAME).exists());
         assert!(!output_dir.join(MANIFEST_SIG_NAME).exists());
+    }
+
+    #[test]
+    fn test_sign_and_verify_roundtrip() {
+        use crate::remote::manifest::verify_manifest_signature_with_key;
+
+        let dir = tempdir().unwrap();
+        let sk_path = dir.path().join("test.key");
+        let pk_path = dir.path().join("test.pub");
+        let manifest_path = dir.path().join("manifest.json");
+
+        // Generate keypair
+        generate_keypair(&sk_path, &pk_path, "roundtrip test", false).unwrap();
+
+        // Create a manifest
+        let manifest_content = r#"{"version":1,"latest_commit":"abc123"}"#;
+        fs::write(&manifest_path, manifest_content).unwrap();
+
+        // Sign it
+        let sig_path = sign_manifest(&manifest_path, &sk_path).unwrap();
+
+        // Read public key and signature
+        let pk_content = fs::read_to_string(&pk_path).unwrap();
+        let sig_content = fs::read_to_string(&sig_path).unwrap();
+
+        // Verify the signature
+        let result =
+            verify_manifest_signature_with_key(manifest_content.as_bytes(), &sig_content, &pk_content);
+
+        assert!(
+            result.is_ok(),
+            "Signature verification should succeed: {:?}",
+            result.err()
+        );
     }
 }

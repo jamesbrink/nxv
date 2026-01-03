@@ -2803,3 +2803,182 @@ fn test_publish_with_signing() {
         "Signature should have trusted comment"
     );
 }
+
+/// End-to-end test: keygen → publish with sign → update with custom public key.
+///
+/// This is the critical security path test that verifies:
+/// 1. Generated keys work for signing
+/// 2. Signed manifests are served correctly
+/// 3. Update with --public-key validates against the correct key
+#[test]
+#[cfg_attr(not(feature = "indexer"), ignore)]
+fn test_end_to_end_signed_manifest_verification() {
+    let dir = tempdir().unwrap();
+    let source_db_path = dir.path().join("source.db");
+    let output_dir = dir.path().join("publish");
+    let sk_path = dir.path().join("signing.key");
+    let pk_path = dir.path().join("signing.pub");
+    let client_db_path = dir.path().join("client.db");
+
+    // Step 1: Create a source database
+    create_test_db(&source_db_path);
+
+    // Step 2: Generate signing keypair
+    nxv()
+        .args([
+            "keygen",
+            "--secret-key",
+            sk_path.to_str().unwrap(),
+            "--public-key",
+            pk_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    // Step 3: Publish with signing
+    nxv()
+        .args([
+            "--db-path",
+            source_db_path.to_str().unwrap(),
+            "publish",
+            "--output",
+            output_dir.to_str().unwrap(),
+            "--sign",
+            "--secret-key",
+            sk_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    // Verify all artifacts exist
+    assert!(output_dir.join("index.db.zst").exists());
+    assert!(output_dir.join("bloom.bin").exists());
+    assert!(output_dir.join("manifest.json").exists());
+    assert!(output_dir.join("manifest.json.minisig").exists());
+
+    // Step 4: Start mock server serving the published artifacts
+    let mut server = mockito::Server::new();
+
+    // Read the manifest and update URLs to point to mock server
+    let manifest_content = std::fs::read_to_string(output_dir.join("manifest.json")).unwrap();
+    let mut manifest: serde_json::Value = serde_json::from_str(&manifest_content).unwrap();
+
+    // Update URLs in manifest to point to our mock server
+    manifest["full_index"]["url"] = serde_json::json!(format!("{}/index.db.zst", server.url()));
+    manifest["bloom_filter"]["url"] = serde_json::json!(format!("{}/bloom.bin", server.url()));
+
+    let updated_manifest = serde_json::to_string(&manifest).unwrap();
+
+    // Re-sign the modified manifest (URLs changed)
+    // We need to sign the modified manifest content
+    let temp_manifest_path = dir.path().join("temp_manifest.json");
+    std::fs::write(&temp_manifest_path, &updated_manifest).unwrap();
+
+    // Sign using minisign crate directly (since we can't call nxv publish for just signing)
+    let sk_content = std::fs::read_to_string(&sk_path).unwrap();
+    let sk_box = minisign::SecretKeyBox::from_string(&sk_content).unwrap();
+    let sk = sk_box.into_unencrypted_secret_key().unwrap();
+
+    use std::io::Cursor;
+    let mut cursor = Cursor::new(updated_manifest.as_bytes());
+    let sig_box = minisign::sign(
+        None,
+        &sk,
+        &mut cursor,
+        Some("test signature"),
+        Some("test trusted comment"),
+    )
+    .unwrap();
+    let signature = sig_box.to_string();
+
+    // Set up mock endpoints
+    let _manifest_mock = server
+        .mock("GET", "/manifest.json")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(&updated_manifest)
+        .create();
+
+    let _signature_mock = server
+        .mock("GET", "/manifest.json.minisig")
+        .with_status(200)
+        .with_header("content-type", "text/plain")
+        .with_body(&signature)
+        .create();
+
+    let db_data = std::fs::read(output_dir.join("index.db.zst")).unwrap();
+    let _db_mock = server
+        .mock("GET", "/index.db.zst")
+        .with_status(200)
+        .with_header("content-type", "application/octet-stream")
+        .with_body(db_data)
+        .create();
+
+    let bloom_data = std::fs::read(output_dir.join("bloom.bin")).unwrap();
+    let _bloom_mock = server
+        .mock("GET", "/bloom.bin")
+        .with_status(200)
+        .with_header("content-type", "application/octet-stream")
+        .with_body(bloom_data)
+        .create();
+
+    let manifest_url = format!("{}/manifest.json", server.url());
+
+    // Step 5: Update using the public key - this should SUCCEED
+    nxv()
+        .args([
+            "--db-path",
+            client_db_path.to_str().unwrap(),
+            "update",
+            "--manifest-url",
+            &manifest_url,
+            "--public-key",
+            pk_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Index downloaded successfully"));
+
+    // Verify the database was created
+    assert!(
+        client_db_path.exists(),
+        "Database should be created after successful signed update"
+    );
+
+    // Step 6: Try with WRONG public key - this should FAIL
+    let wrong_pk_path = dir.path().join("wrong.pub");
+    let wrong_sk_path = dir.path().join("wrong.key");
+
+    nxv()
+        .args([
+            "keygen",
+            "--secret-key",
+            wrong_sk_path.to_str().unwrap(),
+            "--public-key",
+            wrong_pk_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let client_db_path2 = dir.path().join("client2.db");
+
+    nxv()
+        .args([
+            "--db-path",
+            client_db_path2.to_str().unwrap(),
+            "update",
+            "--manifest-url",
+            &manifest_url,
+            "--public-key",
+            wrong_pk_path.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("signature verification failed"));
+
+    // Verify database was NOT created with wrong key
+    assert!(
+        !client_db_path2.exists(),
+        "Database should NOT be created when signature verification fails"
+    );
+}

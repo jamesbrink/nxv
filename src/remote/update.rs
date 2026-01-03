@@ -36,11 +36,32 @@ fn resolve_public_key(key: &str) -> Result<String> {
         return Ok(key.to_string());
     }
 
-    // Neither a valid file nor a raw key format
-    Err(NxvError::PublicKey(format!(
-        "'{}' is not a valid key or file path",
-        key
-    )))
+    // Provide helpful error message based on what the input looks like
+    if key.contains('/') || key.contains('\\') || key.ends_with(".pub") {
+        Err(NxvError::PublicKey(format!("file '{}' not found", key)))
+    } else {
+        Err(NxvError::PublicKey(format!(
+            "'{}' is not a valid minisign public key (expected format: RW...)",
+            key
+        )))
+    }
+}
+
+/// Build the signature URL by appending .minisig to the path component.
+///
+/// Handles URLs with query parameters correctly by modifying only the path.
+/// For example: `https://example.com/manifest.json?token=abc` becomes
+/// `https://example.com/manifest.json.minisig?token=abc`
+fn build_signature_url(manifest_url: &str) -> String {
+    // Try to parse as URL to handle query params correctly
+    if let Ok(mut parsed) = reqwest::Url::parse(manifest_url) {
+        let new_path = format!("{}.minisig", parsed.path());
+        parsed.set_path(&new_path);
+        parsed.to_string()
+    } else {
+        // Fallback for non-standard URLs
+        format!("{}.minisig", manifest_url)
+    }
 }
 
 /// Update status after checking for updates.
@@ -156,7 +177,8 @@ fn fetch_manifest(
         }
     } else {
         // Try to download signature file
-        let sig_url = format!("{}.minisig", url);
+        // Handle URLs with query params by appending .minisig to path only
+        let sig_url = build_signature_url(url);
         match client.get(&sig_url).send() {
             Ok(sig_response) if sig_response.status().is_success() => {
                 let signature = sig_response.text()?;
@@ -656,6 +678,37 @@ COMMIT;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("Public key error"));
-        assert!(err.contains("not a valid key or file path"));
+        assert!(err.contains("file") && err.contains("not found"));
+    }
+
+    #[test]
+    fn test_resolve_public_key_invalid_format() {
+        // Not a file path and not a valid key format
+        let result = resolve_public_key("invalid_key_string");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Public key error"));
+        assert!(err.contains("not a valid minisign public key"));
+    }
+
+    #[test]
+    fn test_build_signature_url_simple() {
+        let url = build_signature_url("https://example.com/manifest.json");
+        assert_eq!(url, "https://example.com/manifest.json.minisig");
+    }
+
+    #[test]
+    fn test_build_signature_url_with_query_params() {
+        let url = build_signature_url("https://example.com/manifest.json?token=abc&version=2");
+        assert_eq!(
+            url,
+            "https://example.com/manifest.json.minisig?token=abc&version=2"
+        );
+    }
+
+    #[test]
+    fn test_build_signature_url_with_fragment() {
+        let url = build_signature_url("https://example.com/manifest.json#section");
+        assert_eq!(url, "https://example.com/manifest.json.minisig#section");
     }
 }

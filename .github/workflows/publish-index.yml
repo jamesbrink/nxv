@@ -1,21 +1,19 @@
 name: Publish Index
 
 # This workflow updates the nxv package index from nixpkgs
-# It can be run on a schedule or triggered manually
+# It runs on a schedule or can be triggered manually
 
 on:
-  # Run weekly on Sunday at 00:00 UTC
+  # Run every 6 hours to keep index fresh
   schedule:
-    - cron: '0 0 * * 0'
+    - cron: '0 */6 * * *'
 
   # Allow manual triggering
   workflow_dispatch:
-    inputs:
-      full_rebuild:
-        description: 'Force full index rebuild'
-        required: false
-        default: 'false'
-        type: boolean
+
+concurrency:
+  group: publish-index
+  cancel-in-progress: false  # Let runs complete, queue new ones
 
 env:
   CARGO_TERM_COLOR: always
@@ -61,47 +59,124 @@ jobs:
       - name: Build nxv with indexer
         run: cargo build --release --features indexer
 
-      - name: Clone nixpkgs (shallow)
-        run: |
-          git clone --depth 1000 --single-branch --branch nixos-unstable \
-            https://github.com/NixOS/nixpkgs.git nixpkgs
-
-      - name: Download existing index (for incremental update)
-        if: ${{ github.event.inputs.full_rebuild != 'true' }}
+      # Download existing index BEFORE cloning nixpkgs so we can determine clone depth
+      - name: Download existing index
+        id: download-index
         continue-on-error: true
         run: |
           set -euo pipefail
           mkdir -p ~/.local/share/nxv
-          # Download existing index from GitHub release
-          curl -sSfL "${INDEX_URL_PREFIX}/index.db.zst" -o ~/.local/share/nxv/index.db.zst || true
-          if [ -f ~/.local/share/nxv/index.db.zst ]; then
+          echo "Downloading existing index from ${INDEX_URL_PREFIX}..."
+
+          if curl -sSfL "${INDEX_URL_PREFIX}/index.db.zst" -o ~/.local/share/nxv/index.db.zst; then
+            echo "Downloaded index.db.zst ($(du -h ~/.local/share/nxv/index.db.zst | cut -f1))"
             if zstd -d ~/.local/share/nxv/index.db.zst -o ~/.local/share/nxv/index.db; then
               rm ~/.local/share/nxv/index.db.zst
+              echo "Decompressed to index.db ($(du -h ~/.local/share/nxv/index.db | cut -f1))"
+              echo "index_exists=true" >> $GITHUB_OUTPUT
             else
+              echo "Failed to decompress index.db.zst"
               rm -f ~/.local/share/nxv/index.db.zst ~/.local/share/nxv/index.db
+              echo "index_exists=false" >> $GITHUB_OUTPUT
             fi
+          else
+            echo "No existing index found (this is normal for first run)"
+            echo "index_exists=false" >> $GITHUB_OUTPUT
           fi
+
           # Also download bloom filter if available
-          curl -sSfL "${INDEX_URL_PREFIX}/bloom.bin" -o ~/.local/share/nxv/bloom.bin || true
-          if [ -f ~/.local/share/nxv/bloom.bin ] && [ ! -s ~/.local/share/nxv/bloom.bin ]; then
+          if curl -sSfL "${INDEX_URL_PREFIX}/bloom.bin" -o ~/.local/share/nxv/bloom.bin; then
+            echo "Downloaded bloom.bin ($(du -h ~/.local/share/nxv/bloom.bin | cut -f1))"
+          else
+            echo "No existing bloom filter found"
             rm -f ~/.local/share/nxv/bloom.bin
           fi
 
-      - name: Run indexer
+          # Show what we have
+          echo "Contents of ~/.local/share/nxv:"
+          ls -la ~/.local/share/nxv/ || echo "(empty)"
+
+      - name: Determine clone depth
+        id: clone-strategy
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [ "${{ github.event.inputs.full_rebuild }}" = "true" ]; then
-            ./target/release/nxv index --nixpkgs-path ./nixpkgs --full
-          else
-            ./target/release/nxv index --nixpkgs-path ./nixpkgs
+          # We require an existing index for incremental updates
+          # Full rebuilds take days and should be done locally, not in CI
+
+          if [ "${{ steps.download-index.outputs.index_exists }}" != "true" ]; then
+            echo "::error::No existing index available. Full rebuilds must be done locally (takes days)."
+            echo "Upload an initial index to the index-latest release first."
+            exit 1
           fi
 
+          # Get last indexed commit from the database
+          LAST_COMMIT=$(./target/release/nxv stats 2>/dev/null | grep "Last indexed commit" | awk '{print $4}')
+          echo "Last indexed commit: ${LAST_COMMIT:-unknown}"
+
+          if [ -z "$LAST_COMMIT" ]; then
+            echo "::error::Could not determine last indexed commit from database."
+            exit 1
+          fi
+
+          # Use GitHub API to count commits ahead
+          echo "Querying GitHub API for commit count..."
+          AHEAD=$(gh api "repos/NixOS/nixpkgs/compare/${LAST_COMMIT}...nixos-unstable" --jq '.ahead_by' 2>/dev/null || echo "")
+
+          if [ -z "$AHEAD" ] || [ "$AHEAD" = "null" ]; then
+            echo "::error::GitHub API failed or commit ${LAST_COMMIT} not found in nixos-unstable."
+            echo "The indexed commit may have been garbage collected or rebased out."
+            exit 1
+          fi
+
+          if [ "$AHEAD" = "0" ]; then
+            echo "Index is already up to date!"
+            echo "depth=0" >> $GITHUB_OUTPUT
+            echo "strategy=skip" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Add 20% buffer plus minimum of 100 to ensure we don't miss commits
+          BUFFER=$(( (AHEAD * 20 / 100) + 100 ))
+          DEPTH=$((AHEAD + BUFFER))
+          echo "Commits ahead: ${AHEAD}, buffer: ${BUFFER}, clone depth: ${DEPTH}"
+          echo "depth=${DEPTH}" >> $GITHUB_OUTPUT
+          echo "strategy=shallow" >> $GITHUB_OUTPUT
+
+      - name: Skip if already up to date
+        if: ${{ steps.clone-strategy.outputs.strategy == 'skip' }}
+        run: |
+          echo "Index is already up to date, nothing to do!"
+          echo "## Index Already Current" >> $GITHUB_STEP_SUMMARY
+          echo "The index is already up to date with nixos-unstable. No update needed." >> $GITHUB_STEP_SUMMARY
+
+      - name: Clone nixpkgs (shallow)
+        if: ${{ steps.clone-strategy.outputs.strategy != 'skip' }}
+        run: |
+          echo "Performing shallow clone with depth ${{ steps.clone-strategy.outputs.depth }}..."
+          git clone --depth ${{ steps.clone-strategy.outputs.depth }} \
+            --single-branch --branch nixos-unstable \
+            https://github.com/NixOS/nixpkgs.git nixpkgs
+
+          echo "Clone complete. Commit count in clone:"
+          git -C nixpkgs rev-list --count HEAD
+
+      - name: Run indexer
+        if: ${{ steps.clone-strategy.outputs.strategy != 'skip' }}
+        run: ./target/release/nxv index --nixpkgs-path ./nixpkgs
+
       - name: Generate publishable artifacts
+        if: ${{ steps.clone-strategy.outputs.strategy != 'skip' }}
+        env:
+          NXV_SECRET_KEY: ${{ secrets.NXV_SIGNING_KEY }}
         run: |
           ./target/release/nxv publish \
             --output ./publish \
-            --url-prefix "${INDEX_URL_PREFIX}"
+            --url-prefix "${INDEX_URL_PREFIX}" \
+            --sign
 
       - name: Upload workflow artifacts
+        if: ${{ steps.clone-strategy.outputs.strategy != 'skip' }}
         uses: actions/upload-artifact@v4
         with:
           name: nxv-index
@@ -109,6 +184,7 @@ jobs:
           retention-days: 7
 
       - name: Upload to GitHub Release
+        if: ${{ steps.clone-strategy.outputs.strategy != 'skip' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -121,7 +197,6 @@ jobs:
               --notes "nxv package index files. Updated automatically." \
               --latest=false
           fi
-          gh release view "$INDEX_RELEASE_TAG" > /dev/null 2>&1
 
           # Upload files (--clobber overwrites existing assets)
           echo "Uploading index files to release..."
@@ -129,12 +204,15 @@ jobs:
             publish/index.db.zst \
             publish/bloom.bin \
             publish/manifest.json \
+            publish/manifest.json.minisig \
             --clobber
 
       - name: Summary
+        if: ${{ steps.clone-strategy.outputs.strategy != 'skip' }}
         run: |
           echo "## Index Update Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Clone depth:** ${{ steps.clone-strategy.outputs.depth }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Index size:** $(du -h publish/index.db.zst | cut -f1)" >> $GITHUB_STEP_SUMMARY
           echo "- **Bloom filter size:** $(du -h publish/bloom.bin 2>/dev/null | cut -f1 || echo 'N/A')" >> $GITHUB_STEP_SUMMARY
           echo "- **Release:** [$INDEX_RELEASE_TAG](https://github.com/${{ github.repository }}/releases/tag/$INDEX_RELEASE_TAG)" >> $GITHUB_STEP_SUMMARY

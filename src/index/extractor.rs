@@ -1,9 +1,137 @@
 //! Nix package extraction from nixpkgs commits.
 
 use crate::error::{NxvError, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::process::Command;
+
+/// Represents a full attribute path like "beam.packages.erlang_26.rebar3"
+/// Stored as a list of segments for unambiguous representation.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[allow(dead_code)]
+pub struct AttrPath(Vec<String>);
+
+#[allow(dead_code)]
+impl AttrPath {
+    /// Parse from dotted string: "a.b.c" -> ["a", "b", "c"]
+    pub fn parse(s: &str) -> Self {
+        Self(s.split('.').map(String::from).collect())
+    }
+
+    /// Create from segments directly
+    pub fn from_segments(segments: Vec<String>) -> Self {
+        Self(segments)
+    }
+
+    /// Create a single-segment (top-level) attribute path
+    pub fn top_level(name: &str) -> Self {
+        Self(vec![name.to_string()])
+    }
+
+    /// Get segments
+    pub fn segments(&self) -> &[String] {
+        &self.0
+    }
+
+    /// Top-level attr (single segment)
+    pub fn is_top_level(&self) -> bool {
+        self.0.len() == 1
+    }
+
+    /// Convert back to dotted string for display/database storage
+    pub fn to_dotted(&self) -> String {
+        self.0.join(".")
+    }
+
+    /// Get the last segment (usually the package name)
+    pub fn name(&self) -> &str {
+        self.0.last().map(|s| s.as_str()).unwrap_or("")
+    }
+}
+
+impl std::fmt::Display for AttrPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.to_dotted())
+    }
+}
+
+impl From<&str> for AttrPath {
+    fn from(s: &str) -> Self {
+        Self::parse(s)
+    }
+}
+
+impl From<String> for AttrPath {
+    fn from(s: String) -> Self {
+        Self::parse(&s)
+    }
+}
+
+/// Known package scopes that contain nested derivations.
+/// These are patterns for attribute names that should be recursed into.
+#[allow(dead_code)]
+pub const RECURSIVE_SCOPES: &[&str] = &[
+    // Language package sets
+    "python3Packages",
+    "python2Packages",
+    "pythonPackages",
+    "haskellPackages",
+    "perlPackages",
+    "rubyPackages",
+    "nodePackages",
+    "nodePackages_latest",
+    "ocamlPackages",
+    "rPackages",
+    "rustPackages",
+    "goPackages",
+    "luaPackages",
+    "elmPackages",
+    "idrisPackages",
+    // Qt and desktop environments
+    "qt5",
+    "qt6",
+    "libsForQt5",
+    "gnome",
+    "xfce",
+    "mate",
+    "pantheon",
+    "plasma5Packages",
+    "cinnamon",
+    // Editor plugins
+    "vimPlugins",
+    "emacsPackages",
+    "fishPlugins",
+    "zshPlugins",
+    "tmuxPlugins",
+    // Erlang/BEAM ecosystem
+    "beamPackages",
+    // Linux kernel packages (pattern match)
+    // Note: linuxPackages_* is a pattern, handled specially
+];
+
+/// Check if an attribute name is a known recursive scope
+#[allow(dead_code)]
+pub fn is_recursive_scope(name: &str) -> bool {
+    // Check exact matches
+    if RECURSIVE_SCOPES.contains(&name) {
+        return true;
+    }
+
+    // Check pattern matches
+    if name.ends_with("Packages") {
+        return true;
+    }
+
+    if name.starts_with("linuxPackages_") || name.starts_with("linuxKernel.") {
+        return true;
+    }
+
+    if name.starts_with("beam.packages.") {
+        return true;
+    }
+
+    false
+}
 
 /// Information about an extracted package.
 #[derive(Debug, Clone, Deserialize)]
@@ -321,6 +449,286 @@ in
   ) attrNames
 "#;
 
+/// The nix expression for extracting packages from arbitrary attribute paths.
+/// Supports both top-level and nested paths like "python3Packages.numpy".
+/// attrPaths is a list of segment lists: [["python3Packages", "numpy"], ["qt6", "qtwebengine"]]
+#[allow(dead_code)]
+const EXTRACT_ATTR_PATHS_NIX: &str = r#"
+{ nixpkgsPath, system, attrPaths ? null, maxDepth ? 2, recurse ? false, recursiveScopes ? [] }:
+let
+  # Import nixpkgs with current system and permissive config
+  pkgs = import nixpkgsPath {
+    system = system;
+    config = {
+      allowUnfree = true;
+      allowBroken = true;
+      allowInsecure = true;
+      allowUnsupportedSystem = true;
+    };
+  };
+
+  # Force full evaluation and catch any errors - this is critical for lazy evaluation
+  tryDeep = expr:
+    let result = builtins.tryEval (builtins.deepSeq expr expr);
+    in if result.success then result.value else null;
+
+  # Safely extract a string field - converts integers/floats to strings
+  safeString = x: tryDeep (
+    if x == null then null
+    else if builtins.isString x then x
+    else if builtins.isInt x || builtins.isFloat x then builtins.toString x
+    else null
+  );
+
+  # Safely get licenses
+  getLicenses = l: tryDeep (
+    let
+      extractOne = x:
+        let
+          result = builtins.tryEval (
+            if builtins.isAttrs x then (x.spdxId or x.shortName or "unknown")
+            else if builtins.isString x then x
+            else if builtins.isInt x || builtins.isFloat x then builtins.toString x
+            else "unknown"
+          );
+        in if result.success then result.value else "unknown";
+    in
+      if builtins.isList l then map extractOne l
+      else [ (extractOne l) ]
+  );
+
+  # Safely get maintainers
+  getMaintainers = m: tryDeep (
+    if m == null then null
+    else if builtins.isString m then [ m ]
+    else if builtins.isList m then map (x:
+      let
+        result = builtins.tryEval (
+          if builtins.isAttrs x then (x.github or x.name or "unknown")
+          else if builtins.isString x then x
+          else if builtins.isInt x || builtins.isFloat x then builtins.toString x
+          else "unknown"
+        );
+      in if result.success then result.value else "unknown"
+    ) m
+    else null
+  );
+
+  # Safely get platforms
+  getPlatforms = p: tryDeep (
+    if p == null then null
+    else if builtins.isString p then [ p ]
+    else if builtins.isList p then map (x:
+      let
+        result = builtins.tryEval (
+          if builtins.isString x then x
+          else if builtins.isAttrs x then (x.system or "unknown")
+          else if builtins.isInt x || builtins.isFloat x then builtins.toString x
+          else "unknown"
+        );
+      in if result.success then result.value else "unknown"
+    ) p
+    else null
+  );
+
+  # Safely get knownVulnerabilities
+  getKnownVulnerabilities = v: tryDeep (
+    if v == null then null
+    else if builtins.isList v then
+      let
+        extracted = map (x:
+          let
+            result = builtins.tryEval (
+              if builtins.isString x then x
+              else if builtins.isInt x || builtins.isFloat x then builtins.toString x
+              else null
+            );
+          in if result.success then result.value else null
+        ) v;
+        filtered = builtins.filter (x: x != null) extracted;
+      in if builtins.length filtered > 0 then filtered else null
+    else null
+  );
+
+  # Check if something is a derivation
+  isDerivation = x:
+    let result = builtins.tryEval (builtins.isAttrs x && x ? type && x.type == "derivation");
+    in result.success && result.value;
+
+  # Convert any value to string safely
+  toString' = x:
+    if x == null then null
+    else if builtins.isString x then x
+    else builtins.toString x;
+
+  # Get the source file path for a package from meta.position
+  getSourcePath = meta:
+    let
+      result = builtins.tryEval (
+        let
+          pos = meta.position or null;
+          file = if pos == null then null
+                 else let parts = builtins.split ":" pos;
+                      in if builtins.length parts > 0 then builtins.elemAt parts 0 else null;
+          extractRelative = path:
+            let
+              matches = builtins.match ".*(pkgs/.*)" path;
+            in if matches != null && builtins.length matches > 0
+               then builtins.elemAt matches 0
+               else null;
+        in if file != null then extractRelative file else null
+      );
+    in if result.success then result.value else null;
+
+  # Navigate to an attribute by path segments
+  getAttrByPath = path: set:
+    builtins.foldl' (acc: seg:
+      if acc == null then null
+      else let res = builtins.tryEval acc.${seg};
+           in if res.success then res.value else null
+    ) set path;
+
+  # Check if attribute path exists
+  hasAttrByPath = path: set:
+    let
+      result = builtins.tryEval (
+        builtins.foldl' (acc: seg:
+          if !acc.exists then acc
+          else let
+            current = acc.value;
+            hasIt = builtins.isAttrs current && builtins.hasAttr seg current;
+          in if hasIt
+             then { exists = true; value = current.${seg}; }
+             else { exists = false; value = null; }
+        ) { exists = true; value = set; } path
+      );
+    in result.success && result.value.exists;
+
+  # Safely extract package info - each field is independently evaluated
+  getPackageInfo = attrPathStr: pkg:
+    let
+      meta = pkg.meta or {};
+      name = tryDeep (toString' (pkg.pname or pkg.name or (builtins.baseNameOf attrPathStr)));
+      version = tryDeep (toString' (pkg.version or "unknown"));
+      sourcePath = getSourcePath meta;
+    in {
+      name = if name != null then name else builtins.baseNameOf attrPathStr;
+      version = if version != null then version else "unknown";
+      attrPath = attrPathStr;
+      description = safeString (meta.description or null);
+      homepage = safeString (meta.homepage or null);
+      license = if meta ? license then getLicenses meta.license else null;
+      maintainers = if meta ? maintainers then getMaintainers meta.maintainers else null;
+      platforms = if meta ? platforms then getPlatforms meta.platforms else null;
+      sourcePath = safeString sourcePath;
+      knownVulnerabilities = if meta ? knownVulnerabilities then getKnownVulnerabilities meta.knownVulnerabilities else null;
+    };
+
+  # Check if an attr set should be recursed into
+  shouldRecurse = name: value:
+    let
+      hasRecurseFlag = builtins.tryEval (
+        builtins.isAttrs value && (value.recurseForDerivations or false)
+      );
+      isInList = builtins.elem name recursiveScopes;
+    in (hasRecurseFlag.success && hasRecurseFlag.value) || isInList;
+
+  # Process an attribute path (list of segments)
+  processAttrPath = pathSegments:
+    let
+      attrPathStr = builtins.concatStringsSep "." pathSegments;
+      value = getAttrByPath pathSegments pkgs;
+      result = builtins.tryEval (
+        if value == null then null
+        else if isDerivation value then getPackageInfo attrPathStr value
+        else null
+      );
+      forced = if result.success && result.value != null
+               then builtins.tryEval (builtins.deepSeq result.value result.value)
+               else { success = false; };
+    in if forced.success then forced.value else null;
+
+  # Recursively extract packages from a scope
+  extractFromScope = prefix: currentDepth: scope:
+    if currentDepth > maxDepth then []
+    else let
+      attrNames = builtins.tryEval (
+        if builtins.isAttrs scope then builtins.attrNames scope else []
+      );
+      names = if attrNames.success then attrNames.value else [];
+    in builtins.concatMap (name:
+      let
+        fullPath = prefix ++ [name];
+        attrPathStr = builtins.concatStringsSep "." fullPath;
+        valueRes = builtins.tryEval scope.${name};
+        value = if valueRes.success then valueRes.value else null;
+      in if value == null then []
+         else let
+           # Check if it's a derivation
+           isDeriv = isDerivation value;
+           # Get package info if it's a derivation
+           pkgInfoRes = if isDeriv
+             then builtins.tryEval (builtins.deepSeq (getPackageInfo attrPathStr value) (getPackageInfo attrPathStr value))
+             else { success = false; };
+           pkgResults = if pkgInfoRes.success && pkgInfoRes.value != null
+             then [pkgInfoRes.value]
+             else [];
+           # Recurse if needed
+           shouldRec = recurse && shouldRecurse name value;
+           recurseResults = if shouldRec && builtins.isAttrs value
+             then extractFromScope fullPath (currentDepth + 1) value
+             else [];
+         in pkgResults ++ recurseResults
+    ) names;
+
+  # Process specific attribute paths if provided
+  processSpecificPaths =
+    builtins.concatMap (pathSegments:
+      let
+        result = builtins.tryEval (
+          let
+            pkg = processAttrPath pathSegments;
+            forced = builtins.deepSeq pkg pkg;
+          in if forced != null then [forced] else []
+        );
+        extracted = builtins.tryEval (
+          builtins.seq result.success (
+            if result.success then result.value else []
+          )
+        );
+      in if extracted.success then extracted.value else []
+    ) attrPaths;
+
+  # Extract all packages (top-level and recursive scopes)
+  extractAll =
+    let
+      topLevelNames = builtins.attrNames pkgs;
+    in builtins.concatMap (name:
+      let
+        valueRes = builtins.tryEval pkgs.${name};
+        value = if valueRes.success then valueRes.value else null;
+      in if value == null then []
+         else let
+           isDeriv = isDerivation value;
+           pkgInfoRes = if isDeriv
+             then builtins.tryEval (builtins.deepSeq (getPackageInfo name value) (getPackageInfo name value))
+             else { success = false; };
+           pkgResults = if pkgInfoRes.success && pkgInfoRes.value != null
+             then [pkgInfoRes.value]
+             else [];
+           # Recurse into known scopes
+           shouldRec = recurse && shouldRecurse name value;
+           recurseResults = if shouldRec && builtins.isAttrs value
+             then extractFromScope [name] 1 value
+             else [];
+         in pkgResults ++ recurseResults
+    ) topLevelNames;
+
+in
+  if attrPaths != null then processSpecificPaths
+  else extractAll
+"#;
+
 /// Extract packages from a nixpkgs checkout at a specific path.
 ///
 /// # Arguments
@@ -442,6 +850,135 @@ pub fn extract_attr_positions<P: AsRef<Path>>(
     Ok(positions)
 }
 
+/// Extract packages for a list of attribute paths (supports nested paths).
+///
+/// This function supports both top-level attributes (like "hello") and nested
+/// attribute paths (like "python3Packages.numpy" or "qt6.qtwebengine").
+///
+/// # Arguments
+/// * `repo_path` - Path to the nixpkgs repository checkout
+/// * `system` - Target system (e.g., "x86_64-linux")
+/// * `attr_paths` - List of attribute paths to extract
+///
+/// # Returns
+/// A vector of PackageInfo, or an error if extraction fails.
+#[allow(dead_code)]
+pub fn extract_packages_for_attr_paths<P: AsRef<Path>>(
+    repo_path: P,
+    system: &str,
+    attr_paths: &[AttrPath],
+) -> Result<Vec<PackageInfo>> {
+    if attr_paths.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let repo_path = repo_path.as_ref();
+    let canonical_path = std::fs::canonicalize(repo_path)?;
+    let repo_path_str = canonical_path.display().to_string();
+
+    // Write the nix expression to a temp file
+    let temp_dir = tempfile::tempdir()?;
+    let nix_file = temp_dir.path().join("extract_paths.nix");
+    std::fs::write(&nix_file, EXTRACT_ATTR_PATHS_NIX)?;
+
+    // Convert AttrPaths to list of segment lists for Nix
+    // Format: [["python3Packages", "numpy"], ["qt6", "qtwebengine"]]
+    let attr_paths_list: Vec<&[String]> = attr_paths.iter().map(|p| p.segments()).collect();
+    let attr_paths_json = serde_json::to_string(&attr_paths_list)?;
+
+    // Write to file to avoid argument length limits
+    let attr_file = temp_dir.path().join("attr_paths.json");
+    std::fs::write(&attr_file, &attr_paths_json)?;
+
+    // Build the expression
+    let expr = format!(
+        "import {} {{ nixpkgsPath = {}; system = \"{}\"; attrPaths = builtins.fromJSON (builtins.readFile {}); }}",
+        nix_file.display(),
+        repo_path_str,
+        system,
+        attr_file.display()
+    );
+
+    // Run nix eval
+    let output = Command::new("nix")
+        .args(["eval", "--json", "--impure", "--expr", &expr])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(NxvError::NixEval(format!(
+            "nix eval failed: {}",
+            stderr.lines().take(5).collect::<Vec<_>>().join("\n")
+        )));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let packages: Vec<PackageInfo> = serde_json::from_str(&stdout)?;
+
+    Ok(packages)
+}
+
+/// Extract all packages including nested scopes from a nixpkgs checkout.
+///
+/// This function recursively extracts packages from known package scopes
+/// like python3Packages, haskellPackages, qt6, etc.
+///
+/// # Arguments
+/// * `repo_path` - Path to the nixpkgs repository checkout
+/// * `system` - Target system (e.g., "x86_64-linux")
+/// * `max_depth` - Maximum recursion depth (default: 2)
+///
+/// # Returns
+/// A vector of PackageInfo, or an error if extraction fails.
+#[allow(dead_code)]
+pub fn extract_packages_recursive<P: AsRef<Path>>(
+    repo_path: P,
+    system: &str,
+    max_depth: usize,
+) -> Result<Vec<PackageInfo>> {
+    let repo_path = repo_path.as_ref();
+    let canonical_path = std::fs::canonicalize(repo_path)?;
+    let repo_path_str = canonical_path.display().to_string();
+
+    // Write the nix expression to a temp file
+    let temp_dir = tempfile::tempdir()?;
+    let nix_file = temp_dir.path().join("extract_recursive.nix");
+    std::fs::write(&nix_file, EXTRACT_ATTR_PATHS_NIX)?;
+
+    // Build the list of recursive scopes for Nix
+    let recursive_scopes_json = serde_json::to_string(&RECURSIVE_SCOPES)?;
+    let scopes_file = temp_dir.path().join("scopes.json");
+    std::fs::write(&scopes_file, &recursive_scopes_json)?;
+
+    // Build the expression
+    let expr = format!(
+        "import {} {{ nixpkgsPath = {}; system = \"{}\"; recurse = true; maxDepth = {}; recursiveScopes = builtins.fromJSON (builtins.readFile {}); }}",
+        nix_file.display(),
+        repo_path_str,
+        system,
+        max_depth,
+        scopes_file.display()
+    );
+
+    // Run nix eval
+    let output = Command::new("nix")
+        .args(["eval", "--json", "--impure", "--expr", &expr])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(NxvError::NixEval(format!(
+            "nix eval failed: {}",
+            stderr.lines().take(5).collect::<Vec<_>>().join("\n")
+        )));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let packages: Vec<PackageInfo> = serde_json::from_str(&stdout)?;
+
+    Ok(packages)
+}
+
 #[allow(dead_code)]
 fn nix_string(value: &str) -> String {
     value
@@ -520,6 +1057,83 @@ pub fn try_extract_at_commit<P: AsRef<Path>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_attr_path_parse() {
+        let path = AttrPath::parse("python3Packages.numpy");
+        assert_eq!(path.segments(), &["python3Packages", "numpy"]);
+        assert_eq!(path.to_dotted(), "python3Packages.numpy");
+        assert!(!path.is_top_level());
+        assert_eq!(path.name(), "numpy");
+    }
+
+    #[test]
+    fn test_attr_path_top_level() {
+        let path = AttrPath::top_level("hello");
+        assert_eq!(path.segments(), &["hello"]);
+        assert_eq!(path.to_dotted(), "hello");
+        assert!(path.is_top_level());
+        assert_eq!(path.name(), "hello");
+    }
+
+    #[test]
+    fn test_attr_path_from_segments() {
+        let path = AttrPath::from_segments(vec![
+            "beam".to_string(),
+            "packages".to_string(),
+            "erlang_26".to_string(),
+            "rebar3".to_string(),
+        ]);
+        assert_eq!(path.segments().len(), 4);
+        assert_eq!(path.to_dotted(), "beam.packages.erlang_26.rebar3");
+        assert_eq!(path.name(), "rebar3");
+    }
+
+    #[test]
+    fn test_attr_path_display() {
+        let path = AttrPath::parse("qt6.qtwebengine");
+        assert_eq!(format!("{}", path), "qt6.qtwebengine");
+    }
+
+    #[test]
+    fn test_attr_path_from_str() {
+        let path: AttrPath = "haskellPackages.pandoc".into();
+        assert_eq!(path.segments(), &["haskellPackages", "pandoc"]);
+    }
+
+    #[test]
+    fn test_attr_path_from_string() {
+        let path: AttrPath = "nodePackages.typescript".to_string().into();
+        assert_eq!(path.segments(), &["nodePackages", "typescript"]);
+    }
+
+    #[test]
+    fn test_attr_path_eq() {
+        let path1 = AttrPath::parse("a.b.c");
+        let path2 =
+            AttrPath::from_segments(vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+        assert_eq!(path1, path2);
+    }
+
+    #[test]
+    fn test_is_recursive_scope() {
+        // Exact matches
+        assert!(is_recursive_scope("python3Packages"));
+        assert!(is_recursive_scope("haskellPackages"));
+        assert!(is_recursive_scope("qt6"));
+        assert!(is_recursive_scope("vimPlugins"));
+
+        // Pattern matches (*Packages)
+        assert!(is_recursive_scope("customPackages"));
+
+        // Linux packages pattern
+        assert!(is_recursive_scope("linuxPackages_latest"));
+        assert!(is_recursive_scope("linuxPackages_5_15"));
+
+        // Not recursive scopes
+        assert!(!is_recursive_scope("hello"));
+        assert!(!is_recursive_scope("git"));
+    }
 
     #[test]
     fn test_package_info_json_serialization() {

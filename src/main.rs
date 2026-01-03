@@ -1111,6 +1111,9 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
         since: args.since.clone(),
         until: args.until.clone(),
         max_commits: args.max_commits,
+        num_workers: args.workers,
+        recurse_packages: args.recurse,
+        recurse_depth: args.recurse_depth,
     };
 
     let indexer = Indexer::new(config);

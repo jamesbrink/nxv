@@ -33,9 +33,7 @@ pub fn fetch_nixpkgs_unstable_commit() -> Result<String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
-        .map_err(|e| {
-            NxvError::NetworkMessage(format!("Failed to create HTTP client: {}", e))
-        })?;
+        .map_err(|e| NxvError::NetworkMessage(format!("Failed to create HTTP client: {}", e)))?;
 
     let response = client.get(NIXPKGS_UNSTABLE_URL).send().map_err(|e| {
         NxvError::NetworkMessage(format!("Failed to fetch nixpkgs-unstable commit: {}", e))

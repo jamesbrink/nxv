@@ -332,6 +332,18 @@ pub struct IndexArgs {
     /// Limit the number of commits processed.
     #[arg(long)]
     pub max_commits: Option<usize>,
+
+    /// Number of parallel workers for extraction (default: half of CPU count).
+    #[arg(long, default_value_t = 0)]
+    pub workers: usize,
+
+    /// Recursively extract nested package scopes (e.g., python3Packages, qt6).
+    #[arg(long)]
+    pub recurse: bool,
+
+    /// Maximum recursion depth for nested packages.
+    #[arg(long, default_value_t = 2)]
+    pub recurse_depth: usize,
 }
 
 /// Fields that can be backfilled from nixpkgs.

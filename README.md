@@ -41,7 +41,7 @@ Or visit **https://nxv.urandom.io** to search in your browser.
 - **Version history** — See when each version was introduced and when it was superseded
 - **Multiple interfaces** — CLI tool, HTTP API server with web UI, or use as a library
 - **NixOS module** — Run as a systemd service with automatic index updates
-- **Lightweight** — ~10MB static binary, ~150MB compressed index
+- **Lightweight** — ~10MB static binary, ~100MB compressed index
 
 ## How It Works
 
@@ -60,7 +60,7 @@ Or visit **https://nxv.urandom.io** to search in your browser.
 ```
 
 The indexer walks nixpkgs commits (from 2017+), runs `nix eval` to extract package metadata, and stores version ranges in SQLite.
-Users download a pre-built compressed index (~150MB) and query it locally or via the API server.
+Users download a pre-built compressed index (~100MB) and query it locally or via the API server.
 
 ## Installation
 
@@ -318,8 +318,8 @@ Generate distribution-ready artifacts with the `publish` command:
 nxv publish --output ./publish --url-prefix https://your-server.com/nxv
 
 # Files created:
-#   publish/index.db.zst   - Compressed SQLite database (~150MB)
-#   publish/bloom.bin      - Bloom filter for fast lookups (~150KB)
+#   publish/index.db.zst   - Compressed SQLite database (~100MB)
+#   publish/bloom.bin      - Bloom filter for fast lookups (~26KB)
 #   publish/manifest.json  - Manifest with URLs and checksums
 ```
 
@@ -528,7 +528,6 @@ cargo build --features indexer      # With indexer
 cargo test                          # Run tests
 cargo test --features indexer       # All tests including indexer
 cargo clippy -- -D warnings         # Lint
-nix flake check                     # Full Nix CI checks
 ```
 
 ### Project Structure

@@ -37,6 +37,7 @@ nix flake check                  # Run all Nix checks (build, clippy, fmt, tests
 nix build                        # Build nxv (user binary)
 nix build .#nxv-indexer          # Build with indexer feature
 nix build .#nxv-static           # Static musl build (Linux only)
+nix build .#nxv-docker           # Docker image (Linux only, use --system x86_64-linux on macOS)
 nix run                          # Run nxv directly
 nix run .#nxv-indexer            # Run with indexer feature
 ```
@@ -119,3 +120,33 @@ A NixOS module is provided for running nxv as a systemd service:
   };
 }
 ```
+
+## CI/CD & Index Publishing
+
+### GitHub Actions Workflows
+
+- `ci.yml`: Runs on PRs and main - tests (cargo + nix), clippy, fmt, builds Docker latest on main
+- `release.yml`: Triggered by `v*` tags - builds static binaries, publishes to crates.io, pushes versioned Docker images
+- `publish-index.yml`: Weekly scheduled or manual - builds the package index and uploads to `index-latest` release
+
+### Publishing the Index
+
+The default manifest URL is `https://github.com/jamesbrink/nxv/releases/download/index-latest/manifest.json`.
+
+To publish manually with signing:
+
+```bash
+nxv publish --url-prefix "https://github.com/jamesbrink/nxv/releases/download/index-latest" --secret-key keys/nxv.key
+```
+
+Or trigger the workflow:
+
+```bash
+gh workflow run publish-index.yml
+```
+
+### Required Secrets
+
+- `CACHIX_AUTH_TOKEN`: Nix binary cache
+- `CARGO_REGISTRY_TOKEN`: crates.io publishing
+- `NXV_SIGNING_KEY`: Manifest signing (minisign secret key)

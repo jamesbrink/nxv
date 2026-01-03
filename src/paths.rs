@@ -45,6 +45,38 @@ pub fn get_bloom_path_for_db<P: AsRef<Path>>(db_path: P) -> PathBuf {
     db_path.with_extension("bloom")
 }
 
+/// Expands a leading `~` in a path to the user's home directory.
+///
+/// This handles the common case where shell tilde expansion doesn't occur,
+/// such as when using `--arg=~/path` syntax instead of `--arg ~/path`.
+///
+/// # Examples
+///
+/// ```
+/// use std::path::PathBuf;
+/// use nxv::paths::expand_tilde;
+///
+/// // Paths starting with ~ get expanded
+/// let path = PathBuf::from("~/Documents");
+/// let expanded = expand_tilde(&path);
+/// assert!(expanded.to_str().unwrap().contains("Documents"));
+/// assert!(!expanded.to_str().unwrap().starts_with("~"));
+///
+/// // Other paths are unchanged
+/// let path = PathBuf::from("/tmp/foo");
+/// assert_eq!(expand_tilde(&path), path);
+/// ```
+#[cfg_attr(not(feature = "indexer"), allow(dead_code))]
+pub fn expand_tilde<P: AsRef<Path>>(path: P) -> PathBuf {
+    let path = path.as_ref();
+    if let Ok(stripped) = path.strip_prefix("~")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(stripped);
+    }
+    path.to_path_buf()
+}
+
 /// Ensures the nxv data directory exists, creating it and any missing parents if necessary.
 ///
 /// This creates the directory returned by `get_data_dir()` when it does not already exist.
@@ -107,5 +139,33 @@ mod tests {
         let db_path = PathBuf::from("data/index.db");
         let bloom_path = get_bloom_path_for_db(&db_path);
         assert_eq!(bloom_path, PathBuf::from("data/index.bloom"));
+    }
+
+    #[test]
+    fn test_expand_tilde_with_home() {
+        let path = PathBuf::from("~/Documents/test");
+        let expanded = expand_tilde(&path);
+        assert!(!expanded.to_str().unwrap().starts_with("~"));
+        assert!(expanded.to_str().unwrap().ends_with("Documents/test"));
+    }
+
+    #[test]
+    fn test_expand_tilde_absolute_path_unchanged() {
+        let path = PathBuf::from("/tmp/foo/bar");
+        assert_eq!(expand_tilde(&path), path);
+    }
+
+    #[test]
+    fn test_expand_tilde_relative_path_unchanged() {
+        let path = PathBuf::from("./relative/path");
+        assert_eq!(expand_tilde(&path), path);
+    }
+
+    #[test]
+    fn test_expand_tilde_just_tilde() {
+        let path = PathBuf::from("~");
+        let expanded = expand_tilde(&path);
+        // Should expand to home directory
+        assert!(!expanded.to_str().unwrap().starts_with("~"));
     }
 }

@@ -1042,7 +1042,8 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
     // Ensure data directory exists before opening database
     paths::ensure_data_dir()?;
 
-    eprintln!("Indexing nixpkgs from {:?}", args.nixpkgs_path);
+    let nixpkgs_path = paths::expand_tilde(&args.nixpkgs_path);
+    eprintln!("Indexing nixpkgs from {:?}", nixpkgs_path);
     eprintln!("Checkpoint interval: {} commits", args.checkpoint_interval);
 
     let config = IndexerConfig {
@@ -1069,10 +1070,10 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
 
     let result = if args.full {
         eprintln!("Performing full rebuild...");
-        indexer.index_full(&args.nixpkgs_path, &cli.db_path)?
+        indexer.index_full(&nixpkgs_path, &cli.db_path)?
     } else {
         eprintln!("Performing incremental index...");
-        indexer.index_incremental(&args.nixpkgs_path, &cli.db_path)?
+        indexer.index_incremental(&nixpkgs_path, &cli.db_path)?
     };
 
     // Print results
@@ -1131,18 +1132,17 @@ fn cmd_backfill(cli: &Cli, args: &cli::BackfillArgs) -> Result<()> {
     use crate::index::backfill::{BackfillConfig, create_shutdown_flag, run_backfill};
     use std::sync::atomic::Ordering;
 
+    let nixpkgs_path = paths::expand_tilde(&args.nixpkgs_path);
+
     if args.history {
         eprintln!(
             "Backfilling metadata from {:?} (historical mode)",
-            args.nixpkgs_path
+            nixpkgs_path
         );
         eprintln!("  This will check out each package's original commit to extract metadata.");
         eprintln!("  Slower but can update old/removed packages.");
     } else {
-        eprintln!(
-            "Backfilling metadata from {:?} (HEAD mode)",
-            args.nixpkgs_path
-        );
+        eprintln!("Backfilling metadata from {:?} (HEAD mode)", nixpkgs_path);
         eprintln!("  This extracts metadata from the current nixpkgs checkout only.");
         eprintln!("  Fast, but packages not in this checkout won't be updated.");
     }
@@ -1168,7 +1168,7 @@ fn cmd_backfill(cli: &Cli, args: &cli::BackfillArgs) -> Result<()> {
     })
     .expect("Error setting Ctrl+C handler");
 
-    let result = run_backfill(&args.nixpkgs_path, &cli.db_path, config, shutdown_flag)?;
+    let result = run_backfill(&nixpkgs_path, &cli.db_path, config, shutdown_flag)?;
 
     eprintln!();
     if result.was_interrupted {
@@ -1230,9 +1230,10 @@ fn cmd_backfill(cli: &Cli, args: &cli::BackfillArgs) -> Result<()> {
 fn cmd_reset(_cli: &Cli, args: &cli::ResetArgs) -> Result<()> {
     use crate::index::git::NixpkgsRepo;
 
-    eprintln!("Resetting nixpkgs repository at {:?}", args.nixpkgs_path);
+    let nixpkgs_path = paths::expand_tilde(&args.nixpkgs_path);
+    eprintln!("Resetting nixpkgs repository at {:?}", nixpkgs_path);
 
-    let repo = NixpkgsRepo::open(&args.nixpkgs_path)?;
+    let repo = NixpkgsRepo::open(&nixpkgs_path)?;
 
     if args.fetch {
         eprintln!("Fetching from origin...");
@@ -1275,14 +1276,17 @@ fn cmd_reset(_cli: &Cli, args: &cli::ResetArgs) -> Result<()> {
 #[cfg(feature = "indexer")]
 fn cmd_publish(cli: &Cli, args: &cli::PublishArgs) -> Result<()> {
     use crate::index::publisher::publish_index;
+    use crate::paths::expand_tilde;
 
     if !cli.quiet && args.url_prefix.is_none() {
         eprintln!("Warning: --url-prefix not set; manifest URLs will be local file names.");
     }
 
+    let output = expand_tilde(&args.output);
+
     publish_index(
         &cli.db_path,
-        &args.output,
+        &output,
         args.url_prefix.as_deref(),
         !cli.quiet,
         args.secret_key.as_deref(),
@@ -1296,18 +1300,16 @@ fn cmd_publish(cli: &Cli, args: &cli::PublishArgs) -> Result<()> {
 fn cmd_keygen(cli: &Cli, args: &cli::KeygenArgs) -> Result<()> {
     use crate::index::publisher::generate_keypair;
 
+    let secret_key = paths::expand_tilde(&args.secret_key);
+    let public_key = paths::expand_tilde(&args.public_key);
+
     // generate_keypair handles force check atomically to avoid TOCTOU race
-    let pk_base64 = generate_keypair(
-        &args.secret_key,
-        &args.public_key,
-        &args.comment,
-        args.force,
-    )?;
+    let pk_base64 = generate_keypair(&secret_key, &public_key, &args.comment, args.force)?;
 
     if !cli.quiet {
         eprintln!("Generated keypair:");
-        eprintln!("  Secret key: {}", args.secret_key.display());
-        eprintln!("  Public key: {}", args.public_key.display());
+        eprintln!("  Secret key: {}", secret_key.display());
+        eprintln!("  Public key: {}", public_key.display());
         eprintln!();
         eprintln!("Public key (for embedding in manifest.rs):");
         eprintln!("  {}", pk_base64);

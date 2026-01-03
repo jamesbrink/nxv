@@ -38,8 +38,10 @@ fn generate_bash<W: Write>(buf: &mut W, base: &str) -> std::io::Result<()> {
 # Dynamic package name completion for nxv
 _nxv_complete_packages() {
     local cur="${COMP_WORDS[COMP_CWORD]}"
+    local cmd="${COMP_WORDS[0]}"
     local packages
-    packages=$(nxv complete-package "$cur" --limit 100 2>/dev/null)
+    # Use the actual command being completed (handles ./target/release/nxv, etc.)
+    packages=$("$cmd" complete-package "$cur" --limit 100 2>/dev/null)
     if [[ -n "$packages" ]]; then
         COMPREPLY=($(compgen -W "$packages" -- "$cur"))
     fi
@@ -82,7 +84,10 @@ fn generate_zsh<W: Write>(buf: &mut W, base: &str) -> std::io::Result<()> {
 # Dynamic package name completion for nxv
 _nxv_packages() {
     local -a packages
-    packages=(${(f)"$(nxv complete-package "${words[CURRENT]}" --limit 100 2>/dev/null)"})
+    local cmd="${words[1]}"
+    local prefix="${words[CURRENT]}"
+    # Use the actual command being completed (handles ./target/release/nxv, etc.)
+    packages=(${(f)"$("$cmd" complete-package "$prefix" --limit 100 2>/dev/null)"})
     if [[ ${#packages[@]} -gt 0 ]]; then
         _describe -t packages 'package' packages
     fi
@@ -94,7 +99,8 @@ _nxv_enhanced() {
     local curcontext="$curcontext" state line
     typeset -A opt_args
 
-    # Check if we're in a command that takes package names
+    # Check if we're completing a package name argument for search/info/history
+    # words[1] = command, words[2] = subcommand, words[3] = package argument
     if [[ ${words[2]} == (search|info|history) ]] && [[ $CURRENT -eq 3 ]]; then
         _nxv_packages
         return
@@ -104,8 +110,14 @@ _nxv_enhanced() {
     _nxv "$@"
 }
 
-# Override the completion
+# Override the completion for nxv
 compdef _nxv_enhanced nxv
+compdef _nxv_enhanced nxv-indexer
+
+# Also handle path-based invocations (e.g., ./target/release/nxv)
+# This pattern matches any command ending in /nxv or /nxv-indexer
+compdef '_nxv_enhanced' -p '*nxv'
+compdef '_nxv_enhanced' -p '*nxv-indexer'
 "#,
     )
 }
@@ -121,7 +133,9 @@ fn generate_fish<W: Write>(buf: &mut W, base: &str) -> std::io::Result<()> {
 # Dynamic package name completion for nxv
 function __nxv_complete_packages
     set -l token (commandline -ct)
-    nxv complete-package "$token" --limit 100 2>/dev/null
+    set -l cmd (commandline -opc)[1]
+    # Use the actual command being completed (handles ./target/release/nxv, etc.)
+    $cmd complete-package "$token" --limit 100 2>/dev/null
 end
 
 # Add package completions for search, info, and history commands

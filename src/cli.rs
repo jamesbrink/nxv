@@ -99,8 +99,8 @@ impl CompletionsArgs {
     /// For bash, zsh, and fish, this includes custom completion functions
     /// that provide dynamic package name completion using `nxv complete-package`.
     pub fn generate(&self) {
-        crate::completions::generate_completions(self.shell, &mut std::io::stdout())
-            .expect("Failed to generate completions");
+        // Silently ignore broken pipe errors (e.g., when piped to head or closed early)
+        let _ = crate::completions::generate_completions(self.shell, &mut std::io::stdout());
     }
 }
 

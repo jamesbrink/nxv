@@ -115,9 +115,9 @@ compdef _nxv_enhanced nxv
 compdef _nxv_enhanced nxv-indexer
 
 # Also handle path-based invocations (e.g., ./target/release/nxv)
-# This pattern matches any command ending in /nxv or /nxv-indexer
-compdef '_nxv_enhanced' -p '*nxv'
-compdef '_nxv_enhanced' -p '*nxv-indexer'
+# This pattern matches any command path ending in /nxv or /nxv-indexer
+compdef '_nxv_enhanced' -p '*/nxv'
+compdef '_nxv_enhanced' -p '*/nxv-indexer'
 "#,
     )
 }

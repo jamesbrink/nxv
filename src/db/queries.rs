@@ -551,31 +551,27 @@ pub fn get_all_unique_attrs(conn: &rusqlite::Connection) -> Result<Vec<String>> 
 /// This function is optimized for shell tab completion, returning only unique attribute
 /// paths that start with the given prefix. Results are ordered alphabetically.
 ///
+/// Special characters `%` and `_` in the prefix are escaped to prevent them from being
+/// interpreted as SQL LIKE wildcards.
+///
 /// # Arguments
 ///
 /// * `prefix` - The prefix to match against attribute paths (case-sensitive)
 /// * `limit` - Maximum number of results to return
-///
-/// # Examples
-///
-/// ```
-/// use rusqlite::Connection;
-/// let conn = Connection::open_in_memory().unwrap();
-/// conn.execute_batch("CREATE TABLE package_versions (attribute_path TEXT);
-///                    INSERT INTO package_versions (attribute_path) VALUES ('python'), ('python2'), ('python3'), ('ruby');").unwrap();
-///
-/// let attrs = crate::db::queries::complete_package_prefix(&conn, "pyth", 10).unwrap();
-/// assert_eq!(attrs, vec!["python", "python2", "python3"]);
-/// ```
 pub fn complete_package_prefix(
     conn: &rusqlite::Connection,
     prefix: &str,
     limit: usize,
 ) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
-        "SELECT DISTINCT attribute_path FROM package_versions WHERE attribute_path LIKE ? ORDER BY attribute_path LIMIT ?",
+        "SELECT DISTINCT attribute_path FROM package_versions WHERE attribute_path LIKE ? ESCAPE '\\' ORDER BY attribute_path LIMIT ?",
     )?;
-    let pattern = format!("{}%", prefix);
+    // Escape SQL LIKE wildcards to prevent user input from matching unintended patterns
+    let escaped_prefix = prefix
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    let pattern = format!("{}%", escaped_prefix);
     let rows = stmt.query_map(rusqlite::params![&pattern, limit as i64], |row| row.get(0))?;
 
     let mut results = Vec::new();
@@ -820,6 +816,23 @@ mod tests {
         // Empty prefix should return all packages (up to limit)
         let results = complete_package_prefix(db.connection(), "", 10).unwrap();
         assert_eq!(results.len(), 3); // nodejs, python, python2
+    }
+
+    #[test]
+    fn test_complete_package_prefix_escapes_wildcards() {
+        let (_dir, db) = create_test_db();
+        // SQL LIKE wildcards should be escaped - % and _ should not match anything
+        let results = complete_package_prefix(db.connection(), "%", 10).unwrap();
+        assert!(results.is_empty(), "% should not match as wildcard");
+
+        let results = complete_package_prefix(db.connection(), "_", 10).unwrap();
+        assert!(results.is_empty(), "_ should not match as wildcard");
+
+        let results = complete_package_prefix(db.connection(), "py%on", 10).unwrap();
+        assert!(
+            results.is_empty(),
+            "% in middle should not match as wildcard"
+        );
     }
 
     #[test]

@@ -3,7 +3,7 @@
 use crate::output::OutputFormat;
 use crate::paths;
 use crate::search::SortOrder;
-use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use std::path::PathBuf;
 
@@ -79,6 +79,10 @@ pub enum Commands {
 
     /// Generate shell completions.
     Completions(CompletionsArgs),
+
+    /// Complete package names (for shell completion scripts).
+    #[command(hide = true)]
+    CompletePackage(CompletePackageArgs),
 }
 
 /// Arguments for shell completions.
@@ -91,14 +95,25 @@ pub struct CompletionsArgs {
 
 impl CompletionsArgs {
     /// Generate and print completions to stdout.
+    ///
+    /// For bash, zsh, and fish, this includes custom completion functions
+    /// that provide dynamic package name completion using `nxv complete-package`.
     pub fn generate(&self) {
-        clap_complete::generate(
-            self.shell,
-            &mut Cli::command(),
-            "nxv",
-            &mut std::io::stdout(),
-        );
+        // Silently ignore broken pipe errors (e.g., when piped to head or closed early)
+        let _ = crate::completions::generate_completions(self.shell, &mut std::io::stdout());
     }
+}
+
+/// Arguments for package name completion (used by shell completion scripts).
+#[derive(Parser, Debug)]
+pub struct CompletePackageArgs {
+    /// Prefix to complete (what the user has typed so far).
+    #[arg(default_value = "")]
+    pub prefix: String,
+
+    /// Maximum number of completions to return.
+    #[arg(long, default_value_t = 50)]
+    pub limit: usize,
 }
 
 /// Arguments for the search command.

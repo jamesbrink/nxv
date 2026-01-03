@@ -546,6 +546,41 @@ pub fn get_all_unique_attrs(conn: &rusqlite::Connection) -> Result<Vec<String>> 
     Ok(results)
 }
 
+/// Return distinct package attribute paths matching a prefix, limited to a maximum count.
+///
+/// This function is optimized for shell tab completion, returning only unique attribute
+/// paths that start with the given prefix. Results are ordered alphabetically.
+///
+/// Special characters `%` and `_` in the prefix are escaped to prevent them from being
+/// interpreted as SQL LIKE wildcards.
+///
+/// # Arguments
+///
+/// * `prefix` - The prefix to match against attribute paths (case-sensitive)
+/// * `limit` - Maximum number of results to return
+pub fn complete_package_prefix(
+    conn: &rusqlite::Connection,
+    prefix: &str,
+    limit: usize,
+) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT attribute_path FROM package_versions WHERE attribute_path LIKE ? ESCAPE '\\' ORDER BY attribute_path LIMIT ?",
+    )?;
+    // Escape SQL LIKE wildcards to prevent user input from matching unintended patterns
+    let escaped_prefix = prefix
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    let pattern = format!("{}%", escaped_prefix);
+    let rows = stmt.query_map(rusqlite::params![&pattern, limit as i64], |row| row.get(0))?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        results.push(row?);
+    }
+    Ok(results)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -738,6 +773,66 @@ mod tests {
 
         let attrs = get_all_unique_attrs(db.connection()).unwrap();
         assert!(attrs.is_empty());
+    }
+
+    #[test]
+    fn test_complete_package_prefix() {
+        let (_dir, db) = create_test_db();
+        // Test with prefix that matches multiple packages
+        let results = complete_package_prefix(db.connection(), "python", 10).unwrap();
+        assert_eq!(results.len(), 2); // python, python2
+        assert!(results.contains(&"python".to_string()));
+        assert!(results.contains(&"python2".to_string()));
+    }
+
+    #[test]
+    fn test_complete_package_prefix_exact() {
+        let (_dir, db) = create_test_db();
+        // Test with prefix that matches exactly one package
+        let results = complete_package_prefix(db.connection(), "nodejs", 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0], "nodejs");
+    }
+
+    #[test]
+    fn test_complete_package_prefix_no_match() {
+        let (_dir, db) = create_test_db();
+        // Test with prefix that matches nothing
+        let results = complete_package_prefix(db.connection(), "zzz", 10).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_complete_package_prefix_limit() {
+        let (_dir, db) = create_test_db();
+        // Test that limit is respected
+        let results = complete_package_prefix(db.connection(), "python", 1).unwrap();
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn test_complete_package_prefix_empty() {
+        let (_dir, db) = create_test_db();
+        // Empty prefix should return all packages (up to limit)
+        let results = complete_package_prefix(db.connection(), "", 10).unwrap();
+        assert_eq!(results.len(), 3); // nodejs, python, python2
+    }
+
+    #[test]
+    fn test_complete_package_prefix_escapes_wildcards() {
+        let (_dir, db) = create_test_db();
+        // SQL LIKE wildcards should be escaped - % and _ should not match anything
+        let results = complete_package_prefix(db.connection(), "%", 10).unwrap();
+        assert!(results.is_empty(), "% should not match as wildcard");
+
+        let results = complete_package_prefix(db.connection(), "_", 10).unwrap();
+        assert!(results.is_empty(), "_ should not match as wildcard");
+
+        let results = complete_package_prefix(db.connection(), "py%on", 10).unwrap();
+        assert!(
+            results.is_empty(),
+            "% in middle should not match as wildcard"
+        );
     }
 
     #[test]

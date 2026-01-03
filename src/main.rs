@@ -4,6 +4,7 @@ mod backend;
 mod bloom;
 mod cli;
 mod client;
+mod completions;
 mod db;
 mod error;
 mod output;
@@ -54,6 +55,7 @@ fn main() {
             args.generate();
             Ok(())
         }
+        Commands::CompletePackage(args) => cmd_complete_package(&cli, args),
         #[cfg(feature = "indexer")]
         Commands::Index(args) => cmd_index(&cli, args),
         #[cfg(feature = "indexer")]
@@ -777,6 +779,49 @@ fn cmd_stats(cli: &Cli) -> Result<()> {
         } else if !bloom_path.exists() {
             println!("Bloom filter: not found");
         }
+    }
+
+    Ok(())
+}
+
+/// Outputs package name completions for shell tab completion.
+///
+/// This is a hidden subcommand used by shell completion scripts to provide
+/// dynamic package name completions. It queries the local database for
+/// attribute paths matching the given prefix and outputs them one per line.
+///
+/// Designed to be fast and silent on errors (shell completions should not
+/// produce error messages that interfere with the user experience).
+///
+/// # Examples
+///
+/// ```no_run
+/// // Called by shell completion scripts:
+/// // nxv complete-package pyth --limit 20
+/// // Outputs:
+/// // python
+/// // python2
+/// // python3
+/// // pythonPackages.foo
+/// // ...
+/// ```
+fn cmd_complete_package(cli: &Cli, args: &cli::CompletePackageArgs) -> Result<()> {
+    // Silently fail if database doesn't exist - completions should not produce errors
+    let db = match db::Database::open_readonly(&cli.db_path) {
+        Ok(db) => db,
+        Err(_) => return Ok(()),
+    };
+
+    // Get completions matching the prefix
+    let completions =
+        match db::queries::complete_package_prefix(db.connection(), &args.prefix, args.limit) {
+            Ok(c) => c,
+            Err(_) => return Ok(()),
+        };
+
+    // Output one completion per line (standard format for shell completions)
+    for name in completions {
+        println!("{}", name);
     }
 
     Ok(())

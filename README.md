@@ -33,7 +33,7 @@ NXV_API_URL=https://nxv.urandom.io nix run github:jamesbrink/nxv -- search nodej
 NXV_API_URL=https://nxv.urandom.io nix run github:jamesbrink/nxv -- search python 2.7
 ```
 
-Or visit **https://nxv.urandom.io** to search in your browser.
+Or visit **<https://nxv.urandom.io>** to search in your browser.
 
 ## Features
 
@@ -254,6 +254,7 @@ docker run -v ./nixpkgs:/nixpkgs -v nxv-data:/root/.local/share/nxv \
 ```
 
 **Tags:**
+
 - `latest` — Latest build from main branch
 - `x.y.z` — Specific version (e.g., `0.1.0`)
 
@@ -547,6 +548,20 @@ src/
     ├── backfill.rs  # Metadata backfill
     └── publisher.rs # Index publishing
 ```
+
+## Related Projects
+
+There are several other great tools in this space:
+
+| Tool | Approach | Link |
+| ---- | -------- | ---- |
+| [nix-community/nix-index](https://github.com/nix-community/nix-index) | Indexes files in nixpkgs for `nix-locate` — find which package has a file | [github.com/nix-community/nix-index](https://github.com/nix-community/nix-index) |
+| [lazamar/nix-package-versions](https://github.com/lazamar/nix-package-versions) | Web service that samples nixpkgs every ~5 weeks | [lazamar.co.uk/nix-versions](https://lazamar.co.uk/nix-versions/) |
+| [NixHub.io](https://www.nixhub.io/) | Parses Hydra build outputs, provides web UI and API | [nixhub.io](https://www.nixhub.io/) |
+| [vic/nix-versions](https://github.com/vic/nix-versions) | CLI that aggregates lazamar, nixhub, and history APIs | [github.com/vic/nix-versions](https://github.com/vic/nix-versions) |
+| [history.nix-packages.com](https://history.nix-packages.com/) | Web-based package history browser | [history.nix-packages.com](https://history.nix-packages.com/) |
+
+nxv takes a different approach: it indexes every commit locally, giving you a complete offline-capable database with no gaps. Choose what works best for your use case!
 
 ## License
 

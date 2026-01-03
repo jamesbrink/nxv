@@ -723,6 +723,7 @@ fn cmd_stats(cli: &Cli) -> Result<()> {
 
     // Get meta info
     let last_commit = backend.get_meta("last_indexed_commit")?;
+    let last_indexed_date = backend.get_meta("last_indexed_date")?;
     let index_version = backend.get_meta("index_version")?;
 
     println!("Index Information");
@@ -745,6 +746,15 @@ fn cmd_stats(cli: &Cli) -> Result<()> {
         println!("Last indexed commit: {}", &commit[..7.min(commit.len())]);
     }
 
+    if let Some(date_str) = last_indexed_date {
+        // Parse the RFC3339 date and display in a friendly format
+        if let Ok(date) = chrono::DateTime::parse_from_rfc3339(&date_str) {
+            println!("Last updated: {}", date.format("%Y-%m-%d %H:%M:%S UTC"));
+        } else {
+            println!("Last updated: {}", date_str);
+        }
+    }
+
     println!();
     println!("Statistics");
     println!("----------");
@@ -753,11 +763,11 @@ fn cmd_stats(cli: &Cli) -> Result<()> {
     println!("Unique versions: {}", stats.unique_versions);
 
     if let Some(oldest) = stats.oldest_commit_date {
-        println!("Oldest commit: {}", oldest.format("%Y-%m-%d"));
+        println!("Oldest package date: {}", oldest.format("%Y-%m-%d"));
     }
 
     if let Some(newest) = stats.newest_commit_date {
-        println!("Newest commit: {}", newest.format("%Y-%m-%d"));
+        println!("Latest package change: {}", newest.format("%Y-%m-%d"));
     }
 
     // Local-only info: file sizes

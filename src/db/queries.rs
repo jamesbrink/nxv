@@ -192,6 +192,12 @@ pub struct IndexStats {
     pub unique_versions: i64,
     pub oldest_commit_date: Option<DateTime<Utc>>,
     pub newest_commit_date: Option<DateTime<Utc>>,
+    /// The commit hash that was last indexed (from meta table).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_indexed_commit: Option<String>,
+    /// When the index was last updated (from meta table).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_indexed_date: Option<String>,
 }
 
 /// Search for packages by name.
@@ -468,12 +474,31 @@ pub fn get_stats(conn: &rusqlite::Connection) -> Result<IndexStats> {
         )
         .ok();
 
+    // Get meta values (backwards compatible - returns None if not present)
+    let last_indexed_commit: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'last_indexed_commit'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+
+    let last_indexed_date: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'last_indexed_date'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+
     Ok(IndexStats {
         total_ranges,
         unique_names,
         unique_versions,
         oldest_commit_date: oldest.map(|ts| Utc.timestamp_opt(ts, 0).unwrap()),
         newest_commit_date: newest.map(|ts| Utc.timestamp_opt(ts, 0).unwrap()),
+        last_indexed_commit,
+        last_indexed_date,
     })
 }
 
@@ -753,6 +778,39 @@ mod tests {
         assert_eq!(stats.total_ranges, 0);
         assert_eq!(stats.unique_names, 0);
         assert_eq!(stats.unique_versions, 0);
+    }
+
+    #[test]
+    fn test_get_stats_with_last_indexed_date() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db = Database::open(&db_path).unwrap();
+
+        // Set meta values
+        db.set_meta("last_indexed_commit", "abc1234567890").unwrap();
+        db.set_meta("last_indexed_date", "2026-01-03T12:00:00Z")
+            .unwrap();
+
+        let stats = get_stats(db.connection()).unwrap();
+        assert_eq!(stats.last_indexed_commit, Some("abc1234567890".to_string()));
+        assert_eq!(
+            stats.last_indexed_date,
+            Some("2026-01-03T12:00:00Z".to_string())
+        );
+    }
+
+    #[test]
+    fn test_get_stats_backwards_compatible_no_date() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db = Database::open(&db_path).unwrap();
+
+        // Only set commit (simulating older database without date)
+        db.set_meta("last_indexed_commit", "abc1234567890").unwrap();
+
+        let stats = get_stats(db.connection()).unwrap();
+        assert_eq!(stats.last_indexed_commit, Some("abc1234567890".to_string()));
+        assert_eq!(stats.last_indexed_date, None); // Should be None for backwards compat
     }
 
     #[test]

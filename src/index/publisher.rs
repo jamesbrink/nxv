@@ -392,9 +392,11 @@ pub fn generate_full_index<P: AsRef<Path>, Q: AsRef<Path>>(
 
     let compressed_path = output_dir.join(INDEX_DB_NAME);
 
-    // Get database info
+    // Get database info and update last_indexed_date to publish time
     let db = Database::open(db_path)?;
     let last_commit = db.get_meta("last_indexed_commit")?.unwrap_or_default();
+    // Set the indexed date to now (publish time) so it matches the manifest
+    db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
     let input_size = fs::metadata(db_path)?.len();
 
     if show_progress {
@@ -551,10 +553,14 @@ pub fn generate_delta_pack<P: AsRef<Path>, Q: AsRef<Path>>(
         ));
     }
 
-    // Update the last_indexed_commit meta
+    // Update the last_indexed_commit and last_indexed_date meta
     sql_content.push_str(&format!(
         "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_indexed_commit', {});\n",
         sql_quote(to_commit)
+    ));
+    sql_content.push_str(&format!(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_indexed_date', {});\n",
+        sql_quote(&Utc::now().to_rfc3339())
     ));
 
     sql_content.push_str("COMMIT;\n");

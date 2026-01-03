@@ -707,6 +707,8 @@ impl Indexer {
                         }
                         if commits.is_empty() {
                             eprintln!("Index is already up to date.");
+                            // Still update the indexed date to record when we last checked
+                            db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
                             return Ok(IndexResult {
                                 commits_processed: 0,
                                 packages_found: 0,
@@ -877,6 +879,7 @@ impl Indexer {
                 // Save checkpoint
                 if let Some(ref prev_hash) = prev_commit_hash {
                     db.set_meta("last_indexed_commit", prev_hash)?;
+                    db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
                 }
 
                 break;
@@ -1089,6 +1092,7 @@ impl Indexer {
 
                 if let Some(ref prev_hash) = prev_commit_hash {
                     db.set_meta("last_indexed_commit", prev_hash)?;
+                    db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
                     db.set_meta("checkpoint_open_ranges", &open_ranges.len().to_string())?;
                     db.checkpoint()?;
                 }
@@ -1110,6 +1114,7 @@ impl Indexer {
 
             if let Some(ref last_hash) = prev_commit_hash {
                 db.set_meta("last_indexed_commit", last_hash)?;
+                db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
             }
         }
 

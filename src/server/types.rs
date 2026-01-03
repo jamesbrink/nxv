@@ -230,28 +230,16 @@ pub struct IndexStatsSchema {
     pub unique_versions: i64,
     pub oldest_commit_date: Option<DateTime<Utc>>,
     pub newest_commit_date: Option<DateTime<Utc>>,
+    /// The commit hash that was last indexed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_indexed_commit: Option<String>,
+    /// When the index was last updated (RFC3339 format).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_indexed_date: Option<String>,
 }
 
 impl From<IndexStats> for IndexStatsSchema {
     /// Converts an `IndexStats` into an `IndexStatsSchema` by copying all fields.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use chrono::Utc;
-    /// // construct a minimal IndexStats (types shown for clarity)
-    /// let stats = IndexStats {
-    ///     total_ranges: 10,
-    ///     unique_names: 5,
-    ///     unique_versions: 8,
-    ///     oldest_commit_date: None,
-    ///     newest_commit_date: None,
-    /// };
-    /// let schema: IndexStatsSchema = stats.into();
-    /// assert_eq!(schema.total_ranges, 10);
-    /// assert_eq!(schema.unique_names, 5);
-    /// assert_eq!(schema.unique_versions, 8);
-    /// ```
     fn from(s: IndexStats) -> Self {
         Self {
             total_ranges: s.total_ranges,
@@ -259,6 +247,8 @@ impl From<IndexStats> for IndexStatsSchema {
             unique_versions: s.unique_versions,
             oldest_commit_date: s.oldest_commit_date,
             newest_commit_date: s.newest_commit_date,
+            last_indexed_commit: s.last_indexed_commit,
+            last_indexed_date: s.last_indexed_date,
         }
     }
 }

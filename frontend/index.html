@@ -975,9 +975,12 @@
             const oldest = new Date(data.oldest_commit_date).getFullYear();
             const newest = new Date(data.newest_commit_date).getFullYear();
             document.getElementById('statHistory').textContent = `${newest - oldest}+`;
+          }
 
-            // Show index updated date
-            const updatedDate = new Date(data.newest_commit_date);
+          // Show index updated date (prefer last_indexed_date, fall back to newest_commit_date)
+          const indexDate = data.last_indexed_date || data.newest_commit_date;
+          if (indexDate) {
+            const updatedDate = new Date(indexDate);
             document.getElementById('indexUpdatedDate').textContent =
               updatedDate.toLocaleDateString('en-US', {
                 year: 'numeric',

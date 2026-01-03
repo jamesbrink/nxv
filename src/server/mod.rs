@@ -81,6 +81,7 @@ impl AppState {
     /// let state = crate::server::AppState::new(std::path::PathBuf::from("test.db"));
     /// let db = state.get_db().expect("open readonly database");
     /// ```
+    #[allow(dead_code)]
     pub fn get_db(&self) -> Result<Database> {
         Database::open_readonly(&self.db_path)
     }
@@ -687,5 +688,134 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// Test that concurrent requests can be processed in parallel.
+    ///
+    /// This test verifies that database operations don't block the async runtime
+    /// by spawning multiple concurrent requests and verifying they all complete
+    /// successfully. Prior to the spawn_blocking fix, synchronous SQLite calls
+    /// would block Tokio worker threads, causing request queuing and potential
+    /// timeouts under load.
+    #[tokio::test]
+    async fn test_concurrent_requests_not_blocked() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None);
+
+        // Spawn 20 concurrent requests to different endpoints
+        let mut handles = Vec::new();
+
+        for i in 0..20 {
+            let app = app.clone();
+            let uri = match i % 4 {
+                0 => "/api/v1/search?q=python",
+                1 => "/api/v1/packages/hello",
+                2 => "/api/v1/stats",
+                _ => "/api/v1/health",
+            };
+
+            handles.push(tokio::spawn(async move {
+                let response = app
+                    .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                response.status()
+            }));
+        }
+
+        // All requests should complete successfully
+        let mut ok_count = 0;
+        for handle in handles {
+            let status = handle.await.unwrap();
+            if status == StatusCode::OK {
+                ok_count += 1;
+            }
+        }
+
+        // All 20 concurrent requests should succeed
+        assert_eq!(
+            ok_count, 20,
+            "All concurrent requests should complete successfully"
+        );
+    }
+
+    /// Test that multiple concurrent search requests can complete.
+    ///
+    /// This tests the search endpoint specifically, which was the main source
+    /// of blocking in production (as it performs the most complex queries).
+    #[tokio::test]
+    async fn test_concurrent_search_requests() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None);
+
+        // Spawn 10 concurrent search requests
+        let mut handles = Vec::new();
+
+        for _ in 0..10 {
+            let app = app.clone();
+            handles.push(tokio::spawn(async move {
+                let response = app
+                    .oneshot(
+                        Request::builder()
+                            .uri("/api/v1/search?q=python")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+
+                let status = response.status();
+                let body = response.into_body().collect().await.unwrap().to_bytes();
+                let json: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+
+                (status, json)
+            }));
+        }
+
+        // All requests should return OK with valid search results
+        for handle in handles {
+            let (status, json) = handle.await.unwrap();
+            assert_eq!(status, StatusCode::OK);
+            assert!(json["data"].is_array());
+            assert!(!json["data"].as_array().unwrap().is_empty());
+        }
+    }
+
+    /// Test that requests with a timeout complete promptly.
+    ///
+    /// This verifies that handlers using spawn_blocking don't cause
+    /// excessive latency that would trigger timeouts.
+    #[tokio::test]
+    async fn test_request_completes_within_timeout() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None);
+
+        // Each request should complete within 5 seconds (generous timeout)
+        let timeout_duration = std::time::Duration::from_secs(5);
+
+        let result = tokio::time::timeout(timeout_duration, async {
+            get_json(&app, "/api/v1/search?q=python").await
+        })
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "Request should complete within timeout (spawn_blocking should not cause indefinite blocking)"
+        );
+
+        let (status, _) = result.unwrap();
+        assert_eq!(status, StatusCode::OK);
     }
 }

@@ -1,4 +1,8 @@
 //! API request handlers.
+//!
+//! All database operations are wrapped in `tokio::task::spawn_blocking()` to prevent
+//! blocking the async runtime. This is critical for server stability under load, as
+//! rusqlite operations are synchronous and would otherwise block Tokio's worker threads.
 
 use axum::{
     Json,
@@ -6,6 +10,7 @@ use axum::{
 };
 use std::sync::Arc;
 
+use crate::db::Database;
 use crate::db::queries::{self, PackageVersion};
 use crate::search::{self, SearchOptions};
 
@@ -62,7 +67,7 @@ pub async fn search_packages(
     State(state): State<Arc<AppState>>,
     Query(params): Query<SearchParams>,
 ) -> Result<Json<ApiResponse<Vec<PackageVersion>>>, ApiError> {
-    let db = state.get_db()?;
+    let db_path = state.db_path.clone();
 
     let opts = SearchOptions {
         query: params.q,
@@ -77,13 +82,22 @@ pub async fn search_packages(
         offset: params.offset,
     };
 
-    let result = search::execute_search(db.connection(), &opts)?;
+    // Clone opts values needed for response before moving opts into spawn_blocking
+    let limit = opts.limit;
+    let offset = opts.offset;
+
+    let result = tokio::task::spawn_blocking(move || {
+        let db = Database::open_readonly(&db_path)?;
+        search::execute_search(db.connection(), &opts)
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("Task join error: {}", e)))??;
 
     Ok(Json(ApiResponse::with_pagination(
         result.data,
         result.total,
-        opts.limit,
-        opts.offset,
+        limit,
+        offset,
         result.has_more,
     )))
 }
@@ -121,30 +135,31 @@ pub async fn search_description(
     State(state): State<Arc<AppState>>,
     Query(params): Query<DescriptionSearchParams>,
 ) -> Result<Json<ApiResponse<Vec<PackageVersion>>>, ApiError> {
-    let db = state.get_db()?;
+    let db_path = state.db_path.clone();
+    let query = params.q.clone();
+    let limit = params.limit;
+    let offset = params.offset;
 
-    let results = queries::search_by_description(db.connection(), &params.q)?;
+    let results = tokio::task::spawn_blocking(move || {
+        let db = Database::open_readonly(&db_path)?;
+        queries::search_by_description(db.connection(), &query)
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("Task join error: {}", e)))??;
+
     let total = results.len();
 
     // Apply pagination
-    let data: Vec<_> = if params.limit > 0 {
-        results
-            .into_iter()
-            .skip(params.offset)
-            .take(params.limit)
-            .collect()
+    let data: Vec<_> = if limit > 0 {
+        results.into_iter().skip(offset).take(limit).collect()
     } else {
-        results.into_iter().skip(params.offset).collect()
+        results.into_iter().skip(offset).collect()
     };
 
-    let has_more = params.limit > 0 && total > params.offset + data.len();
+    let has_more = limit > 0 && total > offset + data.len();
 
     Ok(Json(ApiResponse::with_pagination(
-        data,
-        total,
-        params.limit,
-        params.offset,
-        has_more,
+        data, total, limit, offset, has_more,
     )))
 }
 
@@ -181,12 +196,19 @@ pub async fn get_package(
     State(state): State<Arc<AppState>>,
     Path(attr): Path<String>,
 ) -> Result<Json<ApiResponse<Vec<PackageVersion>>>, ApiError> {
-    let db = state.get_db()?;
+    let db_path = state.db_path.clone();
+    let attr_clone = attr.clone();
 
-    let packages: Vec<_> = queries::search_by_attr(db.connection(), &attr)?
-        .into_iter()
-        .filter(|p| p.attribute_path == attr)
-        .collect();
+    let packages = tokio::task::spawn_blocking(move || {
+        let db = Database::open_readonly(&db_path)?;
+        let results: Vec<_> = queries::search_by_attr(db.connection(), &attr_clone)?
+            .into_iter()
+            .filter(|p| p.attribute_path == attr_clone)
+            .collect();
+        Ok::<_, crate::error::NxvError>(results)
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("Task join error: {}", e)))??;
 
     if packages.is_empty() {
         return Err(ApiError::not_found(format!("Package '{}' not found", attr)));
@@ -213,9 +235,15 @@ pub async fn get_version_history(
     State(state): State<Arc<AppState>>,
     Path(attr): Path<String>,
 ) -> Result<Json<ApiResponse<Vec<VersionHistorySchema>>>, ApiError> {
-    let db = state.get_db()?;
+    let db_path = state.db_path.clone();
+    let attr_clone = attr.clone();
 
-    let history = queries::get_version_history(db.connection(), &attr)?;
+    let history = tokio::task::spawn_blocking(move || {
+        let db = Database::open_readonly(&db_path)?;
+        queries::get_version_history(db.connection(), &attr_clone)
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("Task join error: {}", e)))??;
 
     if history.is_empty() {
         return Err(ApiError::not_found(format!("Package '{}' not found", attr)));
@@ -265,10 +293,17 @@ pub async fn get_version_info(
     State(state): State<Arc<AppState>>,
     Path((attr, version)): Path<(String, String)>,
 ) -> Result<Json<ApiResponse<PackageVersion>>, ApiError> {
-    let db = state.get_db()?;
+    let db_path = state.db_path.clone();
+    let attr_clone = attr.clone();
+    let version_clone = version.clone();
 
     // Get the most recent occurrence of this version
-    let pkg = queries::get_last_occurrence(db.connection(), &attr, &version)?;
+    let pkg = tokio::task::spawn_blocking(move || {
+        let db = Database::open_readonly(&db_path)?;
+        queries::get_last_occurrence(db.connection(), &attr_clone, &version_clone)
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("Task join error: {}", e)))??;
 
     match pkg {
         Some(p) => Ok(Json(ApiResponse::new(p))),
@@ -317,9 +352,16 @@ pub async fn get_first_occurrence(
     State(state): State<Arc<AppState>>,
     Path((attr, version)): Path<(String, String)>,
 ) -> Result<Json<ApiResponse<PackageVersion>>, ApiError> {
-    let db = state.get_db()?;
+    let db_path = state.db_path.clone();
+    let attr_clone = attr.clone();
+    let version_clone = version.clone();
 
-    let pkg = queries::get_first_occurrence(db.connection(), &attr, &version)?;
+    let pkg = tokio::task::spawn_blocking(move || {
+        let db = Database::open_readonly(&db_path)?;
+        queries::get_first_occurrence(db.connection(), &attr_clone, &version_clone)
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("Task join error: {}", e)))??;
 
     match pkg {
         Some(p) => Ok(Json(ApiResponse::new(p))),
@@ -349,9 +391,16 @@ pub async fn get_last_occurrence(
     State(state): State<Arc<AppState>>,
     Path((attr, version)): Path<(String, String)>,
 ) -> Result<Json<ApiResponse<PackageVersion>>, ApiError> {
-    let db = state.get_db()?;
+    let db_path = state.db_path.clone();
+    let attr_clone = attr.clone();
+    let version_clone = version.clone();
 
-    let pkg = queries::get_last_occurrence(db.connection(), &attr, &version)?;
+    let pkg = tokio::task::spawn_blocking(move || {
+        let db = Database::open_readonly(&db_path)?;
+        queries::get_last_occurrence(db.connection(), &attr_clone, &version_clone)
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("Task join error: {}", e)))??;
 
     match pkg {
         Some(p) => Ok(Json(ApiResponse::new(p))),
@@ -395,9 +444,14 @@ tag = "stats"
 pub async fn get_stats(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<IndexStatsSchema>>, ApiError> {
-    let db = state.get_db()?;
+    let db_path = state.db_path.clone();
 
-    let stats = queries::get_stats(db.connection())?;
+    let stats = tokio::task::spawn_blocking(move || {
+        let db = Database::open_readonly(&db_path)?;
+        queries::get_stats(db.connection())
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("Task join error: {}", e)))??;
 
     Ok(Json(ApiResponse::new(stats.into())))
 }
@@ -412,10 +466,16 @@ pub async fn get_stats(
     tag = "health"
 )]
 pub async fn health_check(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
-    let index_commit = state
-        .get_db()
-        .ok()
-        .and_then(|db| db.get_meta("last_indexed_commit").ok().flatten());
+    let db_path = state.db_path.clone();
+
+    let index_commit = tokio::task::spawn_blocking(move || {
+        Database::open_readonly(&db_path)
+            .ok()
+            .and_then(|db| db.get_meta("last_indexed_commit").ok().flatten())
+    })
+    .await
+    .ok()
+    .flatten();
 
     Json(HealthResponse {
         status: "ok".to_string(),

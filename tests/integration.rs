@@ -114,9 +114,7 @@ fn test_help_displays() {
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "Nix Version Index",
-        ))
+        .stdout(predicate::str::contains("Nix Version Index"))
         .stdout(predicate::str::contains("search"))
         .stdout(predicate::str::contains("update"))
         .stdout(predicate::str::contains("info"))

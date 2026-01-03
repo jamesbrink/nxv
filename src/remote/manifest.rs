@@ -93,17 +93,38 @@ pub fn verify_manifest_signature(manifest_data: &[u8], signature_str: &str) -> R
     Ok(())
 }
 
+/// Normalize a public key string to minisign format.
+///
+/// If the key is just raw base64 (starts with "RW"), prepends a default comment.
+/// If already in full format (starts with "untrusted comment:"), returns as-is.
+fn normalize_public_key(key: &str) -> String {
+    let trimmed = key.trim();
+    if trimmed.starts_with("untrusted comment:") {
+        trimmed.to_string()
+    } else if trimmed.starts_with("RW") {
+        format!("untrusted comment: minisign public key\n{}", trimmed)
+    } else {
+        // Return as-is, let the parser give a proper error
+        trimmed.to_string()
+    }
+}
+
 /// Verify a manifest signature with a custom public key.
 ///
 /// Used for self-hosted indexes with custom signing keys.
-/// The public_key_str should be in minisign format with comment and base64 key.
+/// Accepts either:
+/// - Full minisign format with comment (untrusted comment: ...\nRW...)
+/// - Raw base64 key only (RW...)
 pub fn verify_manifest_signature_with_key(
     manifest_data: &[u8],
     signature_str: &str,
     public_key_str: &str,
 ) -> Result<()> {
+    // Normalize the key: add default comment if only raw base64 provided
+    let normalized_key = normalize_public_key(public_key_str);
+
     // Parse the public key using from_box (expects comment + base64 format)
-    let pk_box = minisign::PublicKeyBox::from_string(public_key_str)
+    let pk_box = minisign::PublicKeyBox::from_string(&normalized_key)
         .map_err(|e| NxvError::PublicKey(format!("failed to parse public key: {}", e)))?;
     let pk = minisign::PublicKey::from_box(pk_box)
         .map_err(|e| NxvError::PublicKey(format!("failed to parse public key: {}", e)))?;
@@ -140,6 +161,44 @@ mod tests {
             "Embedded public key should parse: {:?}",
             pk.err()
         );
+    }
+
+    #[test]
+    fn test_normalize_public_key_raw_base64() {
+        let raw_key = "RWRBBg3BOtB6V0YjlII702+pQeXUsdIk3mzZRmopwRlutFAW9Bl/naMV";
+        let normalized = normalize_public_key(raw_key);
+
+        // Should add a default comment
+        assert!(normalized.starts_with("untrusted comment:"));
+        assert!(normalized.contains(raw_key));
+
+        // Should be parseable by minisign
+        let pk_box = minisign::PublicKeyBox::from_string(&normalized);
+        assert!(
+            pk_box.is_ok(),
+            "Normalized key should parse: {:?}",
+            pk_box.err()
+        );
+    }
+
+    #[test]
+    fn test_normalize_public_key_full_format() {
+        let full_key =
+            "untrusted comment: my key\nRWRBBg3BOtB6V0YjlII702+pQeXUsdIk3mzZRmopwRlutFAW9Bl/naMV";
+        let normalized = normalize_public_key(full_key);
+
+        // Should preserve the original format
+        assert_eq!(normalized, full_key);
+    }
+
+    #[test]
+    fn test_normalize_public_key_with_whitespace() {
+        let key_with_whitespace = "  RWRBBg3BOtB6V0YjlII702+pQeXUsdIk3mzZRmopwRlutFAW9Bl/naMV  \n";
+        let normalized = normalize_public_key(key_with_whitespace);
+
+        // Should trim and add comment
+        assert!(normalized.starts_with("untrusted comment:"));
+        assert!(!normalized.starts_with("  ")); // No leading whitespace
     }
 
     #[test]

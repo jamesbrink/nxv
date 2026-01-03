@@ -115,7 +115,7 @@ fn test_help_displays() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "CLI tool for finding specific versions",
+            "Nix Version Index",
         ))
         .stdout(predicate::str::contains("search"))
         .stdout(predicate::str::contains("update"))

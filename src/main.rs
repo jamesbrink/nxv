@@ -1,4 +1,4 @@
-//! nxv - CLI tool for finding specific versions of Nix packages.
+//! nxv - Nix Version Index
 
 mod backend;
 mod bloom;

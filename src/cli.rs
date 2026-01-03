@@ -7,7 +7,7 @@ use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use std::path::PathBuf;
 
-/// CLI tool for finding specific versions of Nix packages.
+/// nxv - Nix Version Index
 #[derive(Parser, Debug)]
 #[command(name = "nxv")]
 #[command(author, version, about, long_about = None)]

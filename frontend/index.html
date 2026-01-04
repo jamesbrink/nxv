@@ -818,6 +818,22 @@
       // Format number with commas
       const formatNumber = (n) => n?.toLocaleString() ?? '-';
 
+      // Get user-friendly error message for HTTP status codes
+      const getHttpErrorMessage = (status, defaultMsg = 'Request failed') => {
+        switch (status) {
+          case 502:
+            return 'Bad gateway - the server is temporarily unavailable. Please try again later.';
+          case 503:
+            return 'Service unavailable - the server is overloaded or under maintenance.';
+          case 504:
+            return 'Gateway timeout - the server took too long to respond. Please try again.';
+          default:
+            return status >= 500
+              ? `Server error (HTTP ${status}). Please try again later.`
+              : `${defaultMsg} (HTTP ${status})`;
+        }
+      };
+
       // Format date nicely
       const formatDate = (dateStr) => {
         const d = new Date(dateStr);
@@ -960,8 +976,14 @@
           const res = await fetch(`${API_BASE}/stats`);
 
           if (!res.ok) {
-            const errorBody = await res.text();
-            console.error(`Failed to load stats: HTTP ${res.status}`, errorBody);
+            console.error(`Failed to load stats: HTTP ${res.status}`);
+            return;
+          }
+
+          // Check content-type before parsing JSON
+          const contentType = res.headers.get('content-type');
+          if (!contentType || !contentType.includes('application/json')) {
+            console.error('Stats response was not JSON');
             return;
           }
 
@@ -1068,12 +1090,20 @@
           }
 
           const res = await fetch(`${API_BASE}/search?${params}`);
-          const json = await res.json();
           const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
 
+          // Handle non-OK responses with user-friendly messages
           if (!res.ok) {
-            throw new Error((json && json.message) || json?.error || 'Search failed');
+            // Check if response is JSON before trying to parse
+            const contentType = res.headers.get('content-type');
+            if (contentType && contentType.includes('application/json')) {
+              const errorJson = await res.json().catch(() => null);
+              throw new Error(errorJson?.message || errorJson?.error || getHttpErrorMessage(res.status, 'Search failed'));
+            }
+            throw new Error(getHttpErrorMessage(res.status, 'Search failed'));
           }
+
+          const json = await res.json();
 
           let { data, meta } = json;
           currentOffset = offset;
@@ -1338,9 +1368,17 @@
         try {
           const res = await fetch(`${API_BASE}/packages/${encodeURIComponent(attr)}/history`);
           if (!res.ok) {
-            body.innerHTML = `<p>Failed to load version history (HTTP ${res.status})</p>`;
+            body.innerHTML = `<p>${escapeHtml(getHttpErrorMessage(res.status, 'Failed to load version history'))}</p>`;
             return;
           }
+
+          // Check content-type before parsing JSON
+          const contentType = res.headers.get('content-type');
+          if (!contentType || !contentType.includes('application/json')) {
+            body.innerHTML = '<p>Unexpected response from server. Please try again.</p>';
+            return;
+          }
+
           const { data } = await res.json();
 
           if (!data || data.length === 0) {

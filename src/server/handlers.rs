@@ -3,12 +3,16 @@
 //! All database operations are wrapped in `tokio::task::spawn_blocking()` to prevent
 //! blocking the async runtime. This is critical for server stability under load, as
 //! rusqlite operations are synchronous and would otherwise block Tokio's worker threads.
+//!
+//! Each handler is instrumented with `tracing` to provide structured logging of requests,
+//! parameters, and timing information.
 
 use axum::{
     Json,
     extract::{Path, Query, State},
 };
 use std::sync::Arc;
+use tracing::instrument;
 
 use crate::db::Database;
 use crate::db::queries::{self, PackageVersion};
@@ -63,6 +67,7 @@ responses(
 ),
 tag = "packages"
 )]
+#[instrument(skip(state), fields(query = %params.q, version = ?params.version, exact = ?params.exact))]
 pub async fn search_packages(
     State(state): State<Arc<AppState>>,
     Query(params): Query<SearchParams>,
@@ -87,11 +92,18 @@ pub async fn search_packages(
     let offset = opts.offset;
 
     let result = tokio::task::spawn_blocking(move || {
+        let _span = tracing::info_span!("db_search").entered();
         let db = Database::open_readonly(&db_path)?;
         search::execute_search(db.connection(), &opts)
     })
     .await
     .map_err(|e| ApiError::internal(format!("Task join error: {}", e)))??;
+
+    tracing::debug!(
+        total = result.total,
+        returned = result.data.len(),
+        "Search completed"
+    );
 
     Ok(Json(ApiResponse::with_pagination(
         result.data,
@@ -131,6 +143,7 @@ responses(
 ),
 tag = "packages"
 )]
+#[instrument(skip(state), fields(query = %params.q))]
 pub async fn search_description(
     State(state): State<Arc<AppState>>,
     Query(params): Query<DescriptionSearchParams>,
@@ -141,6 +154,7 @@ pub async fn search_description(
     let offset = params.offset;
 
     let results = tokio::task::spawn_blocking(move || {
+        let _span = tracing::info_span!("db_fts_search").entered();
         let db = Database::open_readonly(&db_path)?;
         queries::search_by_description(db.connection(), &query)
     })
@@ -148,6 +162,7 @@ pub async fn search_description(
     .map_err(|e| ApiError::internal(format!("Task join error: {}", e)))??;
 
     let total = results.len();
+    tracing::debug!(total, "Description search completed");
 
     // Apply pagination
     let data: Vec<_> = if limit > 0 {
@@ -192,6 +207,7 @@ responses(
 ),
 tag = "packages"
 )]
+#[instrument(skip(state), fields(attr = %attr))]
 pub async fn get_package(
     State(state): State<Arc<AppState>>,
     Path(attr): Path<String>,
@@ -200,6 +216,7 @@ pub async fn get_package(
     let attr_clone = attr.clone();
 
     let packages = tokio::task::spawn_blocking(move || {
+        let _span = tracing::info_span!("db_get_package").entered();
         let db = Database::open_readonly(&db_path)?;
         let results: Vec<_> = queries::search_by_attr(db.connection(), &attr_clone)?
             .into_iter()
@@ -211,8 +228,11 @@ pub async fn get_package(
     .map_err(|e| ApiError::internal(format!("Task join error: {}", e)))??;
 
     if packages.is_empty() {
+        tracing::trace!("Package not found");
         return Err(ApiError::not_found(format!("Package '{}' not found", attr)));
     }
+
+    tracing::debug!(versions = packages.len(), "Package found");
 
     Ok(Json(ApiResponse::new(packages)))
 }
@@ -231,6 +251,7 @@ pub async fn get_package(
     ),
     tag = "packages"
 )]
+#[instrument(skip(state), fields(attr = %attr))]
 pub async fn get_version_history(
     State(state): State<Arc<AppState>>,
     Path(attr): Path<String>,
@@ -239,6 +260,7 @@ pub async fn get_version_history(
     let attr_clone = attr.clone();
 
     let history = tokio::task::spawn_blocking(move || {
+        let _span = tracing::info_span!("db_get_history").entered();
         let db = Database::open_readonly(&db_path)?;
         queries::get_version_history(db.connection(), &attr_clone)
     })
@@ -246,8 +268,11 @@ pub async fn get_version_history(
     .map_err(|e| ApiError::internal(format!("Task join error: {}", e)))??;
 
     if history.is_empty() {
+        tracing::trace!("Package not found");
         return Err(ApiError::not_found(format!("Package '{}' not found", attr)));
     }
+
+    tracing::debug!(versions = history.len(), "History retrieved");
 
     let entries: Vec<_> = history
         .into_iter()
@@ -289,6 +314,7 @@ responses(
 ),
 tag = "packages"
 )]
+#[instrument(skip(state), fields(attr = %attr, version = %version))]
 pub async fn get_version_info(
     State(state): State<Arc<AppState>>,
     Path((attr, version)): Path<(String, String)>,
@@ -299,6 +325,7 @@ pub async fn get_version_info(
 
     // Get the most recent occurrence of this version
     let pkg = tokio::task::spawn_blocking(move || {
+        let _span = tracing::info_span!("db_get_version").entered();
         let db = Database::open_readonly(&db_path)?;
         queries::get_last_occurrence(db.connection(), &attr_clone, &version_clone)
     })
@@ -306,11 +333,17 @@ pub async fn get_version_info(
     .map_err(|e| ApiError::internal(format!("Task join error: {}", e)))??;
 
     match pkg {
-        Some(p) => Ok(Json(ApiResponse::new(p))),
-        None => Err(ApiError::not_found(format!(
-            "Version '{}' of '{}' not found",
-            version, attr
-        ))),
+        Some(p) => {
+            tracing::debug!("Version found");
+            Ok(Json(ApiResponse::new(p)))
+        }
+        None => {
+            tracing::trace!("Version not found");
+            Err(ApiError::not_found(format!(
+                "Version '{}' of '{}' not found",
+                version, attr
+            )))
+        }
     }
 }
 
@@ -348,6 +381,7 @@ responses(
 ),
 tag = "packages"
 )]
+#[instrument(skip(state), fields(attr = %attr, version = %version))]
 pub async fn get_first_occurrence(
     State(state): State<Arc<AppState>>,
     Path((attr, version)): Path<(String, String)>,
@@ -357,6 +391,7 @@ pub async fn get_first_occurrence(
     let version_clone = version.clone();
 
     let pkg = tokio::task::spawn_blocking(move || {
+        let _span = tracing::info_span!("db_get_first_occurrence").entered();
         let db = Database::open_readonly(&db_path)?;
         queries::get_first_occurrence(db.connection(), &attr_clone, &version_clone)
     })
@@ -364,11 +399,17 @@ pub async fn get_first_occurrence(
     .map_err(|e| ApiError::internal(format!("Task join error: {}", e)))??;
 
     match pkg {
-        Some(p) => Ok(Json(ApiResponse::new(p))),
-        None => Err(ApiError::not_found(format!(
-            "Version '{}' of '{}' not found",
-            version, attr
-        ))),
+        Some(p) => {
+            tracing::debug!("First occurrence found");
+            Ok(Json(ApiResponse::new(p)))
+        }
+        None => {
+            tracing::trace!("Version not found");
+            Err(ApiError::not_found(format!(
+                "Version '{}' of '{}' not found",
+                version, attr
+            )))
+        }
     }
 }
 
@@ -387,6 +428,7 @@ pub async fn get_first_occurrence(
     ),
     tag = "packages"
 )]
+#[instrument(skip(state), fields(attr = %attr, version = %version))]
 pub async fn get_last_occurrence(
     State(state): State<Arc<AppState>>,
     Path((attr, version)): Path<(String, String)>,
@@ -396,6 +438,7 @@ pub async fn get_last_occurrence(
     let version_clone = version.clone();
 
     let pkg = tokio::task::spawn_blocking(move || {
+        let _span = tracing::info_span!("db_get_last_occurrence").entered();
         let db = Database::open_readonly(&db_path)?;
         queries::get_last_occurrence(db.connection(), &attr_clone, &version_clone)
     })
@@ -403,11 +446,17 @@ pub async fn get_last_occurrence(
     .map_err(|e| ApiError::internal(format!("Task join error: {}", e)))??;
 
     match pkg {
-        Some(p) => Ok(Json(ApiResponse::new(p))),
-        None => Err(ApiError::not_found(format!(
-            "Version '{}' of '{}' not found",
-            version, attr
-        ))),
+        Some(p) => {
+            tracing::debug!("Last occurrence found");
+            Ok(Json(ApiResponse::new(p)))
+        }
+        None => {
+            tracing::trace!("Version not found");
+            Err(ApiError::not_found(format!(
+                "Version '{}' of '{}' not found",
+                version, attr
+            )))
+        }
     }
 }
 
@@ -441,17 +490,25 @@ responses(
 ),
 tag = "stats"
 )]
+#[instrument(skip(state))]
 pub async fn get_stats(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<IndexStatsSchema>>, ApiError> {
     let db_path = state.db_path.clone();
 
     let stats = tokio::task::spawn_blocking(move || {
+        let _span = tracing::info_span!("db_get_stats").entered();
         let db = Database::open_readonly(&db_path)?;
         queries::get_stats(db.connection())
     })
     .await
     .map_err(|e| ApiError::internal(format!("Task join error: {}", e)))??;
+
+    tracing::debug!(
+        total_ranges = stats.total_ranges,
+        unique_names = stats.unique_names,
+        "Stats retrieved"
+    );
 
     Ok(Json(ApiResponse::new(stats.into())))
 }
@@ -465,6 +522,7 @@ pub async fn get_stats(
     ),
     tag = "health"
 )]
+#[instrument(skip(state))]
 pub async fn health_check(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
     let db_path = state.db_path.clone();
 

@@ -154,6 +154,51 @@ pub struct HealthResponse {
     pub index_commit: Option<String>,
 }
 
+/// Server metrics response for monitoring.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MetricsResponse {
+    /// Server uptime information.
+    pub server: ServerMetrics,
+    /// Database connection pool metrics.
+    pub database: DatabaseMetrics,
+    /// Rate limiting metrics (if enabled).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<RateLimitMetrics>,
+}
+
+/// Server-level metrics.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ServerMetrics {
+    /// nxv version.
+    pub version: String,
+    /// Server status.
+    pub status: String,
+}
+
+/// Database connection pool metrics.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DatabaseMetrics {
+    /// Maximum concurrent database connections allowed.
+    pub max_connections: usize,
+    /// Currently available connection permits.
+    pub available_permits: usize,
+    /// Permits currently in use.
+    pub in_use: usize,
+    /// Database operation timeout in seconds.
+    pub timeout_seconds: u64,
+}
+
+/// Rate limiting metrics.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RateLimitMetrics {
+    /// Configured requests per second per IP.
+    pub requests_per_second: u64,
+    /// Configured burst size.
+    pub burst_size: u32,
+    /// Whether rate limiting is enabled.
+    pub enabled: bool,
+}
+
 /// Version history entry for API responses.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct VersionHistorySchema {

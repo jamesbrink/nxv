@@ -27,10 +27,15 @@ use super::types::*;
         handlers::get_last_occurrence,
         handlers::get_stats,
         handlers::health_check,
+        handlers::get_metrics,
     ),
     components(schemas(
         PaginationMeta,
         HealthResponse,
+        MetricsResponse,
+        ServerMetrics,
+        DatabaseMetrics,
+        RateLimitMetrics,
         VersionHistorySchema,
         PackageVersionSchema,
         IndexStatsSchema,
@@ -38,7 +43,8 @@ use super::types::*;
     tags(
         (name = "packages", description = "Package search and information"),
         (name = "stats", description = "Index statistics"),
-        (name = "health", description = "Health checks")
+        (name = "health", description = "Health checks"),
+        (name = "monitoring", description = "Server metrics and monitoring")
     )
 )]
 pub struct ApiDoc;

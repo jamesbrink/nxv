@@ -134,8 +134,12 @@ pub struct AppState {
     /// Semaphore to limit concurrent database operations.
     /// This prevents file descriptor exhaustion and spawn_blocking pool saturation.
     pub db_semaphore: Semaphore,
+    /// Maximum number of concurrent database connections (for metrics).
+    pub max_db_connections: usize,
     /// Timeout for database operations.
     pub db_timeout: Duration,
+    /// Rate limit configuration (for metrics). None if rate limiting is disabled.
+    pub rate_limit_config: Option<RateLimitConfig>,
 }
 
 impl AppState {
@@ -166,7 +170,9 @@ impl AppState {
         Self {
             db_path,
             db_semaphore: Semaphore::new(max_connections),
+            max_db_connections: max_connections,
             db_timeout: Duration::from_secs(timeout_secs),
+            rate_limit_config: None,
         }
     }
 
@@ -182,7 +188,9 @@ impl AppState {
         Self {
             db_path,
             db_semaphore: Semaphore::new(max_connections),
+            max_db_connections: max_connections,
             db_timeout: timeout,
+            rate_limit_config: None,
         }
     }
 
@@ -300,9 +308,10 @@ pub(crate) fn build_router(
             cache_1h,
         ));
 
-    // Health check - never cache (for load balancer checks)
+    // Health check and metrics - never cache (for load balancer checks and monitoring)
     let health_route = Router::new()
         .route("/health", get(handlers::health_check))
+        .route("/metrics", get(handlers::get_metrics))
         .layer(SetResponseHeaderLayer::overriding(
             header::CACHE_CONTROL,
             no_cache,
@@ -360,6 +369,7 @@ pub(crate) fn build_router(
             .per_second(rl_config.requests_per_second)
             .burst_size(rl_config.burst_size)
             .key_extractor(SmartIpKeyExtractor)
+            .use_headers() // Add X-RateLimit-* headers to responses
             .finish()
             .expect("Failed to build rate limiter config");
 
@@ -410,12 +420,12 @@ pub async fn run_server(config: ServerConfig) -> Result<()> {
         return Err(NxvError::NoIndex);
     }
 
-    let state = Arc::new(AppState::new(config.db_path));
+    let mut app_state = AppState::new(config.db_path);
 
     // Log concurrency configuration
     tracing::info!(
-        max_db_connections = state.db_semaphore.available_permits(),
-        db_timeout_secs = state.db_timeout.as_secs(),
+        max_db_connections = app_state.max_db_connections,
+        db_timeout_secs = app_state.db_timeout.as_secs(),
         "Database concurrency limits configured"
     );
 
@@ -458,12 +468,19 @@ pub async fn run_server(config: ServerConfig) -> Result<()> {
             burst_size = burst,
             "Rate limiting enabled (per IP)"
         );
-        RateLimitConfig {
+        let rl_config = RateLimitConfig {
             requests_per_second: rps,
             burst_size: burst,
-        }
+        };
+        // Store config in app state for metrics endpoint
+        app_state.rate_limit_config = Some(RateLimitConfig {
+            requests_per_second: rps,
+            burst_size: burst,
+        });
+        rl_config
     });
 
+    let state = Arc::new(app_state);
     let app = build_router(state, cors, rate_limit);
 
     let addr = format!("{}:{}", config.host, config.port);

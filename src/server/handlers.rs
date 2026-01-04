@@ -623,3 +623,48 @@ pub async fn health_check(State(state): State<Arc<AppState>>) -> Json<HealthResp
         index_commit,
     })
 }
+
+/// Get server metrics for monitoring.
+///
+/// Returns metrics about the server including database connection pool utilization
+/// and rate limiting configuration. Useful for monitoring dashboards and alerting.
+///
+/// # Returns
+///
+/// JSON response with server, database, and rate limit metrics.
+#[utoipa::path(
+    get,
+    path = "/api/v1/metrics",
+    responses(
+        (status = 200, description = "Server metrics", body = MetricsResponse)
+    ),
+    tag = "monitoring"
+)]
+#[instrument(skip(state))]
+pub async fn get_metrics(State(state): State<Arc<AppState>>) -> Json<types::MetricsResponse> {
+    let available_permits = state.db_semaphore.available_permits();
+    let in_use = state.max_db_connections.saturating_sub(available_permits);
+
+    let rate_limit = state
+        .rate_limit_config
+        .as_ref()
+        .map(|config| types::RateLimitMetrics {
+            requests_per_second: config.requests_per_second,
+            burst_size: config.burst_size,
+            enabled: true,
+        });
+
+    Json(types::MetricsResponse {
+        server: types::ServerMetrics {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            status: "ok".to_string(),
+        },
+        database: types::DatabaseMetrics {
+            max_connections: state.max_db_connections,
+            available_permits,
+            in_use,
+            timeout_seconds: state.db_timeout.as_secs(),
+        },
+        rate_limit,
+    })
+}

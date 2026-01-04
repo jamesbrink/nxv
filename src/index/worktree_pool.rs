@@ -184,6 +184,7 @@ impl WorktreeSession {
     ///
     /// # Errors
     /// Returns an error if the session cannot be created or the lock cannot be acquired.
+    #[allow(dead_code)] // Convenience wrapper for with_custom_dir(path, None)
     pub fn new(repo_path: &Path) -> Result<Self> {
         Self::with_custom_dir(repo_path, None)
     }

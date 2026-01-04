@@ -14,7 +14,6 @@
 use crate::db::Database;
 use crate::error::Result;
 use crate::index::extractor::{self, AttrPath};
-use crate::index::worktree_pool::WorktreeSession;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashMap;
 use std::path::Path;
@@ -330,10 +329,11 @@ fn run_backfill_historical<P: AsRef<Path>, Q: AsRef<Path>>(
     config: BackfillConfig,
     shutdown_flag: Arc<AtomicBool>,
 ) -> Result<BackfillResult> {
-    use crate::index::git::WorktreeSession;
+    use crate::index::git::{NixpkgsRepo, WorktreeSession};
 
     let nixpkgs_path = nixpkgs_path.as_ref();
     let db = Database::open(&db_path)?;
+    let repo = NixpkgsRepo::open(nixpkgs_path)?;
 
     // Determine which fields to backfill
     let backfill_source_path =

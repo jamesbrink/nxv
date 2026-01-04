@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 // Re-export worktree pool types for parallel indexing
-pub use worktree_pool::{CommitTask, ExtractionResult, WorktreeSession};
+pub use worktree_pool::{CommitTask, ExtractionResult};
 
 /// Configuration for the indexer.
 #[derive(Debug, Clone)]
@@ -1041,19 +1041,24 @@ impl Indexer {
                 }
             }
 
-            // Convert target_attr_paths to a sorted list for extraction
+            // Convert target_attr_paths to sorted AttrPath instances for extraction
+            // (supports both top-level "hello" and nested "python3Packages.numpy")
             // If empty (e.g., in shallow clones), extract all packages
             let mut target_list: Vec<String> = target_attr_paths.into_iter().collect();
             target_list.sort();
+            let attr_paths: Vec<extractor::AttrPath> = target_list
+                .iter()
+                .map(|s| extractor::AttrPath::parse(s))
+                .collect();
 
             // Extract packages for all systems
             let mut aggregates: HashMap<String, PackageAggregate> = HashMap::new();
 
             for system in systems {
-                let packages = match extractor::extract_packages_for_attrs(
+                let packages = match extractor::extract_packages_for_attr_paths(
                     worktree_path,
                     system,
-                    &target_list,
+                    &attr_paths,
                 ) {
                     Ok(pkgs) => pkgs,
                     Err(e) => {
@@ -1295,8 +1300,10 @@ impl Indexer {
         let mut pending_inserts: Vec<PackageVersion> = Vec::new();
 
         // Create worktree session (cleanup happens automatically in constructor)
-        let session =
-            WorktreeSession::with_custom_dir(nixpkgs_path, self.config.worktree_dir.as_deref())?;
+        let session = worktree_pool::WorktreeSession::with_custom_dir(
+            nixpkgs_path,
+            self.config.worktree_dir.as_deref(),
+        )?;
         eprintln!("Created worktree session: {}", session.session_id);
 
         // Get the first commit for initial checkout
@@ -1392,13 +1399,19 @@ impl Indexer {
 
                         // Extract packages for all systems
                         let mut all_packages = Vec::new();
-                        let target_list: Vec<String> = target_attr_paths.iter().cloned().collect();
+
+                        // Convert target strings to AttrPath for proper extraction
+                        // (supports both top-level "hello" and nested "python3Packages.numpy")
+                        let attr_paths: Vec<extractor::AttrPath> = target_attr_paths
+                            .iter()
+                            .map(|s| extractor::AttrPath::parse(s))
+                            .collect();
 
                         for system in &worker_systems {
-                            match extractor::extract_packages_for_attrs(
+                            match extractor::extract_packages_for_attr_paths(
                                 &worktree_path,
                                 system,
-                                &target_list,
+                                &attr_paths,
                             ) {
                                 Ok(pkgs) => all_packages.extend(pkgs),
                                 Err(_) => continue,

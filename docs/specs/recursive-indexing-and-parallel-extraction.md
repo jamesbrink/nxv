@@ -672,14 +672,14 @@ The main thread uses `target_attr_paths` to:
 
 ### 3.8 Success Criteria
 
-- [ ] Test parallel extraction with 4 workers processes commits correctly
-- [ ] Test ordering is maintained when workers complete out-of-order
+- [x] Test parallel extraction with 4 workers processes commits correctly
+- [x] Test ordering is maintained when workers complete out-of-order
 - [ ] Test graceful shutdown saves valid checkpoint
-- [ ] Test that database is consistent after parallel indexing
+- [x] Test that database is consistent after parallel indexing
 - [ ] Benchmark: 4 workers should be ~3x faster than single-threaded (I/O bound)
 - [x] Test: no `checkout_commit()` calls remain in parallel indexer code path
   - Parallel path uses worktrees exclusively; sequential path retained for compatibility
-- [ ] Test: original nixpkgs working directory unchanged after parallel indexing
+- [x] Test: original nixpkgs working directory unchanged after parallel indexing
 - [x] Test: `ExtractionResult.target_attr_paths` correctly enables deletion detection
   - Used at `mod.rs:1543-1559` for range closing
 
@@ -833,9 +833,9 @@ silently because the extractor can't resolve dotted paths.
 
 ### 7.5 Success Criteria
 
-- [ ] All existing tests pass
+- [x] All existing tests pass
 - [ ] New tests achieve >80% coverage of new code
-- [ ] No regressions in search performance
+- [x] No regressions in search performance
 - [ ] CI pipeline runs full test suite
 
 ---

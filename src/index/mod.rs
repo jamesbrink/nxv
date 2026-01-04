@@ -12,7 +12,7 @@ use crate::db::Database;
 use crate::db::queries::PackageVersion;
 use crate::error::{NxvError, Result};
 use chrono::{DateTime, Utc};
-use git::NixpkgsRepo;
+use git::{NixpkgsRepo, WorktreeSession};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
@@ -787,7 +787,7 @@ impl Indexer {
     ) -> Result<IndexResult> {
         let total_commits = commits.len();
         let systems = &self.config.systems;
-        let nixpkgs_path = nixpkgs_path.as_ref();
+        let _nixpkgs_path = nixpkgs_path.as_ref(); // Original path kept for reference but worktree used
 
         // Set up progress bar if enabled
         let multi_progress = if self.config.show_progress {
@@ -834,11 +834,11 @@ impl Indexer {
             .first()
             .ok_or_else(|| NxvError::Git(git2::Error::from_str("No commits to process")))?;
 
-        // Save original HEAD ref so we can restore it after indexing
-        let original_ref = repo.head_ref()?;
+        // Create a worktree session for isolated checkouts (auto-cleaned on drop)
+        let session = WorktreeSession::new(repo, &first_commit.hash)?;
+        let worktree_path = session.path();
 
-        repo.checkout_commit(&first_commit.hash)?;
-        let mut file_attr_map = build_file_attr_map(nixpkgs_path, systems)?;
+        let mut file_attr_map = build_file_attr_map(worktree_path, systems)?;
         let mut mapping_commit = first_commit.hash.clone();
 
         // Helper to print warnings without disrupting progress bar
@@ -898,8 +898,8 @@ impl Indexer {
                 ));
             }
 
-            // Checkout the commit
-            if let Err(e) = repo.checkout_commit(&commit.hash) {
+            // Checkout the commit in the worktree
+            if let Err(e) = session.checkout(&commit.hash) {
                 warn(
                     &progress_bar,
                     format!("Failed to checkout {}: {}", &commit.short_hash, e),
@@ -928,7 +928,7 @@ impl Indexer {
             // Check if we need to refresh the file map
             if should_refresh_file_map(&changed_paths)
                 && mapping_commit != commit.hash
-                && let Ok(map) = build_file_attr_map(nixpkgs_path, systems)
+                && let Ok(map) = build_file_attr_map(worktree_path, systems)
             {
                 file_attr_map = map;
                 mapping_commit = commit.hash.clone();
@@ -994,21 +994,23 @@ impl Indexer {
             let mut aggregates: HashMap<String, PackageAggregate> = HashMap::new();
 
             for system in systems {
-                let packages =
-                    match extractor::extract_packages_for_attrs(nixpkgs_path, system, &target_list)
-                    {
-                        Ok(pkgs) => pkgs,
-                        Err(e) => {
-                            warn(
-                                &progress_bar,
-                                format!(
-                                    "Extraction failed at {} ({}): {}",
-                                    &commit.short_hash, system, e
-                                ),
-                            );
-                            continue;
-                        }
-                    };
+                let packages = match extractor::extract_packages_for_attrs(
+                    worktree_path,
+                    system,
+                    &target_list,
+                ) {
+                    Ok(pkgs) => pkgs,
+                    Err(e) => {
+                        warn(
+                            &progress_bar,
+                            format!(
+                                "Extraction failed at {} ({}): {}",
+                                &commit.short_hash, system, e
+                            ),
+                        );
+                        continue;
+                    }
+                };
 
                 for pkg in packages {
                     let key = format!("{}::{}", pkg.attribute_path, pkg.version);
@@ -1142,14 +1144,7 @@ impl Indexer {
             ));
         }
 
-        // Restore original HEAD ref
-        if let Err(e) = repo.restore_ref(&original_ref) {
-            eprintln!(
-                "Warning: Failed to restore original git state ({}): {}",
-                original_ref, e
-            );
-        }
-
+        // WorktreeSession auto-cleans on drop - no need to restore HEAD
         Ok(result)
     }
 }

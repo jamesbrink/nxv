@@ -86,6 +86,110 @@ impl Drop for Worktree {
     }
 }
 
+/// A managed worktree session for safe, fast commit traversal.
+///
+/// Creates a persistent worktree in a temp directory that can be quickly
+/// checked out to different commits without modifying the main repository.
+/// Auto-cleans up on drop (even on panic).
+///
+/// # Example
+///
+/// ```ignore
+/// let session = WorktreeSession::new(&repo, "abc123")?;
+/// for commit in commits {
+///     session.checkout(&commit.hash)?;
+///     // Work with files at session.path()
+/// }
+/// // Auto-cleanup on drop
+/// ```
+pub struct WorktreeSession {
+    /// The underlying worktree.
+    _worktree: Worktree,
+    /// Path to the worktree directory.
+    worktree_path: PathBuf,
+    /// Temp directory that owns the worktree path (cleaned up on drop).
+    _temp_dir: tempfile::TempDir,
+}
+
+impl WorktreeSession {
+    /// Create a new worktree session in a temp directory.
+    ///
+    /// The worktree is initially checked out to `initial_commit`.
+    /// Use `checkout()` to switch to different commits.
+    pub fn new(repo: &NixpkgsRepo, initial_commit: &str) -> Result<Self> {
+        let temp_dir = tempfile::tempdir().map_err(|e| {
+            NxvError::Git(git2::Error::from_str(&format!(
+                "Failed to create temp directory for worktree: {}",
+                e
+            )))
+        })?;
+
+        let worktree_path = temp_dir.path().join("nixpkgs");
+        let worktree = repo.create_worktree(&worktree_path, initial_commit)?;
+
+        Ok(Self {
+            _worktree: worktree,
+            worktree_path,
+            _temp_dir: temp_dir,
+        })
+    }
+
+    /// Checkout a different commit in this worktree.
+    ///
+    /// This is fast because it doesn't create a new worktree, just
+    /// updates the existing one.
+    pub fn checkout(&self, commit_hash: &str) -> Result<()> {
+        // Clean any uncommitted changes first
+        let clean_output = Command::new("git")
+            .args(["clean", "-fdx"])
+            .current_dir(&self.worktree_path)
+            .output()
+            .map_err(|e| {
+                NxvError::Git(git2::Error::from_str(&format!(
+                    "Failed to run git clean: {}",
+                    e
+                )))
+            })?;
+
+        if !clean_output.status.success() {
+            let stderr = String::from_utf8_lossy(&clean_output.stderr);
+            return Err(NxvError::Git(git2::Error::from_str(&format!(
+                "git clean failed: {}",
+                stderr.lines().take(3).collect::<Vec<_>>().join(" ")
+            ))));
+        }
+
+        // Checkout the commit
+        let output = Command::new("git")
+            .args(["checkout", "-f", commit_hash])
+            .current_dir(&self.worktree_path)
+            .output()
+            .map_err(|e| {
+                NxvError::Git(git2::Error::from_str(&format!(
+                    "Failed to run git checkout: {}",
+                    e
+                )))
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(NxvError::Git(git2::Error::from_str(&format!(
+                "git checkout failed: {}",
+                stderr.lines().take(3).collect::<Vec<_>>().join(" ")
+            ))));
+        }
+
+        Ok(())
+    }
+
+    /// Get the path to the worktree directory.
+    ///
+    /// Use this path for file operations (e.g., running nix eval).
+    pub fn path(&self) -> &Path {
+        &self.worktree_path
+    }
+}
+
 impl NixpkgsRepo {
     /// Open a nixpkgs repository at the given path.
     ///
@@ -417,6 +521,7 @@ impl NixpkgsRepo {
     /// // let repo = NixpkgsRepo::open("/path/to/nixpkgs").unwrap();
     /// // repo.checkout_commit("a1b2c3d").unwrap();
     /// ```
+    #[allow(dead_code)] // Kept for tests and future use; production uses WorktreeSession
     pub fn checkout_commit(&self, hash: &str) -> Result<()> {
         // Remove any stale index.lock file that might be left from a crashed process
         self.remove_index_lock();
@@ -454,6 +559,7 @@ impl NixpkgsRepo {
     /// # Ok(())
     /// # }
     /// ```
+    #[allow(dead_code)]
     fn checkout_commit_libgit2(&self, hash: &str) -> Result<()> {
         let oid = Oid::from_str(hash).map_err(|_| {
             NxvError::Git(git2::Error::from_str(&format!(
@@ -494,6 +600,7 @@ impl NixpkgsRepo {
     /// let repo = NixpkgsRepo::open("/path/to/nixpkgs").unwrap();
     /// repo.checkout_commit_cli("0123456789abcdef0123456789abcdef01234567").unwrap();
     /// ```
+    #[allow(dead_code)]
     fn checkout_commit_cli(&self, hash: &str) -> Result<()> {
         let repo_path = self.path();
 
@@ -593,6 +700,7 @@ impl NixpkgsRepo {
     /// // either a ref like "refs/heads/main" or a 40-char commit hash
     /// assert!(head_ref.starts_with("refs/heads/") || head_ref.len() == 40);
     /// ```
+    #[allow(dead_code)] // Kept for potential future use; production uses WorktreeSession
     pub fn head_ref(&self) -> Result<String> {
         let head = self.repo.head()?;
         if head.is_branch() {
@@ -635,6 +743,7 @@ impl NixpkgsRepo {
     /// # Ok(())
     /// # }
     /// ```
+    #[allow(dead_code)] // Kept for potential future use; production uses WorktreeSession
     pub fn restore_ref(&self, ref_name: &str) -> Result<()> {
         if ref_name.starts_with("refs/") {
             // It's a branch reference - checkout the branch

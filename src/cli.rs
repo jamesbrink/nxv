@@ -417,6 +417,20 @@ pub struct BackfillArgs {
     /// Without this flag, only packages in the current checkout can be updated.
     #[arg(long)]
     pub history: bool,
+
+    /// Filter to packages first seen after this date (YYYY-MM-DD).
+    /// Only applies in historical mode.
+    #[arg(long)]
+    pub since: Option<String>,
+
+    /// Filter to packages first seen before this date (YYYY-MM-DD).
+    /// Only applies in historical mode.
+    #[arg(long)]
+    pub until: Option<String>,
+
+    /// Maximum number of commits to process (historical mode only).
+    #[arg(long)]
+    pub max_commits: Option<usize>,
 }
 
 /// Arguments for the reset command (feature-gated).

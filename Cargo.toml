@@ -57,6 +57,12 @@ indicatif = "0.18"
 # Signal handling
 ctrlc = { version = "3.5", optional = true }
 
+# Unix file locking (for worktree pool)
+libc = { version = "0.2", optional = true }
+
+# Channels for parallel indexing
+crossbeam-channel = { version = "0.5", optional = true }
+
 # API server
 axum = "0.8"
 tokio = { version = "1.48", features = ["rt-multi-thread", "macros", "signal"] }
@@ -110,7 +116,7 @@ harness = false
 
 [features]
 default = []
-indexer = ["git2", "ctrlc"]  # Enable indexer functionality
+indexer = ["git2", "ctrlc", "libc", "crossbeam-channel"]  # Enable indexer functionality
 
 # Release profile optimizations
 [profile.release]

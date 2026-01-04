@@ -13,8 +13,8 @@
 
 use crate::db::Database;
 use crate::error::Result;
-use crate::index::extractor;
-use crate::index::git::NixpkgsRepo;
+use crate::index::extractor::{self, AttrPath};
+use crate::index::worktree_pool::WorktreeSession;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashMap;
 use std::path::Path;
@@ -244,15 +244,22 @@ fn run_backfill_head<P: AsRef<Path>, Q: AsRef<Path>>(
 
         let batch_vec: Vec<String> = batch.to_vec();
 
+        // Convert attr strings to AttrPath instances for nested package support
+        // (e.g., "python3Packages.numpy" → AttrPath(["python3Packages", "numpy"]))
+        let attr_paths: Vec<AttrPath> = batch_vec.iter().map(|s| AttrPath::parse(s)).collect();
+
         // Extract from x86_64-linux (most common)
-        let packages =
-            match extractor::extract_packages_for_attrs(nixpkgs_path, "x86_64-linux", &batch_vec) {
-                Ok(pkgs) => pkgs,
-                Err(e) => {
-                    progress.println(format!("Warning: Extraction failed for batch: {}", e));
-                    continue;
-                }
-            };
+        let packages = match extractor::extract_packages_for_attr_paths(
+            nixpkgs_path,
+            "x86_64-linux",
+            &attr_paths,
+        ) {
+            Ok(pkgs) => pkgs,
+            Err(e) => {
+                progress.println(format!("Warning: Extraction failed for batch: {}", e));
+                continue;
+            }
+        };
 
         // Build lookup map
         let mut metadata_map: HashMap<String, PackageMetadata> = HashMap::new();
@@ -327,7 +334,6 @@ fn run_backfill_historical<P: AsRef<Path>, Q: AsRef<Path>>(
 
     let nixpkgs_path = nixpkgs_path.as_ref();
     let db = Database::open(&db_path)?;
-    let repo = NixpkgsRepo::open(nixpkgs_path)?;
 
     // Determine which fields to backfill
     let backfill_source_path =
@@ -383,6 +389,7 @@ fn run_backfill_historical<P: AsRef<Path>, Q: AsRef<Path>>(
     }
 
     println!("Traversing git history to extract metadata...");
+    println!("Using worktree to avoid modifying main nixpkgs checkout.");
 
     // Apply max_commits limit
     let commits_to_process: Vec<_> = if let Some(max) = config.max_commits {
@@ -426,6 +433,7 @@ fn run_backfill_historical<P: AsRef<Path>, Q: AsRef<Path>>(
         if shutdown_flag.load(Ordering::SeqCst) {
             result.was_interrupted = true;
             progress.finish_with_message("Interrupted");
+            // Worktree cleanup happens automatically via Drop
             return Ok(result);
             // WorktreeSession auto-cleans up on drop
         }
@@ -440,20 +448,25 @@ fn run_backfill_historical<P: AsRef<Path>, Q: AsRef<Path>>(
             continue;
         }
 
+        // Convert attr strings to AttrPath instances for nested package support
+        let attr_path_objs: Vec<AttrPath> = attr_paths.iter().map(|s| AttrPath::parse(s)).collect();
+
         // Extract metadata for these packages from the worktree
-        let packages =
-            match extractor::extract_packages_for_attrs(session.path(), "x86_64-linux", attr_paths)
-            {
-                Ok(pkgs) => pkgs,
-                Err(e) => {
-                    progress.println(format!(
-                        "Warning: Extraction failed for {}: {}",
-                        &commit[..12.min(commit.len())],
-                        e
-                    ));
-                    continue;
-                }
-            };
+        let packages = match extractor::extract_packages_for_attr_paths(
+            session.path(),
+            "x86_64-linux",
+            &attr_path_objs,
+        ) {
+            Ok(pkgs) => pkgs,
+            Err(e) => {
+                progress.println(format!(
+                    "Warning: Extraction failed for {}: {}",
+                    &commit[..12.min(commit.len())],
+                    e
+                ));
+                continue;
+            }
+        };
 
         // Build lookup map
         let mut metadata_map: HashMap<String, PackageMetadata> = HashMap::new();

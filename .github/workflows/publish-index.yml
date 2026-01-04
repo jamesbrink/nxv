@@ -121,10 +121,16 @@ jobs:
             exit 1
           fi
 
-          # Use GitHub API to count commits ahead on nixpkgs-unstable branch
-          # Note: We index from nixpkgs-unstable for tested packages with binary cache
+          # Fetch the current nixpkgs-unstable channel commit
+          # This ensures we only index tested commits with binary cache availability
+          echo "Fetching nixpkgs-unstable channel commit..."
+          UNSTABLE_COMMIT=$(curl -sL https://channels.nixos.org/nixpkgs-unstable/git-revision)
+          echo "nixpkgs-unstable commit: ${UNSTABLE_COMMIT}"
+          echo "unstable_commit=${UNSTABLE_COMMIT}" >> $GITHUB_OUTPUT
+
+          # Use GitHub API to count commits between last indexed and nixpkgs-unstable
           echo "Querying GitHub API for commit count..."
-          AHEAD=$(gh api "repos/NixOS/nixpkgs/compare/${LAST_COMMIT}...nixpkgs-unstable" --jq '.ahead_by' 2>/dev/null || echo "")
+          AHEAD=$(gh api "repos/NixOS/nixpkgs/compare/${LAST_COMMIT}...${UNSTABLE_COMMIT}" --jq '.ahead_by' 2>/dev/null || echo "")
 
           if [ -z "$AHEAD" ] || [ "$AHEAD" = "null" ]; then
             echo "::error::GitHub API failed or commit ${LAST_COMMIT} not found in nixpkgs-unstable."
@@ -154,13 +160,20 @@ jobs:
       - name: Clone nixpkgs (shallow)
         if: ${{ steps.clone-strategy.outputs.strategy != 'skip' }}
         run: |
-          echo "Performing shallow clone with depth ${{ steps.clone-strategy.outputs.depth }}..."
+          UNSTABLE_COMMIT="${{ steps.clone-strategy.outputs.unstable_commit }}"
+          echo "Performing shallow clone to nixpkgs-unstable commit ${UNSTABLE_COMMIT}..."
+
+          # Clone master branch with enough depth, then checkout the unstable commit
           git clone --depth ${{ steps.clone-strategy.outputs.depth }} \
             --single-branch --branch nixpkgs-unstable \
             https://github.com/NixOS/nixpkgs.git nixpkgs
 
-          echo "Clone complete. Commit count in clone:"
-          git -C nixpkgs rev-list --count HEAD
+          # Ensure we have the unstable commit and check it out
+          git -C nixpkgs fetch origin ${UNSTABLE_COMMIT} --depth 1 || true
+          git -C nixpkgs checkout ${UNSTABLE_COMMIT}
+
+          echo "Clone complete at nixpkgs-unstable commit:"
+          git -C nixpkgs rev-parse HEAD
 
       - name: Run indexer
         if: ${{ steps.clone-strategy.outputs.strategy != 'skip' }}

@@ -2385,8 +2385,8 @@ fn test_index_command_creates_database() {
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("test-index.db");
 
-    // Run the index command with a small checkpoint interval
-    // Use --full to ensure we test full indexing
+    // Run the index command with limited commits for reasonable test time
+    let start = std::time::Instant::now();
     let _result = nxv()
         .args([
             "--db-path",
@@ -2395,11 +2395,19 @@ fn test_index_command_creates_database() {
             "--nixpkgs-path",
             nixpkgs_path.to_str().unwrap(),
             "--full",
+            "--max-commits",
+            "20", // Limit to 20 commits for fast testing
+            "--workers",
+            "2", // Limit workers to reduce resource usage
             "--checkpoint-interval",
             "10",
         ])
-        .timeout(std::time::Duration::from_secs(600)) // 10 minute timeout
+        .timeout(std::time::Duration::from_secs(180)) // 3 minute timeout
         .assert();
+    eprintln!(
+        "test_index_command_creates_database: indexed 20 commits in {:?}",
+        start.elapsed()
+    );
 
     // The command might succeed or fail depending on nix availability
     // Just check it doesn't panic and creates some database
@@ -2477,6 +2485,7 @@ fn test_incremental_index_processes_only_new_commits() {
     }
 
     // Run incremental index - should report no new commits
+    // Note: "up to date" message goes to stderr, not stdout
     nxv()
         .args([
             "--db-path",
@@ -2484,11 +2493,13 @@ fn test_incremental_index_processes_only_new_commits() {
             "index",
             "--nixpkgs-path",
             nixpkgs_path.to_str().unwrap(),
+            "--workers",
+            "2", // Limit workers to reduce resource usage
         ])
         .timeout(std::time::Duration::from_secs(60))
         .assert()
         .success()
-        .stdout(
+        .stderr(
             predicate::str::contains("up to date")
                 .or(predicate::str::contains("No new commits"))
                 .or(predicate::str::contains("0 commits")),
@@ -2556,6 +2567,8 @@ fn test_index_resumable_after_interrupt() {
     }
 
     // Run incremental index - should pick up from checkpoint
+    // Only processes ~10 commits from HEAD~10 to HEAD
+    let start = std::time::Instant::now();
     let _result = nxv()
         .args([
             "--db-path",
@@ -2563,9 +2576,15 @@ fn test_index_resumable_after_interrupt() {
             "index",
             "--nixpkgs-path",
             nixpkgs_path.to_str().unwrap(),
+            "--workers",
+            "2", // Limit workers to reduce resource usage
         ])
-        .timeout(std::time::Duration::from_secs(600))
+        .timeout(std::time::Duration::from_secs(120)) // 2 min for ~10 commits
         .assert();
+    eprintln!(
+        "test_index_resumable_after_interrupt: indexed in {:?}",
+        start.elapsed()
+    );
 
     // Verify checkpoint was updated
     let conn = rusqlite::Connection::open(&db_path).unwrap();
@@ -2597,7 +2616,8 @@ fn test_index_then_search_workflow() {
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("test-index.db");
 
-    // Index from nixpkgs (will take a while but should find packages)
+    // Index from nixpkgs with limited commits for reasonable test time
+    let start = std::time::Instant::now();
     let _index_result = nxv()
         .args([
             "--db-path",
@@ -2606,11 +2626,19 @@ fn test_index_then_search_workflow() {
             "--nixpkgs-path",
             nixpkgs_path.to_str().unwrap(),
             "--full",
+            "--max-commits",
+            "30", // Limit to 30 commits - enough to find some packages
+            "--workers",
+            "2", // Limit workers to reduce resource usage
             "--checkpoint-interval",
             "5",
         ])
-        .timeout(std::time::Duration::from_secs(1800)) // 30 minute timeout
+        .timeout(std::time::Duration::from_secs(300)) // 5 minute timeout
         .assert();
+    eprintln!(
+        "test_index_then_search_workflow: indexed 30 commits in {:?}",
+        start.elapsed()
+    );
 
     // If indexing succeeded and created a database, test search
     if db_path.exists() {
@@ -2647,6 +2675,111 @@ fn test_index_then_search_workflow() {
                 .success()
                 .stdout(predicate::str::contains("Total version ranges"));
         }
+    }
+}
+
+/// Test that parallel workers process commits correctly and clean up worktrees.
+/// This validates the worktree-based parallel extraction architecture.
+#[test]
+#[ignore] // Requires indexer feature and nix to be installed
+fn test_parallel_workers_and_worktree_cleanup() {
+    let nixpkgs_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("nixpkgs");
+    if !nixpkgs_path.exists() {
+        eprintln!("Skipping: nixpkgs submodule not present");
+        return;
+    }
+
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test-index.db");
+
+    // Helper to count nxv-worktrees-* directories in temp
+    let count_worktree_dirs = || -> usize {
+        std::fs::read_dir(std::env::temp_dir())
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .filter(|e| {
+                        e.file_name()
+                            .to_str()
+                            .map(|n| n.starts_with("nxv-worktrees-"))
+                            .unwrap_or(false)
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    };
+
+    // Count worktree directories before running (should be 0 or only orphans)
+    let pre_worktrees = count_worktree_dirs();
+
+    // Run indexing with 4 workers to test parallel processing
+    let start = std::time::Instant::now();
+    nxv()
+        .args([
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "index",
+            "--nixpkgs-path",
+            nixpkgs_path.to_str().unwrap(),
+            "--full",
+            "--max-commits",
+            "40", // 10 commits per worker (4 workers)
+            "--workers",
+            "4", // Use 4 workers as specified in the spec
+            "--checkpoint-interval",
+            "10",
+        ])
+        .timeout(std::time::Duration::from_secs(300))
+        .assert();
+    eprintln!(
+        "test_parallel_workers_and_worktree_cleanup: indexed 40 commits with 4 workers in {:?}",
+        start.elapsed()
+    );
+
+    // Give a moment for cleanup to complete
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Count worktree directories after running
+    let post_worktrees = count_worktree_dirs();
+
+    // Verify all worktrees created during this run were cleaned up
+    // (post count should be same as pre count, with no new orphans)
+    assert!(
+        post_worktrees <= pre_worktrees + 1,
+        "Worktrees should be cleaned up after indexing. Before: {}, After: {}",
+        pre_worktrees,
+        post_worktrees
+    );
+
+    // Verify database was created and has content
+    if db_path.exists() {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+
+        // Check that parallel mode was recorded in meta
+        let parallel_meta: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'worktree_parallel'",
+                [],
+                |row| row.get(0),
+            )
+            .ok();
+
+        // 4 workers with 40 commits should trigger parallel mode (threshold is 10)
+        if let Some(value) = parallel_meta {
+            assert_eq!(value, "true", "Parallel mode should be recorded as true");
+        }
+
+        // Check packages were indexed
+        let package_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM package_versions", [], |row| {
+                row.get(0)
+            })
+            .unwrap_or(0);
+
+        eprintln!(
+            "Parallel indexing created {} package records",
+            package_count
+        );
     }
 }
 

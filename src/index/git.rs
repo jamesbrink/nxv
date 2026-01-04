@@ -16,6 +16,46 @@ pub const MIN_INDEXABLE_DATE: &str = "2017-01-01";
 #[allow(dead_code)]
 pub const MIN_INDEXABLE_COMMIT: &str = "75ce71481842b0b9b1f81cd99cebf7aeba64243d";
 
+/// URL to fetch the current nixpkgs-unstable channel commit hash.
+/// This channel contains tested commits from master with binary cache availability.
+pub const NIXPKGS_UNSTABLE_URL: &str = "https://channels.nixos.org/nixpkgs-unstable/git-revision";
+
+/// Fetch the current commit hash for the nixpkgs-unstable channel.
+///
+/// Returns the 40-character commit hash that the nixpkgs-unstable channel
+/// currently points to. This is the latest master commit that has passed
+/// Hydra CI tests and has binaries available in the cache.
+///
+/// # Errors
+///
+/// Returns an error if the HTTP request fails or the response is invalid.
+pub fn fetch_nixpkgs_unstable_commit() -> Result<String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| NxvError::NetworkMessage(format!("Failed to create HTTP client: {}", e)))?;
+
+    let response = client.get(NIXPKGS_UNSTABLE_URL).send().map_err(|e| {
+        NxvError::NetworkMessage(format!("Failed to fetch nixpkgs-unstable commit: {}", e))
+    })?;
+
+    let commit = response
+        .text()
+        .map_err(|e| NxvError::NetworkMessage(format!("Failed to read response: {}", e)))?
+        .trim()
+        .to_string();
+
+    // Validate it looks like a commit hash
+    if commit.len() != 40 || !commit.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(NxvError::NetworkMessage(format!(
+            "Invalid commit hash from nixpkgs-unstable: {}",
+            commit
+        )));
+    }
+
+    Ok(commit)
+}
+
 /// Information about a git commit.
 #[derive(Debug, Clone)]
 pub struct CommitInfo {
@@ -997,7 +1037,8 @@ impl NixpkgsRepo {
     /// Reset the repository to a clean state by hard-resetting to `target` (default `origin/nixpkgs-unstable`)
     /// and removing all untracked files and directories.
     ///
-    /// If `target` is `None`, `origin/nixpkgs-unstable` is used.
+    /// If `target` is `None`, `origin/nixpkgs-unstable` is used. Callers can use
+    /// [`fetch_nixpkgs_unstable_commit`] to get the current nixpkgs-unstable channel commit.
     ///
     /// # Errors
     /// Returns an `Err` if the underlying git commands (`reset` or `clean`) fail or cannot be executed.

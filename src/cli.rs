@@ -343,6 +343,34 @@ pub struct IndexArgs {
     /// Limit the number of commits processed.
     #[arg(long)]
     pub max_commits: Option<usize>,
+
+    /// Number of parallel workers for extraction (default: half of CPU count).
+    #[arg(long, default_value_t = 0)]
+    pub workers: usize,
+
+    /// Recursively extract nested package scopes (e.g., python3Packages, qt6).
+    /// Uses a static whitelist of known recursive scopes.
+    #[arg(long, conflicts_with_all = ["no_recurse", "recurse_all"])]
+    pub recurse: bool,
+
+    /// Explicitly skip nested package scopes (for faster incremental updates).
+    /// This is the opposite of --recurse and is the default behavior.
+    #[arg(long, conflicts_with_all = ["recurse", "recurse_all"])]
+    pub no_recurse: bool,
+
+    /// Recursively extract ALL nested scopes with recurseForDerivations = true.
+    /// More thorough than --recurse but slower (dynamically detects scopes).
+    #[arg(long, conflicts_with_all = ["recurse", "no_recurse"])]
+    pub recurse_all: bool,
+
+    /// Maximum recursion depth for nested packages.
+    #[arg(long, default_value_t = 2)]
+    pub recurse_depth: usize,
+
+    /// Custom directory for git worktrees (default: system temp directory).
+    /// Worktrees are used for parallel extraction without modifying the main checkout.
+    #[arg(long)]
+    pub worktree_dir: Option<PathBuf>,
 }
 
 /// Fields that can be backfilled from nixpkgs.
@@ -441,7 +469,7 @@ pub struct ResetArgs {
     #[arg(long)]
     pub nixpkgs_path: PathBuf,
 
-    /// Reset to a specific commit or ref (default: origin/nixpkgs-unstable).
+    /// Reset to a specific commit or ref (default: nixpkgs-unstable channel).
     #[arg(long)]
     pub to: Option<String>,
 

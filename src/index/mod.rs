@@ -612,7 +612,7 @@ impl Indexer {
         eprintln!(
             "Found {} indexable commits with package changes (starting from {})",
             total_commits,
-            git::MIN_INDEXABLE_DATE
+            self.config.since.as_deref().unwrap_or(git::MIN_INDEXABLE_DATE)
         );
 
         self.process_commits(&mut db, &nixpkgs_path, &repo, commits, None)

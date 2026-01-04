@@ -1221,6 +1221,9 @@ fn cmd_backfill(cli: &Cli, args: &cli::BackfillArgs) -> Result<()> {
         limit: args.limit,
         dry_run: args.dry_run,
         use_history: args.history,
+        since: args.since.clone(),
+        until: args.until.clone(),
+        max_commits: args.max_commits,
     };
 
     // Set up Ctrl+C handler

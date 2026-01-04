@@ -102,6 +102,10 @@ pub struct SearchResult {
     pub total: usize,
     /// Whether there are more results available.
     pub has_more: bool,
+    /// The actual limit applied by the server (may be less than requested due to server caps).
+    /// Only set when using a remote API.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applied_limit: Option<usize>,
 }
 
 /// Performs a package search using the provided options and returns paginated results.
@@ -164,6 +168,7 @@ pub fn execute_search(conn: &Connection, opts: &SearchOptions) -> Result<SearchR
         data,
         total,
         has_more,
+        applied_limit: None, // Local searches don't cap limits
     })
 }
 

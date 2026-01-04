@@ -4,6 +4,37 @@ use crate::error::Result;
 use chrono::{DateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Escapes SQL LIKE wildcard characters (`%`, `_`, `\`) in user input.
+///
+/// This prevents SQL wildcard injection where users could pass `%` to match
+/// all records or `_` to match single characters unexpectedly.
+///
+/// The escaped string should be used with `LIKE ? ESCAPE '\'` in SQL queries.
+fn escape_like_pattern(input: &str) -> String {
+    input
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+/// Escapes user input for use in SQLite FTS5 MATCH queries.
+///
+/// FTS5 has its own query syntax with operators like `NOT`, `OR`, `AND`, `*`, `^`,
+/// and special quoting rules. To prevent users from accidentally or maliciously
+/// using these operators, we wrap the input in double quotes (forcing phrase matching)
+/// and escape any internal double quotes by doubling them.
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!(escape_fts5_query("python"), "\"python\"");
+/// assert_eq!(escape_fts5_query("NOT python"), "\"NOT python\"");
+/// assert_eq!(escape_fts5_query("say \"hello\""), "\"say \"\"hello\"\"\"");
+/// ```
+fn escape_fts5_query(input: &str) -> String {
+    format!("\"{}\"", input.replace('"', "\"\""))
+}
+
 /// Unix timestamp for when flake.nix was added to nixpkgs (2020-02-10 00:00:00 UTC).
 /// Commits before this date require legacy nix-shell syntax instead of flake references.
 /// See: https://github.com/NixOS/nixpkgs/pull/68897
@@ -209,13 +240,13 @@ pub fn search_by_name(
     let sql = if exact {
         "SELECT * FROM package_versions WHERE name = ? ORDER BY last_commit_date DESC"
     } else {
-        "SELECT * FROM package_versions WHERE name LIKE ? ORDER BY last_commit_date DESC"
+        "SELECT * FROM package_versions WHERE name LIKE ? ESCAPE '\\' ORDER BY last_commit_date DESC"
     };
 
     let pattern = if exact {
         name.to_string()
     } else {
-        format!("{}%", name)
+        format!("{}%", escape_like_pattern(name))
     };
 
     let mut stmt = conn.prepare(sql)?;
@@ -231,9 +262,9 @@ pub fn search_by_name(
 /// Search for packages by attribute path.
 pub fn search_by_attr(conn: &rusqlite::Connection, attr_path: &str) -> Result<Vec<PackageVersion>> {
     let mut stmt = conn.prepare(
-        "SELECT * FROM package_versions WHERE attribute_path LIKE ? ORDER BY last_commit_date DESC",
+        "SELECT * FROM package_versions WHERE attribute_path LIKE ? ESCAPE '\\' ORDER BY last_commit_date DESC",
     )?;
-    let pattern = format!("{}%", attr_path);
+    let pattern = format!("{}%", escape_like_pattern(attr_path));
     let rows = stmt.query_map([&pattern], PackageVersion::from_row)?;
 
     let mut results = Vec::new();
@@ -270,10 +301,10 @@ pub fn search_by_name_version(
 ) -> Result<Vec<PackageVersion>> {
     // Search by attribute_path (package) and version prefix
     let mut stmt = conn.prepare(
-        "SELECT * FROM package_versions WHERE attribute_path LIKE ? AND version LIKE ? ORDER BY first_commit_date DESC",
+        "SELECT * FROM package_versions WHERE attribute_path LIKE ? ESCAPE '\\' AND version LIKE ? ESCAPE '\\' ORDER BY first_commit_date DESC",
     )?;
-    let package_pattern = format!("{}%", package);
-    let version_pattern = format!("{}%", version);
+    let package_pattern = format!("{}%", escape_like_pattern(package));
+    let version_pattern = format!("{}%", escape_like_pattern(version));
     let rows = stmt.query_map(
         [&package_pattern, &version_pattern],
         PackageVersion::from_row,
@@ -425,12 +456,24 @@ pub fn get_version_history(
         let first_ts: i64 = row.get(1)?;
         let last_ts: i64 = row.get(2)?;
         let is_insecure: i64 = row.get(3)?;
-        Ok((
-            version,
-            Utc.timestamp_opt(first_ts, 0).unwrap(),
-            Utc.timestamp_opt(last_ts, 0).unwrap(),
-            is_insecure != 0,
-        ))
+
+        let first_seen = Utc.timestamp_opt(first_ts, 0).single().ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                1,
+                rusqlite::types::Type::Integer,
+                format!("Invalid first_seen timestamp: {}", first_ts).into(),
+            )
+        })?;
+
+        let last_seen = Utc.timestamp_opt(last_ts, 0).single().ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                2,
+                rusqlite::types::Type::Integer,
+                format!("Invalid last_seen timestamp: {}", last_ts).into(),
+            )
+        })?;
+
+        Ok((version, first_seen, last_seen, is_insecure != 0))
     })?;
 
     let mut results = Vec::new();
@@ -495,8 +538,8 @@ pub fn get_stats(conn: &rusqlite::Connection) -> Result<IndexStats> {
         total_ranges,
         unique_names,
         unique_versions,
-        oldest_commit_date: oldest.map(|ts| Utc.timestamp_opt(ts, 0).unwrap()),
-        newest_commit_date: newest.map(|ts| Utc.timestamp_opt(ts, 0).unwrap()),
+        oldest_commit_date: oldest.and_then(|ts| Utc.timestamp_opt(ts, 0).single()),
+        newest_commit_date: newest.and_then(|ts| Utc.timestamp_opt(ts, 0).single()),
         last_indexed_commit,
         last_indexed_date,
     })
@@ -533,7 +576,9 @@ pub fn search_by_description(
         "#,
     )?;
 
-    let rows = stmt.query_map([query], PackageVersion::from_row)?;
+    // Escape user input to prevent FTS5 syntax injection
+    let escaped_query = escape_fts5_query(query);
+    let rows = stmt.query_map([&escaped_query], PackageVersion::from_row)?;
 
     let mut results = Vec::new();
     for row in rows {
@@ -591,12 +636,7 @@ pub fn complete_package_prefix(
     let mut stmt = conn.prepare(
         "SELECT DISTINCT attribute_path FROM package_versions WHERE attribute_path LIKE ? ESCAPE '\\' ORDER BY attribute_path LIMIT ?",
     )?;
-    // Escape SQL LIKE wildcards to prevent user input from matching unintended patterns
-    let escaped_prefix = prefix
-        .replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_");
-    let pattern = format!("{}%", escaped_prefix);
+    let pattern = format!("{}%", escape_like_pattern(prefix));
     let rows = stmt.query_map(rusqlite::params![&pattern, limit as i64], |row| row.get(0))?;
 
     let mut results = Vec::new();
@@ -894,6 +934,85 @@ mod tests {
     }
 
     #[test]
+    fn test_search_by_name_escapes_wildcards() {
+        let (_dir, db) = create_test_db();
+        // SQL LIKE wildcards should be escaped - % should not match everything
+        let results = search_by_name(db.connection(), "%", false).unwrap();
+        assert!(results.is_empty(), "% should not match as wildcard");
+
+        let results = search_by_name(db.connection(), "_", false).unwrap();
+        assert!(results.is_empty(), "_ should not match as wildcard");
+
+        // Test that % in the middle doesn't act as wildcard
+        let results = search_by_name(db.connection(), "py%on", false).unwrap();
+        assert!(
+            results.is_empty(),
+            "% in middle should not match as wildcard"
+        );
+
+        // Backslash should be escaped too
+        let results = search_by_name(db.connection(), "\\", false).unwrap();
+        assert!(results.is_empty(), "\\ should not cause issues");
+    }
+
+    #[test]
+    fn test_search_by_attr_escapes_wildcards() {
+        let (_dir, db) = create_test_db();
+        // SQL LIKE wildcards should be escaped - % should not match everything
+        let results = search_by_attr(db.connection(), "%").unwrap();
+        assert!(results.is_empty(), "% should not match as wildcard");
+
+        let results = search_by_attr(db.connection(), "_").unwrap();
+        assert!(results.is_empty(), "_ should not match as wildcard");
+
+        // Test that normal prefix search still works
+        let results = search_by_attr(db.connection(), "python").unwrap();
+        assert_eq!(results.len(), 3); // python (x2 versions) + python2
+    }
+
+    #[test]
+    fn test_search_by_name_version_escapes_wildcards() {
+        let (_dir, db) = create_test_db();
+        // SQL LIKE wildcards should be escaped
+        let results = search_by_name_version(db.connection(), "%", "%").unwrap();
+        assert!(
+            results.is_empty(),
+            "% should not match as wildcard in either field"
+        );
+
+        let results = search_by_name_version(db.connection(), "python", "%").unwrap();
+        assert!(
+            results.is_empty(),
+            "% should not match as wildcard in version"
+        );
+
+        let results = search_by_name_version(db.connection(), "%", "3.11").unwrap();
+        assert!(
+            results.is_empty(),
+            "% should not match as wildcard in package"
+        );
+
+        // Underscore should also be escaped
+        let results = search_by_name_version(db.connection(), "_", "_").unwrap();
+        assert!(results.is_empty(), "_ should not match as wildcard");
+    }
+
+    #[test]
+    fn test_escape_like_pattern() {
+        // Test the helper function directly
+        assert_eq!(escape_like_pattern("normal"), "normal");
+        assert_eq!(escape_like_pattern("%"), "\\%");
+        assert_eq!(escape_like_pattern("_"), "\\_");
+        assert_eq!(escape_like_pattern("\\"), "\\\\");
+        assert_eq!(
+            escape_like_pattern("foo%bar_baz\\qux"),
+            "foo\\%bar\\_baz\\\\qux"
+        );
+        assert_eq!(escape_like_pattern(""), "");
+        assert_eq!(escape_like_pattern("%%%"), "\\%\\%\\%");
+    }
+
+    #[test]
     fn test_package_version_first_commit_short() {
         let (_dir, db) = create_test_db();
         let results = search_by_name(db.connection(), "python-3.11.0", true).unwrap();
@@ -954,6 +1073,78 @@ mod tests {
         let results =
             search_by_description(db.connection(), "nonexistent description xyz").unwrap();
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_search_by_description_fts5_operators_escaped() {
+        let (_dir, db) = create_test_db();
+        // FTS5 operators like NOT, OR, AND should be treated as literal text, not operators
+        // Previously this would error with "fts5: syntax error near NOT"
+        let results = search_by_description(db.connection(), "NOT python").unwrap();
+        assert!(
+            results.is_empty(),
+            "Should not error and should return empty (no literal 'NOT python' in descriptions)"
+        );
+
+        let results = search_by_description(db.connection(), "python OR rust").unwrap();
+        assert!(
+            results.is_empty(),
+            "Should treat 'OR' as literal text, not operator"
+        );
+
+        let results = search_by_description(db.connection(), "python AND runtime").unwrap();
+        assert!(
+            results.is_empty(),
+            "Should treat 'AND' as literal text, not operator"
+        );
+    }
+
+    #[test]
+    fn test_search_by_description_fts5_special_chars_escaped() {
+        let (_dir, db) = create_test_db();
+        // Special FTS5 characters should be escaped and not cause syntax errors
+        // Note: FTS5's tokenizer may strip punctuation, so `py*` might still match "python"
+        // The key is that the query doesn't error and wildcards aren't interpreted as FTS5 operators
+
+        // Wildcard - should not cause syntax error
+        let results = search_by_description(db.connection(), "py*");
+        assert!(
+            results.is_ok(),
+            "Wildcard should not cause FTS5 syntax error"
+        );
+
+        // Caret - should not cause syntax error (tokenizer may strip it)
+        let results = search_by_description(db.connection(), "^python");
+        assert!(results.is_ok(), "Caret should not cause FTS5 syntax error");
+
+        // Unbalanced quotes should not cause errors
+        let results = search_by_description(db.connection(), "\"unbalanced");
+        assert!(
+            results.is_ok(),
+            "Unbalanced quote should not cause FTS5 syntax error"
+        );
+    }
+
+    #[test]
+    fn test_search_by_description_with_quotes() {
+        let (_dir, db) = create_test_db();
+        // Quotes in user input should be properly escaped
+        let results = search_by_description(db.connection(), "say \"hello\"").unwrap();
+        assert!(
+            results.is_empty(),
+            "Quoted text should be handled without error"
+        );
+    }
+
+    #[test]
+    fn test_escape_fts5_query() {
+        // Test the helper function directly
+        assert_eq!(escape_fts5_query("python"), "\"python\"");
+        assert_eq!(escape_fts5_query("NOT python"), "\"NOT python\"");
+        assert_eq!(escape_fts5_query("say \"hello\""), "\"say \"\"hello\"\"\"");
+        assert_eq!(escape_fts5_query(""), "\"\"");
+        assert_eq!(escape_fts5_query("py*"), "\"py*\"");
+        assert_eq!(escape_fts5_query("a OR b AND c"), "\"a OR b AND c\"");
     }
 
     // Helper to create a PackageVersion for testing helper methods

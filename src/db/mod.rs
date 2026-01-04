@@ -7,6 +7,11 @@ use crate::error::{NxvError, Result};
 use queries::PackageVersion;
 use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
+use std::time::Duration;
+
+/// Default timeout for SQLite busy handler (in seconds).
+/// When the database is locked, SQLite will retry for this duration before returning SQLITE_BUSY.
+const DEFAULT_BUSY_TIMEOUT_SECS: u64 = 5;
 
 /// Current schema version.
 #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
@@ -51,12 +56,20 @@ impl Database {
     ///
     /// Validates that the database schema is compatible with this version of nxv.
     /// Returns an error if the database was created with a newer, incompatible schema version.
+    ///
+    /// The connection is configured with a busy timeout to prevent indefinite blocking
+    /// when the database is locked by another process.
     pub fn open_readonly<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
         if !path.exists() {
             return Err(NxvError::NoIndex);
         }
         let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+
+        // Set busy timeout to prevent indefinite blocking on database locks.
+        // This is critical for preventing thread pool exhaustion under load.
+        conn.busy_timeout(Duration::from_secs(DEFAULT_BUSY_TIMEOUT_SECS))?;
+
         let db = Self { conn };
 
         // Validate schema version compatibility

@@ -18,6 +18,13 @@
 #               # Logging configuration
 #               logging.level = "nxv=info,tower_http=info,warn";
 #               logging.format = "json";  # or "text" (default)
+#               # Database concurrency limits (prevents resource exhaustion)
+#               database.maxConnections = 32;  # Max concurrent DB operations
+#               database.timeoutSeconds = 30;  # Timeout for DB operations
+#               # Rate limiting (optional, per IP)
+#               rateLimit.enable = true;
+#               rateLimit.requestsPerSecond = 10;  # 10 req/s per IP
+#               rateLimit.burst = 30;  # Allow bursts up to 30
 #             };
 #           }
 #         ];
@@ -178,6 +185,51 @@ in
         '';
       };
     };
+
+    database = {
+      maxConnections = mkOption {
+        type = types.int;
+        default = 32;
+        description = ''
+          Maximum number of concurrent database operations.
+          This limits file descriptor usage and prevents spawn_blocking pool
+          exhaustion under heavy load. Increase for high-traffic deployments
+          with sufficient system resources.
+        '';
+      };
+
+      timeoutSeconds = mkOption {
+        type = types.int;
+        default = 30;
+        description = ''
+          Timeout for database operations in seconds.
+          Operations exceeding this timeout will return HTTP 504 Gateway Timeout.
+          Increase if you have a very large database or slow storage.
+        '';
+      };
+    };
+
+    rateLimit = {
+      enable = mkEnableOption "IP-based rate limiting";
+
+      requestsPerSecond = mkOption {
+        type = types.int;
+        default = 10;
+        description = ''
+          Maximum requests per second per IP address.
+          Requests exceeding this rate will receive HTTP 429 Too Many Requests.
+        '';
+      };
+
+      burst = mkOption {
+        type = types.nullOr types.int;
+        default = null;
+        description = ''
+          Burst size for rate limiting. Allows temporary bursts above the
+          sustained rate. Defaults to 2x requestsPerSecond if not set.
+        '';
+      };
+    };
   };
 
   config = mkIf cfg.enable {
@@ -205,8 +257,14 @@ in
 
       environment = {
         RUST_LOG = cfg.logging.level;
+        NXV_MAX_DB_CONNECTIONS = toString cfg.database.maxConnections;
+        NXV_DB_TIMEOUT_SECS = toString cfg.database.timeoutSeconds;
       } // lib.optionalAttrs (cfg.logging.format == "json") {
         NXV_LOG_FORMAT = "json";
+      } // lib.optionalAttrs cfg.rateLimit.enable {
+        NXV_RATE_LIMIT = toString cfg.rateLimit.requestsPerSecond;
+      } // lib.optionalAttrs (cfg.rateLimit.enable && cfg.rateLimit.burst != null) {
+        NXV_RATE_LIMIT_BURST = toString cfg.rateLimit.burst;
       };
 
       serviceConfig = let
@@ -246,6 +304,9 @@ in
         '';
         Restart = "on-failure";
         RestartSec = "5s";
+
+        # Resource limits
+        LimitNOFILE = 65536;  # Increase file descriptor limit for high concurrency
 
         # Hardening options
         NoNewPrivileges = true;

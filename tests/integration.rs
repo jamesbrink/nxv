@@ -129,7 +129,31 @@ fn test_version_displays() {
         .arg("--version")
         .assert()
         .success()
-        .stdout(predicate::str::contains("nxv"));
+        .stdout(predicate::str::contains("nxv"))
+        // Version should contain semantic version from Cargo.toml
+        .stdout(predicate::str::is_match(r"\d+\.\d+\.\d+").unwrap());
+}
+
+#[test]
+fn test_version_format() {
+    // Test that --version output has expected format
+    let output = nxv().arg("--version").output().expect("Failed to run nxv");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Must contain "nxv" and a version number
+    assert!(
+        stdout.contains("nxv"),
+        "Version output should contain 'nxv'"
+    );
+    assert!(
+        stdout.contains(env!("CARGO_PKG_VERSION")),
+        "Version output should contain package version from Cargo.toml"
+    );
+
+    // If NXV_GIT_REV is set (Nix builds), version should include git rev in parens
+    // Format: "nxv X.Y.Z (abc1234)"
+    // When not set (cargo builds), format is just: "nxv X.Y.Z"
+    // Both are valid, so we just verify the base format works
 }
 
 #[test]

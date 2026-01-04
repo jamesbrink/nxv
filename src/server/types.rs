@@ -111,15 +111,20 @@ pub struct SearchParams {
     pub offset: usize,
 }
 
-/// Default number of results per page.
-///
+/// Maximum allowed limit for any query to prevent memory exhaustion.
+/// Requests with higher limits will be capped to this value.
+pub const MAX_LIMIT: usize = 100;
+
+/// Default limit for search queries.
+const DEFAULT_LIMIT: usize = 50;
+
 /// # Examples
 ///
 /// ```
 /// assert_eq!(crate::default_limit(), 50);
 /// ```
 fn default_limit() -> usize {
-    50
+    DEFAULT_LIMIT
 }
 
 /// Description search query parameters.
@@ -145,6 +150,51 @@ pub struct HealthResponse {
     /// Last indexed commit hash (if available).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub index_commit: Option<String>,
+}
+
+/// Server metrics response for monitoring.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MetricsResponse {
+    /// Server uptime information.
+    pub server: ServerMetrics,
+    /// Database connection pool metrics.
+    pub database: DatabaseMetrics,
+    /// Rate limiting metrics (if enabled).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<RateLimitMetrics>,
+}
+
+/// Server-level metrics.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ServerMetrics {
+    /// nxv version.
+    pub version: String,
+    /// Server status.
+    pub status: String,
+}
+
+/// Database connection pool metrics.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DatabaseMetrics {
+    /// Maximum concurrent database connections allowed.
+    pub max_connections: usize,
+    /// Currently available connection permits.
+    pub available_permits: usize,
+    /// Permits currently in use.
+    pub in_use: usize,
+    /// Database operation timeout in seconds.
+    pub timeout_seconds: u64,
+}
+
+/// Rate limiting metrics.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RateLimitMetrics {
+    /// Configured requests per second per IP.
+    pub requests_per_second: u64,
+    /// Configured burst size.
+    pub burst_size: u32,
+    /// Whether rate limiting is enabled.
+    pub enabled: bool,
 }
 
 /// Version history entry for API responses.

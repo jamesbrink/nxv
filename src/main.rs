@@ -11,6 +11,7 @@ mod output;
 mod paths;
 mod remote;
 mod search;
+pub mod version;
 
 #[cfg(feature = "indexer")]
 mod index;
@@ -330,10 +331,18 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
 
     // Show "more results" message after the table
     if result.has_more && !cli.quiet {
-        eprintln!(
-            "{} more results. Use --limit 0 for all.",
-            result.total - result.data.len()
-        );
+        let remaining = result.total - result.data.len();
+        // Check if using remote API (applied_limit is set)
+        if let Some(applied) = result.applied_limit {
+            // Remote API mode - always show server limit since --limit 0 won't help
+            eprintln!(
+                "{} more results. Server limits responses to {} results per request.",
+                remaining, applied
+            );
+        } else {
+            // Local mode - user can request unlimited results
+            eprintln!("{} more results. Use --limit 0 for all.", remaining);
+        }
     }
 
     Ok(())
@@ -1394,6 +1403,8 @@ fn cmd_serve(cli: &Cli, args: &cli::ServeArgs) -> Result<()> {
         db_path: cli.db_path.clone(),
         cors: args.cors || args.cors_origins.is_some(),
         cors_origins: args.cors_origins.clone(),
+        rate_limit: args.rate_limit,
+        rate_limit_burst: args.rate_limit_burst,
     };
 
     // Create tokio runtime and run the server

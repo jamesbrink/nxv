@@ -3,6 +3,7 @@
 use crate::output::OutputFormat;
 use crate::paths;
 use crate::search::SortOrder;
+use crate::version;
 use clap::{Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use std::path::PathBuf;
@@ -10,7 +11,7 @@ use std::path::PathBuf;
 /// nxv - Nix Version Index
 #[derive(Parser, Debug)]
 #[command(name = "nxv")]
-#[command(author, version, about, long_about = None)]
+#[command(author, version = version::clap_version(), long_version = version::long_version(), about, long_about = None)]
 pub struct Cli {
     /// Path to the index database.
     #[arg(long, env = "NXV_DB_PATH", default_value_os_t = paths::get_index_path())]

@@ -48,11 +48,17 @@
         # Read crate metadata from Cargo.toml
         crateInfo = craneLib.crateNameFromCargoToml { cargoToml = ./Cargo.toml; };
 
+        # Git revision for version string (available when flake is in a git repo)
+        gitRev = self.shortRev or self.dirtyShortRev or "";
+
         # Common build arguments
         commonArgs = {
           inherit src;
           inherit (crateInfo) pname version;
           strictDeps = true;
+
+          # Pass git revision to Rust build for version string
+          NXV_GIT_REV = gitRev;
 
           buildInputs = [
             pkgs.openssl
@@ -150,6 +156,9 @@
             inherit (crateInfo) pname version;
             strictDeps = true;
 
+            # Pass git revision to Rust build for version string
+            NXV_GIT_REV = gitRev;
+
             CARGO_BUILD_TARGET = target;
             CARGO_BUILD_RUSTFLAGS = "-C target-feature=+crt-static -C linker=${muslCC}";
 
@@ -224,6 +233,9 @@
             inherit src;
             inherit (crateInfo) pname version;
             strictDeps = true;
+
+            # Pass git revision to Rust build for version string
+            NXV_GIT_REV = gitRev;
 
             CARGO_BUILD_TARGET = target;
             CARGO_BUILD_RUSTFLAGS = "-C target-feature=+crt-static -C linker=${muslCC}";

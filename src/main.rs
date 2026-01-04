@@ -11,6 +11,7 @@ mod output;
 mod paths;
 mod remote;
 mod search;
+pub mod version;
 
 #[cfg(feature = "indexer")]
 mod index;

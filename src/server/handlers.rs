@@ -21,6 +21,7 @@ use tracing::instrument;
 use crate::db::Database;
 use crate::db::queries::{self, PackageVersion};
 use crate::search::{self, SearchOptions};
+use crate::version;
 
 use super::AppState;
 use super::error::ApiError;
@@ -619,7 +620,7 @@ pub async fn health_check(State(state): State<Arc<AppState>>) -> Json<HealthResp
 
     Json(HealthResponse {
         status: "ok".to_string(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
+        version: version::full_version(),
         index_commit,
     })
 }
@@ -656,7 +657,7 @@ pub async fn get_metrics(State(state): State<Arc<AppState>>) -> Json<types::Metr
 
     Json(types::MetricsResponse {
         server: types::ServerMetrics {
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            version: version::full_version(),
             status: "ok".to_string(),
         },
         database: types::DatabaseMetrics {

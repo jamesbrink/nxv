@@ -73,8 +73,8 @@ nxv is a CLI tool for discovering specific versions of Nix packages across nixpk
 
 ### Channel Strategy
 
-- **Single channel: nixpkgs-unstable (master branch)**
-- Rationale: All package development happens in unstable; stable branches only backport security fixes
+- **Single channel: nixpkgs-unstable**
+- Rationale: Packages on nixpkgs-unstable have passed Hydra CI and have binary cache; stable branches only backport security fixes
 - Future: Schema supports adding `channel` column if multi-channel is needed
 
 ### Index Distribution

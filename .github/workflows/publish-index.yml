@@ -121,13 +121,13 @@ jobs:
             exit 1
           fi
 
-          # Use GitHub API to count commits ahead on master branch
-          # Note: We index from master, not nixos-unstable, as it has more packages
+          # Use GitHub API to count commits ahead on nixpkgs-unstable branch
+          # Note: We index from nixpkgs-unstable for tested packages with binary cache
           echo "Querying GitHub API for commit count..."
-          AHEAD=$(gh api "repos/NixOS/nixpkgs/compare/${LAST_COMMIT}...master" --jq '.ahead_by' 2>/dev/null || echo "")
+          AHEAD=$(gh api "repos/NixOS/nixpkgs/compare/${LAST_COMMIT}...nixpkgs-unstable" --jq '.ahead_by' 2>/dev/null || echo "")
 
           if [ -z "$AHEAD" ] || [ "$AHEAD" = "null" ]; then
-            echo "::error::GitHub API failed or commit ${LAST_COMMIT} not found in master."
+            echo "::error::GitHub API failed or commit ${LAST_COMMIT} not found in nixpkgs-unstable."
             echo "The indexed commit may have been garbage collected or rebased out."
             exit 1
           fi
@@ -149,14 +149,14 @@ jobs:
         run: |
           echo "Index is already up to date, nothing to do!"
           echo "## Index Already Current" >> $GITHUB_STEP_SUMMARY
-          echo "The index is already up to date with nixpkgs master. No update needed." >> $GITHUB_STEP_SUMMARY
+          echo "The index is already up to date with nixpkgs-unstable. No update needed." >> $GITHUB_STEP_SUMMARY
 
       - name: Clone nixpkgs (shallow)
         if: ${{ steps.clone-strategy.outputs.strategy != 'skip' }}
         run: |
           echo "Performing shallow clone with depth ${{ steps.clone-strategy.outputs.depth }}..."
           git clone --depth ${{ steps.clone-strategy.outputs.depth }} \
-            --single-branch --branch master \
+            --single-branch --branch nixpkgs-unstable \
             https://github.com/NixOS/nixpkgs.git nixpkgs
 
           echo "Clone complete. Commit count in clone:"

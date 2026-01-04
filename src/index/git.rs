@@ -137,29 +137,10 @@ impl WorktreeSession {
     /// Checkout a different commit in this worktree.
     ///
     /// This is fast because it doesn't create a new worktree, just
-    /// updates the existing one.
+    /// updates the existing one. Uses `git checkout -f` which forces
+    /// the checkout and discards any local changes.
     pub fn checkout(&self, commit_hash: &str) -> Result<()> {
-        // Clean any uncommitted changes first
-        let clean_output = Command::new("git")
-            .args(["clean", "-fdx"])
-            .current_dir(&self.worktree_path)
-            .output()
-            .map_err(|e| {
-                NxvError::Git(git2::Error::from_str(&format!(
-                    "Failed to run git clean: {}",
-                    e
-                )))
-            })?;
-
-        if !clean_output.status.success() {
-            let stderr = String::from_utf8_lossy(&clean_output.stderr);
-            return Err(NxvError::Git(git2::Error::from_str(&format!(
-                "git clean failed: {}",
-                stderr.lines().take(3).collect::<Vec<_>>().join(" ")
-            ))));
-        }
-
-        // Checkout the commit
+        // Force checkout - no need for git clean since nix eval doesn't modify files
         let output = Command::new("git")
             .args(["checkout", "-f", commit_hash])
             .current_dir(&self.worktree_path)

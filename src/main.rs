@@ -330,10 +330,18 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
 
     // Show "more results" message after the table
     if result.has_more && !cli.quiet {
-        eprintln!(
-            "{} more results. Use --limit 0 for all.",
-            result.total - result.data.len()
-        );
+        let remaining = result.total - result.data.len();
+        // Check if using remote API (applied_limit is set)
+        if let Some(applied) = result.applied_limit {
+            // Remote API mode - always show server limit since --limit 0 won't help
+            eprintln!(
+                "{} more results. Server limits responses to {} results per request.",
+                remaining, applied
+            );
+        } else {
+            // Local mode - user can request unlimited results
+            eprintln!("{} more results. Use --limit 0 for all.", remaining);
+        }
     }
 
     Ok(())

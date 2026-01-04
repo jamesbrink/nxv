@@ -22,7 +22,6 @@ struct ApiResponse<T> {
 #[derive(Debug, Deserialize)]
 struct PaginationMeta {
     total: usize,
-    #[allow(dead_code)]
     limit: usize,
     #[allow(dead_code)]
     offset: usize,
@@ -157,15 +156,16 @@ impl ApiClient {
 
         let response: ApiResponse<Vec<PackageVersion>> = self.get(&url)?;
 
-        let (total, has_more) = match response.meta {
-            Some(meta) => (meta.total, meta.has_more),
-            None => (response.data.len(), false),
+        let (total, has_more, applied_limit) = match response.meta {
+            Some(meta) => (meta.total, meta.has_more, Some(meta.limit)),
+            None => (response.data.len(), false, None),
         };
 
         Ok(SearchResult {
             data: response.data,
             total,
             has_more,
+            applied_limit,
         })
     }
 

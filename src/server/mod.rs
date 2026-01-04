@@ -92,18 +92,24 @@ pub fn init_tracing() {
         EnvFilter::new("nxv=info,tower_http=info,warn")
     });
 
-    if use_json {
+    // Use try_init() to avoid panicking if a subscriber is already set
+    // (e.g., in tests or if run_server is called multiple times)
+    let result = if use_json {
         // JSON format for log aggregation systems
         tracing_subscriber::registry()
             .with(filter)
             .with(fmt::layer().json())
-            .init();
+            .try_init()
     } else {
         // Human-readable format for development
         tracing_subscriber::registry()
             .with(filter)
             .with(fmt::layer().with_target(true).with_thread_ids(false))
-            .init();
+            .try_init()
+    };
+
+    if let Err(e) = result {
+        eprintln!("Note: tracing subscriber already initialized: {}", e);
     }
 }
 

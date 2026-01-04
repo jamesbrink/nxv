@@ -228,7 +228,7 @@ pub async fn get_package(
     .map_err(|e| ApiError::internal(format!("Task join error: {}", e)))??;
 
     if packages.is_empty() {
-        tracing::debug!("Package not found");
+        tracing::trace!("Package not found");
         return Err(ApiError::not_found(format!("Package '{}' not found", attr)));
     }
 
@@ -268,7 +268,7 @@ pub async fn get_version_history(
     .map_err(|e| ApiError::internal(format!("Task join error: {}", e)))??;
 
     if history.is_empty() {
-        tracing::debug!("Package not found");
+        tracing::trace!("Package not found");
         return Err(ApiError::not_found(format!("Package '{}' not found", attr)));
     }
 
@@ -338,7 +338,7 @@ pub async fn get_version_info(
             Ok(Json(ApiResponse::new(p)))
         }
         None => {
-            tracing::debug!("Version not found");
+            tracing::trace!("Version not found");
             Err(ApiError::not_found(format!(
                 "Version '{}' of '{}' not found",
                 version, attr
@@ -404,7 +404,7 @@ pub async fn get_first_occurrence(
             Ok(Json(ApiResponse::new(p)))
         }
         None => {
-            tracing::debug!("Version not found");
+            tracing::trace!("Version not found");
             Err(ApiError::not_found(format!(
                 "Version '{}' of '{}' not found",
                 version, attr
@@ -451,7 +451,7 @@ pub async fn get_last_occurrence(
             Ok(Json(ApiResponse::new(p)))
         }
         None => {
-            tracing::debug!("Version not found");
+            tracing::trace!("Version not found");
             Err(ApiError::not_found(format!(
                 "Version '{}' of '{}' not found",
                 version, attr

@@ -15,6 +15,9 @@
 #               host = "0.0.0.0";
 #               port = 8080;
 #               cors.enable = true;
+#               # Logging configuration
+#               logging.level = "nxv=info,tower_http=info,warn";
+#               logging.format = "json";  # or "text" (default)
 #             };
 #           }
 #         ];
@@ -150,6 +153,31 @@ in
         '';
       };
     };
+
+    logging = {
+      level = mkOption {
+        type = types.str;
+        default = "nxv=info,tower_http=info,warn";
+        example = "nxv=debug,tower_http=debug,info";
+        description = ''
+          Log level configuration using RUST_LOG syntax.
+          Common patterns:
+          - "nxv=info,tower_http=info,warn" (default)
+          - "nxv=debug,tower_http=debug,info" (verbose)
+          - "nxv=trace,tower_http=trace,debug" (very verbose)
+        '';
+      };
+
+      format = mkOption {
+        type = types.enum [ "text" "json" ];
+        default = "text";
+        description = ''
+          Log output format.
+          - "text": Human-readable format for development and debugging.
+          - "json": Structured JSON format for log aggregation systems.
+        '';
+      };
+    };
   };
 
   config = mkIf cfg.enable {
@@ -174,6 +202,12 @@ in
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
       wantedBy = [ "multi-user.target" ];
+
+      environment = {
+        RUST_LOG = cfg.logging.level;
+      } // lib.optionalAttrs (cfg.logging.format == "json") {
+        NXV_LOG_FORMAT = "json";
+      };
 
       serviceConfig = let
         manifestArgs = lib.optionalString (cfg.manifestUrl != null)

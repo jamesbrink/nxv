@@ -818,6 +818,22 @@
       // Format number with commas
       const formatNumber = (n) => n?.toLocaleString() ?? '-';
 
+      // Get user-friendly error message for HTTP status codes
+      const getHttpErrorMessage = (status, defaultMsg = 'Request failed') => {
+        switch (status) {
+          case 502:
+            return 'Bad gateway - the server is temporarily unavailable. Please try again later.';
+          case 503:
+            return 'Service unavailable - the server is overloaded or under maintenance.';
+          case 504:
+            return 'Gateway timeout - the server took too long to respond. Please try again.';
+          default:
+            return status >= 500
+              ? `Server error (HTTP ${status}). Please try again later.`
+              : `${defaultMsg} (HTTP ${status})`;
+        }
+      };
+
       // Format date nicely
       const formatDate = (dateStr) => {
         const d = new Date(dateStr);
@@ -1082,19 +1098,9 @@
             const contentType = res.headers.get('content-type');
             if (contentType && contentType.includes('application/json')) {
               const errorJson = await res.json().catch(() => null);
-              throw new Error(errorJson?.message || errorJson?.error || `Search failed (HTTP ${res.status})`);
+              throw new Error(errorJson?.message || errorJson?.error || getHttpErrorMessage(res.status, 'Search failed'));
             }
-            // Handle common HTTP errors with friendly messages
-            if (res.status === 504) {
-              throw new Error('Gateway timeout - the server took too long to respond. Please try again.');
-            } else if (res.status === 502) {
-              throw new Error('Bad gateway - the server is temporarily unavailable. Please try again later.');
-            } else if (res.status === 503) {
-              throw new Error('Service unavailable - the server is overloaded or under maintenance.');
-            } else if (res.status >= 500) {
-              throw new Error(`Server error (HTTP ${res.status}). Please try again later.`);
-            }
-            throw new Error(`Request failed (HTTP ${res.status})`);
+            throw new Error(getHttpErrorMessage(res.status, 'Search failed'));
           }
 
           const json = await res.json();
@@ -1362,16 +1368,7 @@
         try {
           const res = await fetch(`${API_BASE}/packages/${encodeURIComponent(attr)}/history`);
           if (!res.ok) {
-            // Handle common HTTP errors with friendly messages
-            let errorMsg = `Failed to load version history (HTTP ${res.status})`;
-            if (res.status === 504) {
-              errorMsg = 'Gateway timeout - the server took too long to respond. Please try again.';
-            } else if (res.status === 502) {
-              errorMsg = 'Bad gateway - the server is temporarily unavailable.';
-            } else if (res.status === 503) {
-              errorMsg = 'Service unavailable - the server is overloaded or under maintenance.';
-            }
-            body.innerHTML = `<p>${escapeHtml(errorMsg)}</p>`;
+            body.innerHTML = `<p>${escapeHtml(getHttpErrorMessage(res.status, 'Failed to load version history'))}</p>`;
             return;
           }
 

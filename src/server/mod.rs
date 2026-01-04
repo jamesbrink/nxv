@@ -45,6 +45,9 @@ use axum::{
     routing::get,
 };
 use tokio::sync::Semaphore;
+use tower_governor::{
+    GovernorLayer, governor::GovernorConfigBuilder, key_extractor::SmartIpKeyExtractor,
+};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer};
@@ -216,6 +219,18 @@ pub struct ServerConfig {
     pub cors: bool,
     /// Specific CORS origins (if cors is true but we want to restrict).
     pub cors_origins: Option<Vec<String>>,
+    /// Rate limit per IP (requests per second). None = disabled.
+    pub rate_limit: Option<u64>,
+    /// Burst size for rate limiting. None = 2x rate_limit.
+    pub rate_limit_burst: Option<u32>,
+}
+
+/// Rate limiter configuration for the server.
+pub struct RateLimitConfig {
+    /// Requests per second per IP.
+    pub requests_per_second: u64,
+    /// Burst size (requests allowed in a burst).
+    pub burst_size: u32,
 }
 
 /// Constructs the HTTP router with API endpoints, frontend routes, OpenAPI documentation, tracing,
@@ -232,6 +247,7 @@ pub struct ServerConfig {
 ///
 /// - `state`: shared application state to attach to the router.
 /// - `cors`: optional CORS layer to apply to the router; if `None`, no CORS layer is applied.
+/// - `rate_limit`: optional rate limiter configuration; if `None`, rate limiting is disabled.
 ///
 /// # Returns
 ///
@@ -244,10 +260,14 @@ pub struct ServerConfig {
 /// use std::path::PathBuf;
 /// // Construct minimal AppState for example purposes.
 /// let state = Arc::new(crate::server::AppState::new(PathBuf::from("/tmp/db.sqlite")));
-/// let router = crate::server::build_router(state, None);
+/// let router = crate::server::build_router(state, None, None);
 /// // router can now be served with Axum.
 /// ```
-pub(crate) fn build_router(state: Arc<AppState>, cors: Option<CorsLayer>) -> Router {
+pub(crate) fn build_router(
+    state: Arc<AppState>,
+    cors: Option<CorsLayer>,
+    rate_limit: Option<RateLimitConfig>,
+) -> Router {
     // Cache header values
     let cache_1h = HeaderValue::from_static("public, max-age=3600"); // 1 hour
     let cache_24h = HeaderValue::from_static("public, max-age=86400"); // 24 hours
@@ -334,6 +354,18 @@ pub(crate) fn build_router(state: Arc<AppState>, cors: Option<CorsLayer>) -> Rou
         app = app.layer(cors_layer);
     }
 
+    // Apply rate limiting if configured
+    if let Some(rl_config) = rate_limit {
+        let governor_conf = GovernorConfigBuilder::default()
+            .per_second(rl_config.requests_per_second)
+            .burst_size(rl_config.burst_size)
+            .key_extractor(SmartIpKeyExtractor)
+            .finish()
+            .expect("Failed to build rate limiter config");
+
+        app = app.layer(GovernorLayer::new(governor_conf));
+    }
+
     app
 }
 
@@ -357,6 +389,8 @@ pub(crate) fn build_router(state: Arc<AppState>, cors: Option<CorsLayer>) -> Rou
 ///         db_path: PathBuf::from("/path/to/index.db"),
 ///         cors: false,
 ///         cors_origins: None,
+///         rate_limit: Some(10),        // 10 requests per second per IP
+///         rate_limit_burst: Some(30),  // Allow bursts up to 30
 ///     };
 ///     // Run the server (will block until shutdown)
 ///     let _ = run_server(config).await;
@@ -416,7 +450,21 @@ pub async fn run_server(config: ServerConfig) -> Result<()> {
         None
     };
 
-    let app = build_router(state, cors);
+    // Configure rate limiting if enabled
+    let rate_limit = config.rate_limit.map(|rps| {
+        let burst = config.rate_limit_burst.unwrap_or((rps * 2) as u32);
+        tracing::info!(
+            requests_per_second = rps,
+            burst_size = burst,
+            "Rate limiting enabled (per IP)"
+        );
+        RateLimitConfig {
+            requests_per_second: rps,
+            burst_size: burst,
+        }
+    });
+
+    let app = build_router(state, cors, rate_limit);
 
     let addr = format!("{}:{}", config.host, config.port);
     let listener = tokio::net::TcpListener::bind(&addr)
@@ -518,9 +566,22 @@ mod tests {
 
     /// Helper to make a request and get the response body as JSON.
     async fn get_json(app: &Router, uri: &str) -> (StatusCode, Value) {
+        get_json_with_ip(app, uri, None).await
+    }
+
+    /// Helper to make a request with an optional X-Forwarded-For header.
+    async fn get_json_with_ip(
+        app: &Router,
+        uri: &str,
+        client_ip: Option<&str>,
+    ) -> (StatusCode, Value) {
+        let mut builder = Request::builder().uri(uri);
+        if let Some(ip) = client_ip {
+            builder = builder.header("X-Forwarded-For", ip);
+        }
         let response = app
             .clone()
-            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .oneshot(builder.body(Body::empty()).unwrap())
             .await
             .unwrap();
 
@@ -537,7 +598,7 @@ mod tests {
         create_test_db(&db_path);
 
         let state = Arc::new(AppState::new(db_path));
-        let app = build_router(state, None);
+        let app = build_router(state, None, None);
 
         let (status, json) = get_json(&app, "/api/v1/health").await;
 
@@ -554,7 +615,7 @@ mod tests {
         create_test_db(&db_path);
 
         let state = Arc::new(AppState::new(db_path));
-        let app = build_router(state, None);
+        let app = build_router(state, None, None);
 
         let (status, json) = get_json(&app, "/api/v1/search?q=python").await;
 
@@ -572,7 +633,7 @@ mod tests {
         create_test_db(&db_path);
 
         let state = Arc::new(AppState::new(db_path));
-        let app = build_router(state, None);
+        let app = build_router(state, None, None);
 
         let (status, json) = get_json(&app, "/api/v1/search?q=hello&exact=true").await;
 
@@ -589,7 +650,7 @@ mod tests {
         create_test_db(&db_path);
 
         let state = Arc::new(AppState::new(db_path));
-        let app = build_router(state, None);
+        let app = build_router(state, None, None);
 
         let (status, json) = get_json(&app, "/api/v1/search?q=python&version=3.12").await;
 
@@ -606,7 +667,7 @@ mod tests {
         create_test_db(&db_path);
 
         let state = Arc::new(AppState::new(db_path));
-        let app = build_router(state, None);
+        let app = build_router(state, None, None);
 
         let (status, json) = get_json(&app, "/api/v1/search/description?q=runtime").await;
 
@@ -623,7 +684,7 @@ mod tests {
         create_test_db(&db_path);
 
         let state = Arc::new(AppState::new(db_path));
-        let app = build_router(state, None);
+        let app = build_router(state, None, None);
 
         let (status, json) = get_json(&app, "/api/v1/packages/hello").await;
 
@@ -641,7 +702,7 @@ mod tests {
         create_test_db(&db_path);
 
         let state = Arc::new(AppState::new(db_path));
-        let app = build_router(state, None);
+        let app = build_router(state, None, None);
 
         let (status, json) = get_json(&app, "/api/v1/packages/nonexistent").await;
 
@@ -657,7 +718,7 @@ mod tests {
         create_test_db(&db_path);
 
         let state = Arc::new(AppState::new(db_path));
-        let app = build_router(state, None);
+        let app = build_router(state, None, None);
 
         let (status, json) = get_json(&app, "/api/v1/packages/python311/history").await;
 
@@ -676,7 +737,7 @@ mod tests {
         create_test_db(&db_path);
 
         let state = Arc::new(AppState::new(db_path));
-        let app = build_router(state, None);
+        let app = build_router(state, None, None);
 
         let (status, json) = get_json(&app, "/api/v1/packages/python311/versions/3.11.0").await;
 
@@ -692,7 +753,7 @@ mod tests {
         create_test_db(&db_path);
 
         let state = Arc::new(AppState::new(db_path));
-        let app = build_router(state, None);
+        let app = build_router(state, None, None);
 
         let (status, json) = get_json(&app, "/api/v1/packages/python311/versions/9.9.9").await;
 
@@ -708,7 +769,7 @@ mod tests {
         create_test_db(&db_path);
 
         let state = Arc::new(AppState::new(db_path));
-        let app = build_router(state, None);
+        let app = build_router(state, None, None);
 
         let (status, json) = get_json(&app, "/api/v1/stats").await;
 
@@ -724,7 +785,7 @@ mod tests {
         create_test_db(&db_path);
 
         let state = Arc::new(AppState::new(db_path));
-        let app = build_router(state, None);
+        let app = build_router(state, None, None);
 
         let (status, json) =
             get_json(&app, "/api/v1/packages/python311/versions/3.11.0/first").await;
@@ -740,7 +801,7 @@ mod tests {
         create_test_db(&db_path);
 
         let state = Arc::new(AppState::new(db_path));
-        let app = build_router(state, None);
+        let app = build_router(state, None, None);
 
         let (status, json) =
             get_json(&app, "/api/v1/packages/python311/versions/3.11.0/last").await;
@@ -756,7 +817,7 @@ mod tests {
         create_test_db(&db_path);
 
         let state = Arc::new(AppState::new(db_path));
-        let app = build_router(state, None);
+        let app = build_router(state, None, None);
 
         // Request with limit=1
         let (status, json) = get_json(&app, "/api/v1/search?q=python&limit=1").await;
@@ -783,7 +844,7 @@ mod tests {
         create_test_db(&db_path);
 
         let state = Arc::new(AppState::new(db_path));
-        let app = build_router(state, None);
+        let app = build_router(state, None, None);
 
         // Test homepage
         let response = app
@@ -834,7 +895,7 @@ mod tests {
         create_test_db(&db_path);
 
         let state = Arc::new(AppState::new(db_path));
-        let app = build_router(state, None);
+        let app = build_router(state, None, None);
 
         // Spawn 20 concurrent requests to different endpoints
         let mut handles = Vec::new();
@@ -884,7 +945,7 @@ mod tests {
         create_test_db(&db_path);
 
         let state = Arc::new(AppState::new(db_path));
-        let app = build_router(state, None);
+        let app = build_router(state, None, None);
 
         // Spawn 10 concurrent search requests
         let mut handles = Vec::new();
@@ -930,7 +991,7 @@ mod tests {
         create_test_db(&db_path);
 
         let state = Arc::new(AppState::new(db_path));
-        let app = build_router(state, None);
+        let app = build_router(state, None, None);
 
         // Each request should complete within 5 seconds (generous timeout)
         let timeout_duration = std::time::Duration::from_secs(5);
@@ -947,5 +1008,65 @@ mod tests {
 
         let (status, _) = result.unwrap();
         assert_eq!(status, StatusCode::OK);
+    }
+
+    /// Test that rate limiting returns 429 when limit is exceeded.
+    #[tokio::test]
+    async fn test_rate_limiting_returns_429() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+
+        // Configure very restrictive rate limit: 1 req/sec, burst of 2
+        let rate_limit = Some(RateLimitConfig {
+            requests_per_second: 1,
+            burst_size: 2,
+        });
+
+        let app = build_router(state, None, rate_limit);
+        let test_ip = "192.168.1.100";
+
+        // First two requests should succeed (burst allowance)
+        let (status1, _) = get_json_with_ip(&app, "/api/v1/health", Some(test_ip)).await;
+        assert_eq!(status1, StatusCode::OK, "First request should succeed");
+
+        let (status2, _) = get_json_with_ip(&app, "/api/v1/health", Some(test_ip)).await;
+        assert_eq!(
+            status2,
+            StatusCode::OK,
+            "Second request should succeed (within burst)"
+        );
+
+        // Third request should be rate limited (burst exhausted)
+        let (status3, _) = get_json_with_ip(&app, "/api/v1/health", Some(test_ip)).await;
+        assert_eq!(
+            status3,
+            StatusCode::TOO_MANY_REQUESTS,
+            "Third request should be rate limited"
+        );
+    }
+
+    /// Test that rate limiting is disabled when not configured.
+    #[tokio::test]
+    async fn test_no_rate_limiting_when_disabled() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None, None); // No rate limiting
+
+        // Many requests should all succeed
+        for i in 0..10 {
+            let (status, _) = get_json(&app, "/api/v1/health").await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "Request {} should succeed without rate limiting",
+                i + 1
+            );
+        }
     }
 }

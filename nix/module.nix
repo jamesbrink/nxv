@@ -21,6 +21,10 @@
 #               # Database concurrency limits (prevents resource exhaustion)
 #               database.maxConnections = 32;  # Max concurrent DB operations
 #               database.timeoutSeconds = 30;  # Timeout for DB operations
+#               # Rate limiting (optional, per IP)
+#               rateLimit.enable = true;
+#               rateLimit.requestsPerSecond = 10;  # 10 req/s per IP
+#               rateLimit.burst = 30;  # Allow bursts up to 30
 #             };
 #           }
 #         ];
@@ -204,6 +208,28 @@ in
         '';
       };
     };
+
+    rateLimit = {
+      enable = mkEnableOption "IP-based rate limiting";
+
+      requestsPerSecond = mkOption {
+        type = types.int;
+        default = 10;
+        description = ''
+          Maximum requests per second per IP address.
+          Requests exceeding this rate will receive HTTP 429 Too Many Requests.
+        '';
+      };
+
+      burst = mkOption {
+        type = types.nullOr types.int;
+        default = null;
+        description = ''
+          Burst size for rate limiting. Allows temporary bursts above the
+          sustained rate. Defaults to 2x requestsPerSecond if not set.
+        '';
+      };
+    };
   };
 
   config = mkIf cfg.enable {
@@ -235,6 +261,10 @@ in
         NXV_DB_TIMEOUT_SECS = toString cfg.database.timeoutSeconds;
       } // lib.optionalAttrs (cfg.logging.format == "json") {
         NXV_LOG_FORMAT = "json";
+      } // lib.optionalAttrs cfg.rateLimit.enable {
+        NXV_RATE_LIMIT = toString cfg.rateLimit.requestsPerSecond;
+      } // lib.optionalAttrs (cfg.rateLimit.enable && cfg.rateLimit.burst != null) {
+        NXV_RATE_LIMIT_BURST = toString cfg.rateLimit.burst;
       };
 
       serviceConfig = let

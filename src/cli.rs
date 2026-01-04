@@ -299,6 +299,16 @@ pub struct ServeArgs {
     /// Specific CORS origins (comma-separated, recommended for production).
     #[arg(long, value_delimiter = ',')]
     pub cors_origins: Option<Vec<String>>,
+
+    /// Enable rate limiting per IP address (requests per second).
+    /// When set, limits each IP to this many requests per second.
+    #[arg(long, env = "NXV_RATE_LIMIT")]
+    pub rate_limit: Option<u64>,
+
+    /// Burst size for rate limiting (default: 2x rate_limit).
+    /// Allows temporary bursts above the sustained rate.
+    #[arg(long, env = "NXV_RATE_LIMIT_BURST")]
+    pub rate_limit_burst: Option<u32>,
 }
 
 /// Arguments for the index command (feature-gated).

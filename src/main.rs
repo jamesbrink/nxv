@@ -1394,6 +1394,8 @@ fn cmd_serve(cli: &Cli, args: &cli::ServeArgs) -> Result<()> {
         db_path: cli.db_path.clone(),
         cors: args.cors || args.cors_origins.is_some(),
         cors_origins: args.cors_origins.clone(),
+        rate_limit: args.rate_limit,
+        rate_limit_burst: args.rate_limit_burst,
     };
 
     // Create tokio runtime and run the server

@@ -75,8 +75,28 @@ complete -F _nxv_with_packages nxv
 
 /// Generate zsh completions with dynamic package completion.
 fn generate_zsh<W: Write>(buf: &mut W, base: &str) -> std::io::Result<()> {
-    // Write base completions first
-    buf.write_all(base.as_bytes())?;
+    // Process base completions to remove the self-registration block at the end.
+    // The base clap output ends with:
+    //   if [ "$funcstack[1]" = "_nxv" ]; then
+    //       _nxv "$@"
+    //   else
+    //       compdef _nxv nxv
+    //   fi
+    // We remove this entire block and register our enhanced version instead.
+    // Use string replacement to target the specific block rather than filtering lines.
+    let modified_base = base
+        .replace(
+            r#"if [ "$funcstack[1]" = "_nxv" ]; then
+    _nxv "$@"
+else
+    compdef _nxv nxv
+fi"#,
+            "",
+        )
+        .trim_end()
+        .to_string();
+
+    buf.write_all(modified_base.as_bytes())?;
 
     // Add custom package completion function
     buf.write_all(
@@ -110,14 +130,10 @@ _nxv_enhanced() {
     _nxv "$@"
 }
 
-# Override the completion for nxv
+# Register completions
+# The #compdef nxv at the top handles 'nxv', but we override to use enhanced version
 compdef _nxv_enhanced nxv
 compdef _nxv_enhanced nxv-indexer
-
-# Also handle path-based invocations (e.g., ./target/release/nxv)
-# This pattern matches any command path ending in /nxv or /nxv-indexer
-compdef '_nxv_enhanced' -p '*/nxv'
-compdef '_nxv_enhanced' -p '*/nxv-indexer'
 "#,
     )
 }

@@ -403,7 +403,6 @@ pub struct ExtractionResult {
     pub changed_paths: Vec<String>,
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

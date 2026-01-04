@@ -67,9 +67,9 @@ impl Default for IndexerConfig {
             since: None,
             until: None,
             max_commits: None,
-            num_workers: 0,           // 0 = auto-detect
-            recurse_packages: false,  // Off by default for performance
-            recurse_all: false,       // Off by default for performance
+            num_workers: 0,          // 0 = auto-detect
+            recurse_packages: false, // Off by default for performance
+            recurse_all: false,      // Off by default for performance
             recurse_depth: 2,
             worktree_dir: None, // Use system temp directory
         }

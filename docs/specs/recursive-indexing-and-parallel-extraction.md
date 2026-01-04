@@ -481,23 +481,23 @@ would still race on a shared map. Per-commit rebuild is the only safe approach f
 
 ### 2.6 Attribute Path Handling
 
-- [ ] Store full dotted attribute path in database (already supported by schema)
-- [ ] Ensure `name` field remains the package name (pname), not the full path
-- [ ] Update bloom filter to include full attribute paths
-- [ ] Verify search still works for both name and attribute path queries
+- [x] Store full dotted attribute path in database (already supported by schema)
+- [x] Ensure `name` field remains the package name (pname), not the full path
+- [x] Update bloom filter to include full attribute paths
+- [x] Verify search still works for both name and attribute path queries
 
 ### 2.7 Extraction Performance
 
 - [ ] Profile extraction time with recursion enabled
-- [ ] Add `--no-recurse` flag to skip nested packages (for faster incremental updates)
+- [x] Add `--no-recurse` flag to skip nested packages (for faster incremental updates)
 - [ ] Consider caching which scopes exist at each commit to avoid re-evaluation
 
 ### 2.8 Success Criteria
 
-- [ ] Unit test: extract from mock nixpkgs with nested derivation, verify full path stored
+- [x] Unit test: extract from mock nixpkgs with nested derivation, verify full path stored
 - [ ] Integration test: extract `qt6.qtwebengine` from real nixpkgs HEAD
 - [ ] Integration test: extract `python3Packages.numpy` from real nixpkgs HEAD
-- [ ] Test that deeply nested packages (>2 levels) are handled correctly
+- [x] Test that deeply nested packages (>2 levels) are handled correctly
 - [ ] Benchmark: extraction time increase is <3x compared to top-level only
 - [x] Test: `extract_packages_for_attr_paths()` correctly extracts `AttrPath(["python3Packages", "numpy"])`
 - [ ] Test: file→attr map includes `python3Packages.numpy` for `pkgs/development/python-modules/numpy/default.nix`

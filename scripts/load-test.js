@@ -39,6 +39,7 @@ const packageLatency = new Trend('package_latency', true);
 const historyLatency = new Trend('history_latency', true);
 const statsLatency = new Trend('stats_latency', true);
 const healthLatency = new Trend('health_latency', true);
+const slowQueryLatency = new Trend('slow_query_latency', true);
 const requestCount = new Counter('total_requests');
 
 // Configuration
@@ -97,31 +98,61 @@ const scenarios = {
     duration: '5m',
   },
   // AGGRESSIVE: Designed to reproduce issue #14 (spawn_blocking exhaustion)
-  // Instantly spawns 200 VUs hammering the exact endpoints that caused the production hang
+  // Instantly spawns 500 VUs hammering the exact endpoints that caused the production hang
   aggressive: {
     executor: 'constant-vus',
-    vus: 200,
+    vus: 500,
     duration: '2m',
     exec: 'aggressiveTest',
   },
-  // HAMMER: Even more extreme - 500 VUs, no mercy
+  // HAMMER: Even more extreme - 1000 VUs, no mercy
   hammer: {
     executor: 'ramping-vus',
-    startVUs: 50,
+    startVUs: 100,
     stages: [
-      { duration: '10s', target: 200 },  // Quick ramp to 200
-      { duration: '10s', target: 500 },  // Ramp to 500
-      { duration: '1m', target: 500 },   // Hold at 500
+      { duration: '5s', target: 500 },   // Quick ramp to 500
+      { duration: '5s', target: 1000 },  // Ramp to 1000
+      { duration: '1m', target: 1000 },  // Hold at 1000
       { duration: '10s', target: 0 },    // Ramp down
     ],
     exec: 'aggressiveTest',
+  },
+  // BRUTAL: Maximum violence - 2000 VUs instant, no ramp
+  brutal: {
+    executor: 'constant-vus',
+    vus: 2000,
+    duration: '2m',
+    exec: 'aggressiveTest',
+  },
+  // DEATH: Simulate coordinated attack - multiple waves
+  death: {
+    executor: 'ramping-vus',
+    startVUs: 500,
+    stages: [
+      { duration: '3s', target: 1000 },  // Wave 1
+      { duration: '3s', target: 500 },   // Brief dip
+      { duration: '3s', target: 2000 },  // Wave 2 - bigger
+      { duration: '3s', target: 1000 },  // Brief dip
+      { duration: '3s', target: 3000 },  // Wave 3 - maximum
+      { duration: '30s', target: 3000 }, // Sustain the pain
+      { duration: '5s', target: 0 },     // Done
+    ],
+    exec: 'aggressiveTest',
+  },
+  // EXPLOIT: Test potentially malicious query patterns
+  // Focuses on slow queries that could be used for DoS
+  exploit: {
+    executor: 'constant-vus',
+    vus: 100,
+    duration: '1m',
+    exec: 'exploitTest',
   },
 };
 
 // Select scenario based on environment variable (default: constant)
 const selectedScenario = __ENV.SCENARIO || 'constant';
 if (!scenarios[selectedScenario]) {
-  throw new Error(`Unknown scenario: ${selectedScenario}. Valid: constant, stress, spike, soak`);
+  throw new Error(`Unknown scenario: ${selectedScenario}. Valid: constant, stress, spike, soak, aggressive, hammer, brutal, death, exploit`);
 }
 
 export const options = {
@@ -184,6 +215,91 @@ const PACKAGE_ATTRS = [
 function randomChoice(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
+
+// Generate random package name (doesn't need to be valid)
+function randomPackageName() {
+  const prefixes = ['lib', 'python', 'node', 'go-', 'rust-', 'haskell-', 'perl-', 'ruby-', ''];
+  const words = ['foo', 'bar', 'baz', 'qux', 'test', 'app', 'util', 'tool', 'dev', 'core', 'data', 'net', 'web', 'api', 'cli', 'gui', 'db', 'io', 'fs', 'sys'];
+  const suffixes = ['-bin', '-lib', '-dev', '-tools', '-utils', '2', '3', '_ng', '-next', ''];
+
+  const prefix = randomChoice(prefixes);
+  const word1 = randomChoice(words);
+  const word2 = Math.random() < 0.5 ? randomChoice(words) : '';
+  const suffix = randomChoice(suffixes);
+  const num = Math.random() < 0.3 ? Math.floor(Math.random() * 100) : '';
+
+  return `${prefix}${word1}${word2}${suffix}${num}`;
+}
+
+// Generate random search query
+function randomSearchQuery() {
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789-_';
+  const len = Math.floor(Math.random() * 12) + 2; // 2-13 chars
+  let result = '';
+  for (let i = 0; i < len; i++) {
+    result += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return result;
+}
+
+// Potentially slow/malicious query patterns to test server resilience
+const SLOW_QUERIES = [
+  // Leading wildcards - can't use index, full table scan
+  '%python',
+  '%a%',
+  '%',
+  '%%',
+  '%lib%',
+
+  // Single chars - match tons of results
+  'a',
+  'e',
+  'i',
+  'o',
+  's',
+  'n',
+
+  // Very short common prefixes
+  'lib',
+  'py',
+  'go',
+
+  // FTS5 special operators that might cause issues
+  'python OR rust OR go OR nodejs OR java OR ruby',
+  'NOT nonexistent',
+  '"exact phrase match"',
+  'python*',
+  '^python',
+
+  // Very long queries
+  'a'.repeat(100),
+  'python'.repeat(50),
+  'abcdefghijklmnopqrstuvwxyz'.repeat(10),
+
+  // Unicode edge cases
+  '日本語',
+  'émacs',
+  'naïve',
+  '🐍python',
+  '\u0000null',
+
+  // SQL-like patterns (should be escaped but test anyway)
+  "python'; DROP TABLE packages;--",
+  'python%20OR%201=1',
+  "python' OR '1'='1",
+
+  // Whitespace edge cases
+  '   ',
+  '\t\n',
+  ' python ',
+  'python  rust',
+
+  // Special regex-like chars
+  'python.*',
+  'python.+',
+  '[a-z]+',
+  '(python|rust)',
+];
 
 // Helper to make request and track metrics
 function apiRequest(name, url, metricTrend) {
@@ -250,30 +366,121 @@ const AGGRESSIVE_VERSIONS = [
 export function aggressiveTest() {
   const rand = Math.random();
 
-  if (rand < 0.5) {
-    // 50% - Hit the exact endpoints that caused the production hang
+  if (rand < 0.25) {
+    // 25% - Hit the exact endpoints that caused the production hang
     const version = randomChoice(RUSTC_VERSIONS);
     const url = `${API_BASE}/packages/rustc/versions/${version}`;
     apiRequest('version_rustc', url, packageLatency);
-  } else if (rand < 0.8) {
-    // 30% - Hit version endpoints for various packages
+  } else if (rand < 0.40) {
+    // 15% - Hit version endpoints for various packages
     const pkg = randomChoice(AGGRESSIVE_PACKAGES);
     const version = randomChoice(AGGRESSIVE_VERSIONS);
     const url = `${API_BASE}/packages/${pkg}/versions/${version}`;
     apiRequest('version_pkg', url, packageLatency);
-  } else if (rand < 0.9) {
+  } else if (rand < 0.50) {
     // 10% - History endpoints (also DB-heavy)
     const pkg = randomChoice(AGGRESSIVE_PACKAGES);
     const url = `${API_BASE}/packages/${pkg}/history`;
     apiRequest('history', url, historyLatency);
-  } else {
-    // 10% - Search (to mix in some different queries)
+  } else if (rand < 0.60) {
+    // 10% - Search with known queries
     const query = randomChoice(SEARCH_QUERIES);
     const url = `${API_BASE}/search?q=${encodeURIComponent(query)}&limit=50`;
     apiRequest('search', url, searchLatency);
+  } else if (rand < 0.70) {
+    // 10% - Search with random queries (mostly cache misses)
+    const query = randomSearchQuery();
+    const url = `${API_BASE}/search?q=${encodeURIComponent(query)}&limit=50`;
+    apiRequest('search_random', url, searchLatency);
+  } else if (rand < 0.80) {
+    // 10% - SLOW/MALICIOUS queries - test for DoS vulnerabilities
+    const query = randomChoice(SLOW_QUERIES);
+    const url = `${API_BASE}/search?q=${encodeURIComponent(query)}&limit=50`;
+    apiRequest('search_slow', url, slowQueryLatency);
+  } else if (rand < 0.85) {
+    // 5% - Description search with slow queries (FTS5)
+    const query = randomChoice(SLOW_QUERIES);
+    const url = `${API_BASE}/search/description?q=${encodeURIComponent(query)}&limit=50`;
+    apiRequest('fts_slow', url, slowQueryLatency);
+  } else if (rand < 0.90) {
+    // 5% - HUGE limit requests (try to exhaust memory)
+    const query = randomChoice(SEARCH_QUERIES);
+    const hugeLimit = randomChoice([1000, 5000, 10000, 50000, 100000, 999999]);
+    const url = `${API_BASE}/search?q=${encodeURIComponent(query)}&limit=${hugeLimit}`;
+    apiRequest('search_huge_limit', url, slowQueryLatency);
+  } else if (rand < 0.95) {
+    // 5% - Random package lookups (likely 404s, but stresses DB)
+    const pkg = randomPackageName();
+    const url = `${API_BASE}/packages/${encodeURIComponent(pkg)}`;
+    apiRequest('package_random', url, packageLatency);
+  } else {
+    // 5% - Random package version lookups
+    const pkg = randomPackageName();
+    const version = randomChoice(AGGRESSIVE_VERSIONS);
+    const url = `${API_BASE}/packages/${encodeURIComponent(pkg)}/versions/${version}`;
+    apiRequest('version_random', url, packageLatency);
   }
 
   // NO SLEEP - maximum aggression!
+}
+
+// EXPLOIT test function - focuses on potentially slow/malicious queries
+export function exploitTest() {
+  const rand = Math.random();
+
+  if (rand < 0.25) {
+    // 25% - Slow search queries (wildcards, short strings)
+    const query = randomChoice(SLOW_QUERIES);
+    const url = `${API_BASE}/search?q=${encodeURIComponent(query)}&limit=50`;
+    apiRequest('exploit_search', url, slowQueryLatency);
+  } else if (rand < 0.40) {
+    // 15% - FTS5 with complex/malicious patterns
+    const query = randomChoice(SLOW_QUERIES);
+    const url = `${API_BASE}/search/description?q=${encodeURIComponent(query)}&limit=50`;
+    apiRequest('exploit_fts', url, slowQueryLatency);
+  } else if (rand < 0.55) {
+    // 15% - Huge limit requests
+    const query = randomChoice(['python', 'lib', 'a', '%']);
+    const hugeLimit = randomChoice([10000, 50000, 100000, 500000, 999999, 2147483647]);
+    const url = `${API_BASE}/search?q=${encodeURIComponent(query)}&limit=${hugeLimit}`;
+    apiRequest('exploit_huge_limit', url, slowQueryLatency);
+  } else if (rand < 0.65) {
+    // 10% - Negative/zero/weird limit values
+    const query = 'python';
+    const weirdLimit = randomChoice([-1, 0, -999999, 'abc', '', 'null', 'undefined', '1e10']);
+    const url = `${API_BASE}/search?q=${query}&limit=${weirdLimit}`;
+    apiRequest('exploit_bad_limit', url, slowQueryLatency);
+  } else if (rand < 0.75) {
+    // 10% - Negative/weird offset values
+    const query = 'python';
+    const weirdOffset = randomChoice([-1, -999999, 2147483647, 'abc', '1e10']);
+    const url = `${API_BASE}/search?q=${query}&offset=${weirdOffset}&limit=10`;
+    apiRequest('exploit_bad_offset', url, slowQueryLatency);
+  } else if (rand < 0.85) {
+    // 10% - Empty or whitespace-only queries
+    const emptyQuery = randomChoice(['', ' ', '  ', '\t', '\n', '%20', '%00']);
+    const url = `${API_BASE}/search?q=${encodeURIComponent(emptyQuery)}&limit=50`;
+    apiRequest('exploit_empty', url, slowQueryLatency);
+  } else if (rand < 0.95) {
+    // 10% - Very long package names/versions
+    const longName = 'a'.repeat(randomChoice([100, 500, 1000, 5000]));
+    const url = `${API_BASE}/packages/${encodeURIComponent(longName)}`;
+    apiRequest('exploit_long_name', url, slowQueryLatency);
+  } else {
+    // 5% - Version with special characters
+    const pkg = 'python311';
+    const badVersion = randomChoice([
+      '../../../etc/passwd',
+      '1.0; DROP TABLE packages',
+      '%00',
+      'a'.repeat(1000),
+      '1.0\n2.0\n3.0',
+    ]);
+    const url = `${API_BASE}/packages/${pkg}/versions/${encodeURIComponent(badVersion)}`;
+    apiRequest('exploit_bad_version', url, slowQueryLatency);
+  }
+
+  // NO SLEEP - test under pressure
 }
 
 // Main test function

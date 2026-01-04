@@ -203,10 +203,15 @@ pub fn download_file<P: AsRef<Path>>(
 
     // If URL ends with .zst, decompress
     if url.ends_with(".zst") {
-        decompress_zstd(&temp_path, dest, show_progress)?;
+        // Decompress to a temporary file first, then atomic rename.
+        // This ensures running servers with open handles to the old file
+        // continue reading the old inode while new connections get the new file.
+        let temp_dest = dest.with_extension("db.tmp");
+        decompress_zstd(&temp_path, &temp_dest, show_progress)?;
+        std::fs::rename(&temp_dest, dest)?; // atomic on Unix
         let _ = std::fs::remove_file(&temp_path);
     } else {
-        // Move temp file to destination
+        // Move temp file to destination (already atomic)
         std::fs::rename(&temp_path, dest)?;
     }
 

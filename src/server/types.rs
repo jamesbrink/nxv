@@ -113,13 +113,20 @@ pub struct SearchParams {
 
 /// Default number of results per page.
 ///
+/// Maximum allowed limit for any query to prevent memory exhaustion.
+/// Requests with higher limits will be capped to this value.
+pub const MAX_LIMIT: usize = 100;
+
+/// Default limit for search queries.
+const DEFAULT_LIMIT: usize = 50;
+
 /// # Examples
 ///
 /// ```
 /// assert_eq!(crate::default_limit(), 50);
 /// ```
 fn default_limit() -> usize {
-    50
+    DEFAULT_LIMIT
 }
 
 /// Description search query parameters.

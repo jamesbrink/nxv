@@ -24,7 +24,7 @@ use crate::search::{self, SearchOptions};
 
 use super::AppState;
 use super::error::ApiError;
-use super::types::*;
+use super::types::{self, *};
 
 /// Execute a database operation with concurrency limiting and timeout.
 ///
@@ -150,6 +150,9 @@ pub async fn search_packages(
 ) -> Result<Json<ApiResponse<Vec<PackageVersion>>>, ApiError> {
     let db_path = state.db_path.clone();
 
+    // Cap limit to prevent memory exhaustion from malicious requests
+    let capped_limit = params.limit.min(types::MAX_LIMIT);
+
     let opts = SearchOptions {
         query: params.q,
         version: params.version,
@@ -159,7 +162,7 @@ pub async fn search_packages(
         sort: params.sort,
         reverse: params.reverse,
         full: false,
-        limit: params.limit,
+        limit: capped_limit,
         offset: params.offset,
     };
 
@@ -225,7 +228,8 @@ pub async fn search_description(
 ) -> Result<Json<ApiResponse<Vec<PackageVersion>>>, ApiError> {
     let db_path = state.db_path.clone();
     let query = params.q.clone();
-    let limit = params.limit;
+    // Cap limit to prevent memory exhaustion from malicious requests
+    let limit = params.limit.min(types::MAX_LIMIT);
     let offset = params.offset;
 
     let results = run_db_operation(&state, move || {

@@ -275,6 +275,9 @@ in
         Restart = "on-failure";
         RestartSec = "5s";
 
+        # Resource limits
+        LimitNOFILE = 65536;  # Increase file descriptor limit for high concurrency
+
         # Hardening options
         NoNewPrivileges = true;
         ProtectSystem = "strict";

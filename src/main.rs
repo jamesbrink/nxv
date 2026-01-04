@@ -1198,6 +1198,36 @@ fn cmd_backfill(cli: &Cli, args: &cli::BackfillArgs) -> Result<()> {
 
     let nixpkgs_path = paths::expand_tilde(&args.nixpkgs_path);
 
+    // Validate date format for --since and --until (YYYY-MM-DD)
+    fn validate_date(date: &str, arg_name: &str) -> Result<()> {
+        let parts: Vec<&str> = date.split('-').collect();
+        if parts.len() != 3 {
+            anyhow::bail!("--{} must be in YYYY-MM-DD format, got: {}", arg_name, date);
+        }
+        let year = parts[0].parse::<u32>();
+        let month = parts[1].parse::<u32>();
+        let day = parts[2].parse::<u32>();
+        match (year, month, day) {
+            (Ok(y), Ok(m), Ok(d))
+                if (2000..=2100).contains(&y) && (1..=12).contains(&m) && (1..=31).contains(&d) =>
+            {
+                Ok(())
+            }
+            _ => anyhow::bail!(
+                "--{} must be a valid date in YYYY-MM-DD format, got: {}",
+                arg_name,
+                date
+            ),
+        }
+    }
+
+    if let Some(ref since) = args.since {
+        validate_date(since, "since")?;
+    }
+    if let Some(ref until) = args.until {
+        validate_date(until, "until")?;
+    }
+
     if args.history {
         eprintln!(
             "Backfilling metadata from {:?} (historical mode)",

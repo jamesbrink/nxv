@@ -790,7 +790,8 @@ impl Indexer {
     ) -> Result<IndexResult> {
         let total_commits = commits.len();
         let systems = &self.config.systems;
-        let _nixpkgs_path = nixpkgs_path.as_ref(); // Original path kept for reference but worktree used
+        // Note: nixpkgs_path is unused here because we use WorktreeSession for all checkouts
+        let _ = nixpkgs_path.as_ref();
 
         // Set up progress bar if enabled
         let multi_progress = if self.config.show_progress {

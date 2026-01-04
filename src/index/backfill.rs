@@ -566,37 +566,32 @@ fn get_packages_by_commit(
     since: Option<&str>,
     until: Option<&str>,
 ) -> Result<HashMap<String, Vec<String>>> {
-    let mut conditions = Vec::new();
+    let mut field_conditions = Vec::new();
     if need_source_path {
-        conditions.push("source_path IS NULL".to_string());
+        field_conditions.push("source_path IS NULL");
     }
     if need_homepage {
-        conditions.push("homepage IS NULL".to_string());
+        field_conditions.push("homepage IS NULL");
     }
     if need_vulnerabilities {
-        conditions.push("known_vulnerabilities IS NULL".to_string());
+        field_conditions.push("known_vulnerabilities IS NULL");
     }
 
-    if conditions.is_empty() {
+    if field_conditions.is_empty() {
         return Ok(HashMap::new());
     }
 
-    // Add date filters
+    // Build WHERE clause with parameterized date filters
+    let mut where_clause = format!("({})", field_conditions.join(" OR "));
+    let mut params: Vec<String> = Vec::new();
+
     if let Some(since_date) = since {
-        conditions.push(format!("first_commit_date >= '{}'", since_date));
+        where_clause.push_str(" AND first_commit_date >= ?");
+        params.push(since_date.to_string());
     }
     if let Some(until_date) = until {
-        conditions.push(format!("first_commit_date <= '{}'", until_date));
-    }
-
-    // First N conditions are field conditions (OR'd), rest are date conditions (AND'd)
-    let field_count =
-        need_source_path as usize + need_homepage as usize + need_vulnerabilities as usize;
-    let (field_conditions, date_conditions) = conditions.split_at(field_count);
-
-    let mut where_clause = format!("({})", field_conditions.join(" OR "));
-    for date_cond in date_conditions {
-        where_clause.push_str(&format!(" AND {}", date_cond));
+        where_clause.push_str(" AND first_commit_date <= ?");
+        params.push(until_date.to_string());
     }
 
     let limit_clause = limit.map(|l| format!(" LIMIT {}", l)).unwrap_or_default();
@@ -608,7 +603,7 @@ fn get_packages_by_commit(
     );
 
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map([], |row| {
+    let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?;
 

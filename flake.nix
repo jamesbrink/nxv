@@ -287,7 +287,7 @@
         nxv-docker = if pkgs.stdenv.isLinux then pkgs.dockerTools.buildLayeredImage {
           name = "nxv";
           tag = crateInfo.version;
-          created = "2026-01-03T16:23:08Z";
+          created = "2026-01-04T19:31:15Z";
 
           contents = [
             nxv-indexer

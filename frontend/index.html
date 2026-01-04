@@ -960,8 +960,14 @@
           const res = await fetch(`${API_BASE}/stats`);
 
           if (!res.ok) {
-            const errorBody = await res.text();
-            console.error(`Failed to load stats: HTTP ${res.status}`, errorBody);
+            console.error(`Failed to load stats: HTTP ${res.status}`);
+            return;
+          }
+
+          // Check content-type before parsing JSON
+          const contentType = res.headers.get('content-type');
+          if (!contentType || !contentType.includes('application/json')) {
+            console.error('Stats response was not JSON');
             return;
           }
 
@@ -1068,12 +1074,30 @@
           }
 
           const res = await fetch(`${API_BASE}/search?${params}`);
-          const json = await res.json();
           const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
 
+          // Handle non-OK responses with user-friendly messages
           if (!res.ok) {
-            throw new Error((json && json.message) || json?.error || 'Search failed');
+            // Check if response is JSON before trying to parse
+            const contentType = res.headers.get('content-type');
+            if (contentType && contentType.includes('application/json')) {
+              const errorJson = await res.json().catch(() => null);
+              throw new Error(errorJson?.message || errorJson?.error || `Search failed (HTTP ${res.status})`);
+            }
+            // Handle common HTTP errors with friendly messages
+            if (res.status === 504) {
+              throw new Error('Gateway timeout - the server took too long to respond. Please try again.');
+            } else if (res.status === 502) {
+              throw new Error('Bad gateway - the server is temporarily unavailable. Please try again later.');
+            } else if (res.status === 503) {
+              throw new Error('Service unavailable - the server is overloaded or under maintenance.');
+            } else if (res.status >= 500) {
+              throw new Error(`Server error (HTTP ${res.status}). Please try again later.`);
+            }
+            throw new Error(`Request failed (HTTP ${res.status})`);
           }
+
+          const json = await res.json();
 
           let { data, meta } = json;
           currentOffset = offset;
@@ -1338,9 +1362,26 @@
         try {
           const res = await fetch(`${API_BASE}/packages/${encodeURIComponent(attr)}/history`);
           if (!res.ok) {
-            body.innerHTML = `<p>Failed to load version history (HTTP ${res.status})</p>`;
+            // Handle common HTTP errors with friendly messages
+            let errorMsg = `Failed to load version history (HTTP ${res.status})`;
+            if (res.status === 504) {
+              errorMsg = 'Gateway timeout - the server took too long to respond. Please try again.';
+            } else if (res.status === 502) {
+              errorMsg = 'Bad gateway - the server is temporarily unavailable.';
+            } else if (res.status === 503) {
+              errorMsg = 'Service unavailable - the server is overloaded or under maintenance.';
+            }
+            body.innerHTML = `<p>${escapeHtml(errorMsg)}</p>`;
             return;
           }
+
+          // Check content-type before parsing JSON
+          const contentType = res.headers.get('content-type');
+          if (!contentType || !contentType.includes('application/json')) {
+            body.innerHTML = '<p>Unexpected response from server. Please try again.</p>';
+            return;
+          }
+
           const { data } = await res.json();
 
           if (!data || data.length === 0) {

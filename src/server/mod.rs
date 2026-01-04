@@ -15,6 +15,19 @@
 //! # View API documentation
 //! open "http://localhost:8080/docs"
 //! ```
+//!
+//! # Logging
+//!
+//! The server uses the `tracing` crate for structured logging. Log level can be
+//! controlled via the `RUST_LOG` environment variable:
+//!
+//! ```bash
+//! # Debug logging for nxv, info for everything else
+//! RUST_LOG=nxv=debug,info nxv serve
+//!
+//! # Trace-level logging for detailed request/response info
+//! RUST_LOG=nxv=trace,tower_http=debug nxv serve
+//! ```
 
 pub mod error;
 pub mod handlers;
@@ -33,7 +46,8 @@ use axum::{
 };
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
-use tower_http::trace::TraceLayer;
+use tower_http::trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer};
+use tracing::Level;
 use utoipa::OpenApi;
 use utoipa_scalar::{Scalar, Servable};
 
@@ -43,8 +57,55 @@ const FRONTEND_HTML: &str = include_str!("../../frontend/index.html");
 /// Embedded favicon SVG.
 const FAVICON_SVG: &str = include_str!("../../frontend/favicon.svg");
 
+use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
+
 use crate::db::Database;
 use crate::error::{NxvError, Result};
+
+/// Initialize the tracing subscriber for structured logging.
+///
+/// Configures logging based on the `RUST_LOG` environment variable. If not set,
+/// defaults to `info` level for all crates. Supports both human-readable (default)
+/// and JSON output formats.
+///
+/// # Examples
+///
+/// ```bash
+/// # Default info-level logging
+/// nxv serve
+///
+/// # Debug logging for nxv, info for everything else
+/// RUST_LOG=nxv=debug,info nxv serve
+///
+/// # JSON output for log aggregation
+/// RUST_LOG=info NXV_LOG_FORMAT=json nxv serve
+/// ```
+pub fn init_tracing() {
+    // Check if JSON format is requested
+    let use_json = std::env::var("NXV_LOG_FORMAT")
+        .map(|v| v.eq_ignore_ascii_case("json"))
+        .unwrap_or(false);
+
+    // Build the env filter with sensible defaults
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        // Default: info for nxv and tower_http, warn for everything else
+        EnvFilter::new("nxv=info,tower_http=info,warn")
+    });
+
+    if use_json {
+        // JSON format for log aggregation systems
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(fmt::layer().json())
+            .init();
+    } else {
+        // Human-readable format for development
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(fmt::layer().with_target(true).with_thread_ids(false))
+            .init();
+    }
+}
 
 /// Shared application state.
 pub struct AppState {
@@ -201,10 +262,16 @@ pub(crate) fn build_router(state: Arc<AppState>, cors: Option<CorsLayer>) -> Rou
             cache_24h,
         ));
 
+    // Configure tracing layer with request/response logging
+    let trace_layer = TraceLayer::new_for_http()
+        .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+        .on_request(DefaultOnRequest::new().level(Level::INFO))
+        .on_response(DefaultOnResponse::new().level(Level::INFO));
+
     let mut app = Router::new()
         .merge(static_routes)
         .nest("/api/v1", api_routes)
-        .layer(TraceLayer::new_for_http())
+        .layer(trace_layer)
         .with_state(state);
 
     if let Some(cors_layer) = cors {
@@ -245,6 +312,9 @@ pub(crate) fn build_router(state: Arc<AppState>, cors: Option<CorsLayer>) -> Rou
 /// `Ok(())` on clean shutdown; an `NxvError` if the database path is missing, socket
 /// binding fails, or the server runtime encounters an I/O error.
 pub async fn run_server(config: ServerConfig) -> Result<()> {
+    // Initialize tracing for structured logging
+    init_tracing();
+
     // Verify database exists before starting
     if !config.db_path.exists() {
         return Err(NxvError::NoIndex);
@@ -255,9 +325,8 @@ pub async fn run_server(config: ServerConfig) -> Result<()> {
     // Configure CORS
     let cors = if config.cors && config.cors_origins.is_none() {
         // Warn about permissive CORS when no specific origins are set
-        eprintln!(
-            "⚠ Warning: CORS enabled for all origins. \
-            For production, use --cors-origins to restrict to specific domains."
+        tracing::warn!(
+            "CORS enabled for all origins. For production, use --cors-origins to restrict to specific domains."
         );
         Some(
             CorsLayer::new()
@@ -291,19 +360,17 @@ pub async fn run_server(config: ServerConfig) -> Result<()> {
         .await
         .map_err(NxvError::Io)?;
 
-    eprintln!("Starting nxv API server on http://{}", addr);
-    eprintln!("Web UI: http://{}/", addr);
-    eprintln!("API documentation: http://{}/docs", addr);
-    eprintln!("OpenAPI spec: http://{}/openapi.json", addr);
-    eprintln!();
-    eprintln!("Press Ctrl+C to stop");
+    tracing::info!(address = %addr, "Starting nxv API server");
+    tracing::info!(url = %format!("http://{}/", addr), "Web UI available");
+    tracing::info!(url = %format!("http://{}/docs", addr), "API documentation");
+    tracing::info!("Press Ctrl+C to stop");
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
         .map_err(NxvError::Io)?;
 
-    eprintln!("\nServer stopped");
+    tracing::info!("Server stopped");
 
     Ok(())
 }

@@ -885,10 +885,10 @@ impl NixpkgsRepo {
         Ok(())
     }
 
-    /// Reset the repository to a clean state by hard-resetting to `target` (default `origin/master`)
+    /// Reset the repository to a clean state by hard-resetting to `target` (default `origin/nixpkgs-unstable`)
     /// and removing all untracked files and directories.
     ///
-    /// If `target` is `None`, `origin/master` is used.
+    /// If `target` is `None`, `origin/nixpkgs-unstable` is used.
     ///
     /// # Errors
     /// Returns an `Err` if the underlying git commands (`reset` or `clean`) fail or cannot be executed.
@@ -896,7 +896,7 @@ impl NixpkgsRepo {
     /// # Examples
     ///
     /// ```
-    /// // Reset to origin/master
+    /// // Reset to origin/nixpkgs-unstable
     /// repo.reset_hard(None).unwrap();
     ///
     /// // Reset to a specific ref
@@ -906,7 +906,7 @@ impl NixpkgsRepo {
         // Remove any stale lock files
         self.remove_index_lock();
 
-        let target_ref = target.unwrap_or("origin/master");
+        let target_ref = target.unwrap_or("origin/nixpkgs-unstable");
 
         // First, try to abort any in-progress operations
         let _ = Command::new("git")

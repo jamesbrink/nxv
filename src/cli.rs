@@ -427,7 +427,7 @@ pub struct ResetArgs {
     #[arg(long)]
     pub nixpkgs_path: PathBuf,
 
-    /// Reset to a specific commit or ref (default: origin/master).
+    /// Reset to a specific commit or ref (default: origin/nixpkgs-unstable).
     #[arg(long)]
     pub to: Option<String>,
 

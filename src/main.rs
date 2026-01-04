@@ -1278,7 +1278,7 @@ fn cmd_backfill(cli: &Cli, args: &cli::BackfillArgs) -> Result<()> {
 /// Resets the local nixpkgs git repository to a given reference, optionally fetching from origin first.
 ///
 /// If `args.fetch` is true, the repository will be fetched from origin before performing a hard reset.
-/// The repository is reset to `args.to` when provided, otherwise to `origin/master`. Progress and the
+/// The repository is reset to `args.to` when provided, otherwise to `origin/nixpkgs-unstable`. Progress and the
 /// resulting HEAD short hash are printed to stderr. Errors from repository operations are propagated.
 ///
 /// # Examples
@@ -1306,7 +1306,7 @@ fn cmd_reset(_cli: &Cli, args: &cli::ResetArgs) -> Result<()> {
     }
 
     let target = args.to.as_deref();
-    let target_display = target.unwrap_or("origin/master");
+    let target_display = target.unwrap_or("origin/nixpkgs-unstable");
     eprintln!("Resetting to {}...", target_display);
 
     repo.reset_hard(target)?;

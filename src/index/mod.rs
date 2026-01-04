@@ -673,7 +673,7 @@ impl Indexer {
                             eprintln!("To fix this, either:");
                             eprintln!("  1. Update your nixpkgs repository to a newer commit:");
                             eprintln!(
-                                "     git -C <nixpkgs-path> fetch origin && git -C <nixpkgs-path> checkout origin/master"
+                                "     git -C <nixpkgs-path> fetch origin && git -C <nixpkgs-path> checkout origin/nixpkgs-unstable"
                             );
                             eprintln!();
                             eprintln!(

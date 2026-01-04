@@ -17,6 +17,24 @@ fn escape_like_pattern(input: &str) -> String {
         .replace('_', "\\_")
 }
 
+/// Escapes user input for use in SQLite FTS5 MATCH queries.
+///
+/// FTS5 has its own query syntax with operators like `NOT`, `OR`, `AND`, `*`, `^`,
+/// and special quoting rules. To prevent users from accidentally or maliciously
+/// using these operators, we wrap the input in double quotes (forcing phrase matching)
+/// and escape any internal double quotes by doubling them.
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!(escape_fts5_query("python"), "\"python\"");
+/// assert_eq!(escape_fts5_query("NOT python"), "\"NOT python\"");
+/// assert_eq!(escape_fts5_query("say \"hello\""), "\"say \"\"hello\"\"\"");
+/// ```
+fn escape_fts5_query(input: &str) -> String {
+    format!("\"{}\"", input.replace('"', "\"\""))
+}
+
 /// Unix timestamp for when flake.nix was added to nixpkgs (2020-02-10 00:00:00 UTC).
 /// Commits before this date require legacy nix-shell syntax instead of flake references.
 /// See: https://github.com/NixOS/nixpkgs/pull/68897
@@ -438,12 +456,24 @@ pub fn get_version_history(
         let first_ts: i64 = row.get(1)?;
         let last_ts: i64 = row.get(2)?;
         let is_insecure: i64 = row.get(3)?;
-        Ok((
-            version,
-            Utc.timestamp_opt(first_ts, 0).unwrap(),
-            Utc.timestamp_opt(last_ts, 0).unwrap(),
-            is_insecure != 0,
-        ))
+
+        let first_seen = Utc.timestamp_opt(first_ts, 0).single().ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                1,
+                rusqlite::types::Type::Integer,
+                format!("Invalid first_seen timestamp: {}", first_ts).into(),
+            )
+        })?;
+
+        let last_seen = Utc.timestamp_opt(last_ts, 0).single().ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                2,
+                rusqlite::types::Type::Integer,
+                format!("Invalid last_seen timestamp: {}", last_ts).into(),
+            )
+        })?;
+
+        Ok((version, first_seen, last_seen, is_insecure != 0))
     })?;
 
     let mut results = Vec::new();
@@ -546,7 +576,9 @@ pub fn search_by_description(
         "#,
     )?;
 
-    let rows = stmt.query_map([query], PackageVersion::from_row)?;
+    // Escape user input to prevent FTS5 syntax injection
+    let escaped_query = escape_fts5_query(query);
+    let rows = stmt.query_map([&escaped_query], PackageVersion::from_row)?;
 
     let mut results = Vec::new();
     for row in rows {
@@ -1041,6 +1073,78 @@ mod tests {
         let results =
             search_by_description(db.connection(), "nonexistent description xyz").unwrap();
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_search_by_description_fts5_operators_escaped() {
+        let (_dir, db) = create_test_db();
+        // FTS5 operators like NOT, OR, AND should be treated as literal text, not operators
+        // Previously this would error with "fts5: syntax error near NOT"
+        let results = search_by_description(db.connection(), "NOT python").unwrap();
+        assert!(
+            results.is_empty(),
+            "Should not error and should return empty (no literal 'NOT python' in descriptions)"
+        );
+
+        let results = search_by_description(db.connection(), "python OR rust").unwrap();
+        assert!(
+            results.is_empty(),
+            "Should treat 'OR' as literal text, not operator"
+        );
+
+        let results = search_by_description(db.connection(), "python AND runtime").unwrap();
+        assert!(
+            results.is_empty(),
+            "Should treat 'AND' as literal text, not operator"
+        );
+    }
+
+    #[test]
+    fn test_search_by_description_fts5_special_chars_escaped() {
+        let (_dir, db) = create_test_db();
+        // Special FTS5 characters should be escaped and not cause syntax errors
+        // Note: FTS5's tokenizer may strip punctuation, so `py*` might still match "python"
+        // The key is that the query doesn't error and wildcards aren't interpreted as FTS5 operators
+
+        // Wildcard - should not cause syntax error
+        let results = search_by_description(db.connection(), "py*");
+        assert!(
+            results.is_ok(),
+            "Wildcard should not cause FTS5 syntax error"
+        );
+
+        // Caret - should not cause syntax error (tokenizer may strip it)
+        let results = search_by_description(db.connection(), "^python");
+        assert!(results.is_ok(), "Caret should not cause FTS5 syntax error");
+
+        // Unbalanced quotes should not cause errors
+        let results = search_by_description(db.connection(), "\"unbalanced");
+        assert!(
+            results.is_ok(),
+            "Unbalanced quote should not cause FTS5 syntax error"
+        );
+    }
+
+    #[test]
+    fn test_search_by_description_with_quotes() {
+        let (_dir, db) = create_test_db();
+        // Quotes in user input should be properly escaped
+        let results = search_by_description(db.connection(), "say \"hello\"").unwrap();
+        assert!(
+            results.is_empty(),
+            "Quoted text should be handled without error"
+        );
+    }
+
+    #[test]
+    fn test_escape_fts5_query() {
+        // Test the helper function directly
+        assert_eq!(escape_fts5_query("python"), "\"python\"");
+        assert_eq!(escape_fts5_query("NOT python"), "\"NOT python\"");
+        assert_eq!(escape_fts5_query("say \"hello\""), "\"say \"\"hello\"\"\"");
+        assert_eq!(escape_fts5_query(""), "\"\"");
+        assert_eq!(escape_fts5_query("py*"), "\"py*\"");
+        assert_eq!(escape_fts5_query("a OR b AND c"), "\"a OR b AND c\"");
     }
 
     // Helper to create a PackageVersion for testing helper methods

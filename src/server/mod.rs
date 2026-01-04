@@ -234,6 +234,7 @@ pub struct ServerConfig {
 }
 
 /// Rate limiter configuration for the server.
+#[derive(Clone)]
 pub struct RateLimitConfig {
     /// Requests per second per IP.
     pub requests_per_second: u64,
@@ -473,10 +474,7 @@ pub async fn run_server(config: ServerConfig) -> Result<()> {
             burst_size: burst,
         };
         // Store config in app state for metrics endpoint
-        app_state.rate_limit_config = Some(RateLimitConfig {
-            requests_per_second: rps,
-            burst_size: burst,
-        });
+        app_state.rate_limit_config = Some(rl_config.clone());
         rl_config
     });
 

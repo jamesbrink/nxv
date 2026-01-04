@@ -4,6 +4,19 @@ use crate::error::Result;
 use chrono::{DateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Escapes SQL LIKE wildcard characters (`%`, `_`, `\`) in user input.
+///
+/// This prevents SQL wildcard injection where users could pass `%` to match
+/// all records or `_` to match single characters unexpectedly.
+///
+/// The escaped string should be used with `LIKE ? ESCAPE '\'` in SQL queries.
+fn escape_like_pattern(input: &str) -> String {
+    input
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
 /// Unix timestamp for when flake.nix was added to nixpkgs (2020-02-10 00:00:00 UTC).
 /// Commits before this date require legacy nix-shell syntax instead of flake references.
 /// See: https://github.com/NixOS/nixpkgs/pull/68897
@@ -209,13 +222,13 @@ pub fn search_by_name(
     let sql = if exact {
         "SELECT * FROM package_versions WHERE name = ? ORDER BY last_commit_date DESC"
     } else {
-        "SELECT * FROM package_versions WHERE name LIKE ? ORDER BY last_commit_date DESC"
+        "SELECT * FROM package_versions WHERE name LIKE ? ESCAPE '\\' ORDER BY last_commit_date DESC"
     };
 
     let pattern = if exact {
         name.to_string()
     } else {
-        format!("{}%", name)
+        format!("{}%", escape_like_pattern(name))
     };
 
     let mut stmt = conn.prepare(sql)?;
@@ -231,9 +244,9 @@ pub fn search_by_name(
 /// Search for packages by attribute path.
 pub fn search_by_attr(conn: &rusqlite::Connection, attr_path: &str) -> Result<Vec<PackageVersion>> {
     let mut stmt = conn.prepare(
-        "SELECT * FROM package_versions WHERE attribute_path LIKE ? ORDER BY last_commit_date DESC",
+        "SELECT * FROM package_versions WHERE attribute_path LIKE ? ESCAPE '\\' ORDER BY last_commit_date DESC",
     )?;
-    let pattern = format!("{}%", attr_path);
+    let pattern = format!("{}%", escape_like_pattern(attr_path));
     let rows = stmt.query_map([&pattern], PackageVersion::from_row)?;
 
     let mut results = Vec::new();
@@ -270,10 +283,10 @@ pub fn search_by_name_version(
 ) -> Result<Vec<PackageVersion>> {
     // Search by attribute_path (package) and version prefix
     let mut stmt = conn.prepare(
-        "SELECT * FROM package_versions WHERE attribute_path LIKE ? AND version LIKE ? ORDER BY first_commit_date DESC",
+        "SELECT * FROM package_versions WHERE attribute_path LIKE ? ESCAPE '\\' AND version LIKE ? ESCAPE '\\' ORDER BY first_commit_date DESC",
     )?;
-    let package_pattern = format!("{}%", package);
-    let version_pattern = format!("{}%", version);
+    let package_pattern = format!("{}%", escape_like_pattern(package));
+    let version_pattern = format!("{}%", escape_like_pattern(version));
     let rows = stmt.query_map(
         [&package_pattern, &version_pattern],
         PackageVersion::from_row,
@@ -591,12 +604,7 @@ pub fn complete_package_prefix(
     let mut stmt = conn.prepare(
         "SELECT DISTINCT attribute_path FROM package_versions WHERE attribute_path LIKE ? ESCAPE '\\' ORDER BY attribute_path LIMIT ?",
     )?;
-    // Escape SQL LIKE wildcards to prevent user input from matching unintended patterns
-    let escaped_prefix = prefix
-        .replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_");
-    let pattern = format!("{}%", escaped_prefix);
+    let pattern = format!("{}%", escape_like_pattern(prefix));
     let rows = stmt.query_map(rusqlite::params![&pattern, limit as i64], |row| row.get(0))?;
 
     let mut results = Vec::new();
@@ -891,6 +899,85 @@ mod tests {
             results.is_empty(),
             "% in middle should not match as wildcard"
         );
+    }
+
+    #[test]
+    fn test_search_by_name_escapes_wildcards() {
+        let (_dir, db) = create_test_db();
+        // SQL LIKE wildcards should be escaped - % should not match everything
+        let results = search_by_name(db.connection(), "%", false).unwrap();
+        assert!(results.is_empty(), "% should not match as wildcard");
+
+        let results = search_by_name(db.connection(), "_", false).unwrap();
+        assert!(results.is_empty(), "_ should not match as wildcard");
+
+        // Test that % in the middle doesn't act as wildcard
+        let results = search_by_name(db.connection(), "py%on", false).unwrap();
+        assert!(
+            results.is_empty(),
+            "% in middle should not match as wildcard"
+        );
+
+        // Backslash should be escaped too
+        let results = search_by_name(db.connection(), "\\", false).unwrap();
+        assert!(results.is_empty(), "\\ should not cause issues");
+    }
+
+    #[test]
+    fn test_search_by_attr_escapes_wildcards() {
+        let (_dir, db) = create_test_db();
+        // SQL LIKE wildcards should be escaped - % should not match everything
+        let results = search_by_attr(db.connection(), "%").unwrap();
+        assert!(results.is_empty(), "% should not match as wildcard");
+
+        let results = search_by_attr(db.connection(), "_").unwrap();
+        assert!(results.is_empty(), "_ should not match as wildcard");
+
+        // Test that normal prefix search still works
+        let results = search_by_attr(db.connection(), "python").unwrap();
+        assert_eq!(results.len(), 3); // python (x2 versions) + python2
+    }
+
+    #[test]
+    fn test_search_by_name_version_escapes_wildcards() {
+        let (_dir, db) = create_test_db();
+        // SQL LIKE wildcards should be escaped
+        let results = search_by_name_version(db.connection(), "%", "%").unwrap();
+        assert!(
+            results.is_empty(),
+            "% should not match as wildcard in either field"
+        );
+
+        let results = search_by_name_version(db.connection(), "python", "%").unwrap();
+        assert!(
+            results.is_empty(),
+            "% should not match as wildcard in version"
+        );
+
+        let results = search_by_name_version(db.connection(), "%", "3.11").unwrap();
+        assert!(
+            results.is_empty(),
+            "% should not match as wildcard in package"
+        );
+
+        // Underscore should also be escaped
+        let results = search_by_name_version(db.connection(), "_", "_").unwrap();
+        assert!(results.is_empty(), "_ should not match as wildcard");
+    }
+
+    #[test]
+    fn test_escape_like_pattern() {
+        // Test the helper function directly
+        assert_eq!(escape_like_pattern("normal"), "normal");
+        assert_eq!(escape_like_pattern("%"), "\\%");
+        assert_eq!(escape_like_pattern("_"), "\\_");
+        assert_eq!(escape_like_pattern("\\"), "\\\\");
+        assert_eq!(
+            escape_like_pattern("foo%bar_baz\\qux"),
+            "foo\\%bar\\_baz\\\\qux"
+        );
+        assert_eq!(escape_like_pattern(""), "");
+        assert_eq!(escape_like_pattern("%%%"), "\\%\\%\\%");
     }
 
     #[test]

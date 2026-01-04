@@ -111,8 +111,6 @@ pub struct SearchParams {
     pub offset: usize,
 }
 
-/// Default number of results per page.
-///
 /// Maximum allowed limit for any query to prevent memory exhaustion.
 /// Requests with higher limits will be capped to this value.
 pub const MAX_LIMIT: usize = 100;

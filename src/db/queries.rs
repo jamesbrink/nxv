@@ -538,8 +538,8 @@ pub fn get_stats(conn: &rusqlite::Connection) -> Result<IndexStats> {
         total_ranges,
         unique_names,
         unique_versions,
-        oldest_commit_date: oldest.map(|ts| Utc.timestamp_opt(ts, 0).unwrap()),
-        newest_commit_date: newest.map(|ts| Utc.timestamp_opt(ts, 0).unwrap()),
+        oldest_commit_date: oldest.and_then(|ts| Utc.timestamp_opt(ts, 0).single()),
+        newest_commit_date: newest.and_then(|ts| Utc.timestamp_opt(ts, 0).single()),
         last_indexed_commit,
         last_indexed_date,
     })

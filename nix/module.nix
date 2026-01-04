@@ -18,6 +18,9 @@
 #               # Logging configuration
 #               logging.level = "nxv=info,tower_http=info,warn";
 #               logging.format = "json";  # or "text" (default)
+#               # Database concurrency limits (prevents resource exhaustion)
+#               database.maxConnections = 32;  # Max concurrent DB operations
+#               database.timeoutSeconds = 30;  # Timeout for DB operations
 #             };
 #           }
 #         ];
@@ -178,6 +181,29 @@ in
         '';
       };
     };
+
+    database = {
+      maxConnections = mkOption {
+        type = types.int;
+        default = 32;
+        description = ''
+          Maximum number of concurrent database operations.
+          This limits file descriptor usage and prevents spawn_blocking pool
+          exhaustion under heavy load. Increase for high-traffic deployments
+          with sufficient system resources.
+        '';
+      };
+
+      timeoutSeconds = mkOption {
+        type = types.int;
+        default = 30;
+        description = ''
+          Timeout for database operations in seconds.
+          Operations exceeding this timeout will return HTTP 504 Gateway Timeout.
+          Increase if you have a very large database or slow storage.
+        '';
+      };
+    };
   };
 
   config = mkIf cfg.enable {
@@ -205,6 +231,8 @@ in
 
       environment = {
         RUST_LOG = cfg.logging.level;
+        NXV_MAX_DB_CONNECTIONS = toString cfg.database.maxConnections;
+        NXV_DB_TIMEOUT_SECS = toString cfg.database.timeoutSeconds;
       } // lib.optionalAttrs (cfg.logging.format == "json") {
         NXV_LOG_FORMAT = "json";
       };

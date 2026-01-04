@@ -108,6 +108,40 @@ impl ApiError {
             message: message.into(),
         }
     }
+
+    /// Constructs an `ApiError` for HTTP 504 Gateway Timeout.
+    ///
+    /// Used when a database operation exceeds the configured timeout.
+    ///
+    /// # Parameters
+    ///
+    /// - `message`: Human-readable error message to include in the response body.
+    ///
+    /// # Returns
+    ///
+    /// An `ApiError` with status 504, code `"GATEWAY_TIMEOUT"`, and the provided message.
+    pub fn timeout(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::GATEWAY_TIMEOUT,
+            code: "GATEWAY_TIMEOUT".to_string(),
+            message: message.into(),
+        }
+    }
+
+    /// Constructs an `ApiError` for HTTP 503 when the server is at capacity.
+    ///
+    /// Used when the database connection semaphore cannot be acquired.
+    ///
+    /// # Returns
+    ///
+    /// An `ApiError` with status 503, code `"SERVICE_OVERLOADED"`, and a standard message.
+    pub fn overloaded() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "SERVICE_OVERLOADED".to_string(),
+            message: "Server is at capacity. Please try again later.".to_string(),
+        }
+    }
 }
 
 impl IntoResponse for ApiError {

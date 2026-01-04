@@ -44,6 +44,7 @@ use axum::{
     response::{Html, IntoResponse},
     routing::get,
 };
+use tokio::sync::Semaphore;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer};
@@ -56,6 +57,16 @@ const FRONTEND_HTML: &str = include_str!("../../frontend/index.html");
 
 /// Embedded favicon SVG.
 const FAVICON_SVG: &str = include_str!("../../frontend/favicon.svg");
+
+/// Default maximum concurrent database operations.
+/// This limits file descriptor usage and prevents spawn_blocking pool exhaustion.
+/// Can be overridden via NXV_MAX_DB_CONNECTIONS environment variable.
+const DEFAULT_MAX_DB_CONNECTIONS: usize = 32;
+
+/// Default timeout for database operations in seconds.
+/// Operations exceeding this will return 504 Gateway Timeout.
+/// Can be overridden via NXV_DB_TIMEOUT_SECS environment variable.
+const DEFAULT_DB_TIMEOUT_SECS: u64 = 30;
 
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -117,10 +128,19 @@ pub fn init_tracing() {
 pub struct AppState {
     /// Path to the database file.
     pub db_path: PathBuf,
+    /// Semaphore to limit concurrent database operations.
+    /// This prevents file descriptor exhaustion and spawn_blocking pool saturation.
+    pub db_semaphore: Semaphore,
+    /// Timeout for database operations.
+    pub db_timeout: Duration,
 }
 
 impl AppState {
-    /// Construct application state holding the database file path.
+    /// Construct application state with database path and concurrency limits.
+    ///
+    /// Reads configuration from environment variables:
+    /// - `NXV_MAX_DB_CONNECTIONS`: Maximum concurrent DB operations (default: 32)
+    /// - `NXV_DB_TIMEOUT_SECS`: Timeout for DB operations in seconds (default: 30)
     ///
     /// # Examples
     ///
@@ -130,7 +150,37 @@ impl AppState {
     /// assert_eq!(state.db_path, PathBuf::from("index.sqlite"));
     /// ```
     pub fn new(db_path: PathBuf) -> Self {
-        Self { db_path }
+        let max_connections = std::env::var("NXV_MAX_DB_CONNECTIONS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_MAX_DB_CONNECTIONS);
+
+        let timeout_secs = std::env::var("NXV_DB_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_DB_TIMEOUT_SECS);
+
+        Self {
+            db_path,
+            db_semaphore: Semaphore::new(max_connections),
+            db_timeout: Duration::from_secs(timeout_secs),
+        }
+    }
+
+    /// Construct application state with explicit configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `db_path` - Path to the database file
+    /// * `max_connections` - Maximum concurrent database operations
+    /// * `timeout` - Timeout for database operations
+    #[allow(dead_code)]
+    pub fn with_config(db_path: PathBuf, max_connections: usize, timeout: Duration) -> Self {
+        Self {
+            db_path,
+            db_semaphore: Semaphore::new(max_connections),
+            db_timeout: timeout,
+        }
     }
 
     /// Returns a read-only database connection opened from this state's path.
@@ -327,6 +377,13 @@ pub async fn run_server(config: ServerConfig) -> Result<()> {
     }
 
     let state = Arc::new(AppState::new(config.db_path));
+
+    // Log concurrency configuration
+    tracing::info!(
+        max_db_connections = state.db_semaphore.available_permits(),
+        db_timeout_secs = state.db_timeout.as_secs(),
+        "Database concurrency limits configured"
+    );
 
     // Configure CORS
     let cors = if config.cors && config.cors_origins.is_none() {

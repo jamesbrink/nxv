@@ -325,6 +325,7 @@
             pkgs.cargo-edit
             pkgs.miniserve  # Simple HTTP server for frontend dev
             pkgs.nodePackages.prettier  # HTML/JS/CSS formatter
+            pkgs.k6  # Load testing tool
           ];
 
           RUST_BACKTRACE = "1";

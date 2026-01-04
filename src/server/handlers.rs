@@ -4,6 +4,10 @@
 //! blocking the async runtime. This is critical for server stability under load, as
 //! rusqlite operations are synchronous and would otherwise block Tokio's worker threads.
 //!
+//! Additionally, all database operations:
+//! - Acquire a semaphore permit to limit concurrent connections (prevents file descriptor exhaustion)
+//! - Are wrapped in a timeout to prevent indefinite blocking (returns 504 on timeout)
+//!
 //! Each handler is instrumented with `tracing` to provide structured logging of requests,
 //! parameters, and timing information.
 
@@ -21,6 +25,78 @@ use crate::search::{self, SearchOptions};
 use super::AppState;
 use super::error::ApiError;
 use super::types::*;
+
+/// Execute a database operation with concurrency limiting and timeout.
+///
+/// This helper:
+/// 1. Acquires a semaphore permit to limit concurrent DB connections
+/// 2. Wraps the spawn_blocking call in a timeout
+/// 3. Provides appropriate error responses for capacity/timeout issues
+///
+/// # Arguments
+///
+/// * `state` - The application state containing semaphore and timeout config
+/// * `operation` - A closure that performs the database operation
+///
+/// # Returns
+///
+/// The result of the database operation, or an ApiError for timeout/capacity issues.
+async fn run_db_operation<T, F>(state: &AppState, operation: F) -> Result<T, ApiError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, crate::error::NxvError> + Send + 'static,
+{
+    // Try to acquire a semaphore permit with a short timeout
+    // If we can't get a permit quickly, the server is overloaded
+    let permit = match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        state.db_semaphore.acquire(),
+    )
+    .await
+    {
+        Ok(Ok(permit)) => permit,
+        Ok(Err(_)) => {
+            // Semaphore closed (shouldn't happen)
+            return Err(ApiError::internal("Database semaphore closed"));
+        }
+        Err(_) => {
+            // Timeout waiting for permit - server at capacity
+            tracing::warn!("Database semaphore acquisition timed out - server at capacity");
+            return Err(ApiError::overloaded());
+        }
+    };
+
+    // Run the blocking operation with a timeout
+    let timeout = state.db_timeout;
+    let result = tokio::time::timeout(timeout, tokio::task::spawn_blocking(operation)).await;
+
+    // Release the permit (done automatically when dropped, but be explicit)
+    drop(permit);
+
+    match result {
+        Ok(Ok(Ok(value))) => Ok(value),
+        Ok(Ok(Err(e))) => {
+            // Database error
+            Err(e.into())
+        }
+        Ok(Err(e)) => {
+            // spawn_blocking panicked
+            tracing::error!(error = %e, "Database task panicked");
+            Err(ApiError::internal(format!("Task join error: {}", e)))
+        }
+        Err(_) => {
+            // Timeout
+            tracing::warn!(
+                timeout_secs = timeout.as_secs(),
+                "Database operation timed out"
+            );
+            Err(ApiError::timeout(format!(
+                "Database operation timed out after {} seconds",
+                timeout.as_secs()
+            )))
+        }
+    }
+}
 
 /// Search packages by name or attribute path and return paginated package versions.
 ///
@@ -91,13 +167,12 @@ pub async fn search_packages(
     let limit = opts.limit;
     let offset = opts.offset;
 
-    let result = tokio::task::spawn_blocking(move || {
+    let result = run_db_operation(&state, move || {
         let _span = tracing::info_span!("db_search").entered();
         let db = Database::open_readonly(&db_path)?;
         search::execute_search(db.connection(), &opts)
     })
-    .await
-    .map_err(|e| ApiError::internal(format!("Task join error: {}", e)))??;
+    .await?;
 
     tracing::debug!(
         total = result.total,
@@ -153,13 +228,12 @@ pub async fn search_description(
     let limit = params.limit;
     let offset = params.offset;
 
-    let results = tokio::task::spawn_blocking(move || {
+    let results = run_db_operation(&state, move || {
         let _span = tracing::info_span!("db_fts_search").entered();
         let db = Database::open_readonly(&db_path)?;
         queries::search_by_description(db.connection(), &query)
     })
-    .await
-    .map_err(|e| ApiError::internal(format!("Task join error: {}", e)))??;
+    .await?;
 
     let total = results.len();
     tracing::debug!(total, "Description search completed");
@@ -215,7 +289,7 @@ pub async fn get_package(
     let db_path = state.db_path.clone();
     let attr_clone = attr.clone();
 
-    let packages = tokio::task::spawn_blocking(move || {
+    let packages = run_db_operation(&state, move || {
         let _span = tracing::info_span!("db_get_package").entered();
         let db = Database::open_readonly(&db_path)?;
         let results: Vec<_> = queries::search_by_attr(db.connection(), &attr_clone)?
@@ -224,8 +298,7 @@ pub async fn get_package(
             .collect();
         Ok::<_, crate::error::NxvError>(results)
     })
-    .await
-    .map_err(|e| ApiError::internal(format!("Task join error: {}", e)))??;
+    .await?;
 
     if packages.is_empty() {
         tracing::trace!("Package not found");
@@ -259,13 +332,12 @@ pub async fn get_version_history(
     let db_path = state.db_path.clone();
     let attr_clone = attr.clone();
 
-    let history = tokio::task::spawn_blocking(move || {
+    let history = run_db_operation(&state, move || {
         let _span = tracing::info_span!("db_get_history").entered();
         let db = Database::open_readonly(&db_path)?;
         queries::get_version_history(db.connection(), &attr_clone)
     })
-    .await
-    .map_err(|e| ApiError::internal(format!("Task join error: {}", e)))??;
+    .await?;
 
     if history.is_empty() {
         tracing::trace!("Package not found");
@@ -324,13 +396,12 @@ pub async fn get_version_info(
     let version_clone = version.clone();
 
     // Get the most recent occurrence of this version
-    let pkg = tokio::task::spawn_blocking(move || {
+    let pkg = run_db_operation(&state, move || {
         let _span = tracing::info_span!("db_get_version").entered();
         let db = Database::open_readonly(&db_path)?;
         queries::get_last_occurrence(db.connection(), &attr_clone, &version_clone)
     })
-    .await
-    .map_err(|e| ApiError::internal(format!("Task join error: {}", e)))??;
+    .await?;
 
     match pkg {
         Some(p) => {
@@ -390,13 +461,12 @@ pub async fn get_first_occurrence(
     let attr_clone = attr.clone();
     let version_clone = version.clone();
 
-    let pkg = tokio::task::spawn_blocking(move || {
+    let pkg = run_db_operation(&state, move || {
         let _span = tracing::info_span!("db_get_first_occurrence").entered();
         let db = Database::open_readonly(&db_path)?;
         queries::get_first_occurrence(db.connection(), &attr_clone, &version_clone)
     })
-    .await
-    .map_err(|e| ApiError::internal(format!("Task join error: {}", e)))??;
+    .await?;
 
     match pkg {
         Some(p) => {
@@ -437,13 +507,12 @@ pub async fn get_last_occurrence(
     let attr_clone = attr.clone();
     let version_clone = version.clone();
 
-    let pkg = tokio::task::spawn_blocking(move || {
+    let pkg = run_db_operation(&state, move || {
         let _span = tracing::info_span!("db_get_last_occurrence").entered();
         let db = Database::open_readonly(&db_path)?;
         queries::get_last_occurrence(db.connection(), &attr_clone, &version_clone)
     })
-    .await
-    .map_err(|e| ApiError::internal(format!("Task join error: {}", e)))??;
+    .await?;
 
     match pkg {
         Some(p) => {
@@ -496,13 +565,12 @@ pub async fn get_stats(
 ) -> Result<Json<ApiResponse<IndexStatsSchema>>, ApiError> {
     let db_path = state.db_path.clone();
 
-    let stats = tokio::task::spawn_blocking(move || {
+    let stats = run_db_operation(&state, move || {
         let _span = tracing::info_span!("db_get_stats").entered();
         let db = Database::open_readonly(&db_path)?;
         queries::get_stats(db.connection())
     })
-    .await
-    .map_err(|e| ApiError::internal(format!("Task join error: {}", e)))??;
+    .await?;
 
     tracing::debug!(
         total_ranges = stats.total_ranges,
@@ -514,6 +582,10 @@ pub async fn get_stats(
 }
 
 /// Health check endpoint.
+///
+/// Note: The health check uses relaxed concurrency controls to ensure it can
+/// respond even when the server is under heavy load. It has a shorter timeout
+/// and doesn't wait for a semaphore permit.
 #[utoipa::path(
     get,
     path = "/api/v1/health",
@@ -526,13 +598,19 @@ pub async fn get_stats(
 pub async fn health_check(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
     let db_path = state.db_path.clone();
 
-    let index_commit = tokio::task::spawn_blocking(move || {
-        Database::open_readonly(&db_path)
-            .ok()
-            .and_then(|db| db.get_meta("last_indexed_commit").ok().flatten())
-    })
+    // Health check uses a shorter timeout and doesn't require a semaphore permit
+    // to ensure it can respond even under heavy load
+    let index_commit = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::task::spawn_blocking(move || {
+            Database::open_readonly(&db_path)
+                .ok()
+                .and_then(|db| db.get_meta("last_indexed_commit").ok().flatten())
+        }),
+    )
     .await
     .ok()
+    .and_then(|r| r.ok())
     .flatten();
 
     Json(HealthResponse {

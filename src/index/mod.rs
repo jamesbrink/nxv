@@ -947,20 +947,33 @@ impl Indexer {
                 } else if path.starts_with("pkgs/") && path.ends_with(".nix") {
                     let parts: Vec<&str> = path.split('/').collect();
                     if parts.len() >= 2 {
-                        let potential_name =
-                            if parts.last() == Some(&"default.nix") && parts.len() >= 2 {
-                                parts[parts.len() - 2]
-                            } else {
-                                parts
-                                    .last()
-                                    .map(|f| f.trim_end_matches(".nix"))
-                                    .unwrap_or("")
-                            };
+                        // pkgs/by-name/XX/pkgname/package.nix -> pkgname
+                        // These are auto-discovered and don't need all_attrs validation
+                        if path.starts_with("pkgs/by-name/") && parts.len() >= 4 {
+                            let pkg_name = parts[3];
+                            if !pkg_name.is_empty() {
+                                target_attr_paths.insert(pkg_name.to_string());
+                            }
+                        } else {
+                            // Traditional paths: extract name and validate against all_attrs
+                            let potential_name =
+                                // pkgs/.../something/default.nix -> something
+                                if parts.last() == Some(&"default.nix") && parts.len() >= 2 {
+                                    parts[parts.len() - 2]
+                                }
+                                // pkgs/.../something.nix -> something
+                                else {
+                                    parts
+                                        .last()
+                                        .map(|f| f.trim_end_matches(".nix"))
+                                        .unwrap_or("")
+                                };
 
-                        if let Some(all_attrs_list) = all_attrs
-                            && all_attrs_list.contains(&potential_name.to_string())
-                        {
-                            target_attr_paths.insert(potential_name.to_string());
+                            if let Some(all_attrs_list) = all_attrs
+                                && all_attrs_list.contains(&potential_name.to_string())
+                            {
+                                target_attr_paths.insert(potential_name.to_string());
+                            }
                         }
                     }
                 }

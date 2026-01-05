@@ -394,13 +394,17 @@ fn run_backfill_historical<P: AsRef<Path>, Q: AsRef<Path>>(
     let total_commits = commits_to_process.len();
     let mut result = BackfillResult::default();
 
+    // Use shared ETA tracker with larger window for stability
+    let mut eta_tracker = super::EtaTracker::new(50);
+
     let progress = ProgressBar::new(total_commits as u64);
     progress.set_style(
         ProgressStyle::default_bar()
-            .template("  [{bar:40.cyan/blue}] {pos}/{len} commits ({percent}%) {msg}")
+            .template("  [{bar:40.cyan/blue}] {pos}/{len} commits {msg}")
             .unwrap()
             .progress_chars("█▓▒░  "),
     );
+    progress.enable_steady_tick(std::time::Duration::from_millis(100));
 
     // Get first commit to initialize worktree session
     let first_commit = match commits_to_process.first() {
@@ -422,6 +426,10 @@ fn run_backfill_historical<P: AsRef<Path>, Q: AsRef<Path>>(
 
     // Process commits using the worktree session
     for (commit, attr_paths) in &commits_to_process {
+        // Start timing this commit
+        eta_tracker.start_commit();
+        eta_tracker.set_remaining((total_commits - result.commits_processed) as u64);
+
         // Check for interruption
         if shutdown_flag.load(Ordering::SeqCst) {
             result.was_interrupted = true;
@@ -437,6 +445,7 @@ fn run_backfill_historical<P: AsRef<Path>, Q: AsRef<Path>>(
                 &commit[..12.min(commit.len())],
                 e
             ));
+            eta_tracker.finish_commit();
             continue;
         }
 
@@ -451,6 +460,7 @@ fn run_backfill_historical<P: AsRef<Path>, Q: AsRef<Path>>(
                         &commit[..12.min(commit.len())],
                         e
                     ));
+                    eta_tracker.finish_commit();
                     continue;
                 }
             };
@@ -485,10 +495,15 @@ fn run_backfill_historical<P: AsRef<Path>, Q: AsRef<Path>>(
         result.packages_checked += attr_paths.len();
         result.commits_processed += 1;
 
+        // Record timing
+        eta_tracker.finish_commit();
+
         progress.set_position(result.commits_processed as u64);
         progress.set_message(format!(
-            "{} pkgs, {} updated",
-            result.packages_checked, result.records_updated
+            "{} | {} pkgs, {} updated",
+            eta_tracker.progress_string(total_commits as u64),
+            result.packages_checked,
+            result.records_updated
         ));
     }
 

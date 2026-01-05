@@ -247,8 +247,39 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
     if args.exact && !args.desc && !backend.is_remote() {
         let bloom_path = paths::get_bloom_path_for_db(&cli.db_path);
 
-        // Regenerate bloom filter if missing but database exists
-        if !bloom_path.exists()
+        // Check if bloom filter is missing or stale (older than database)
+        // This handles the case where the database is being actively indexed
+        let bloom_is_stale = || -> bool {
+            // If bloom doesn't exist, it's "stale" (needs creation)
+            if !bloom_path.exists() {
+                return true;
+            }
+
+            // Get bloom filter modification time
+            let bloom_mtime = match std::fs::metadata(&bloom_path) {
+                Ok(m) => m.modified().ok(),
+                Err(_) => return true,
+            };
+
+            // Get database modification time (check WAL file too for active writes)
+            let db_mtime = std::fs::metadata(&cli.db_path)
+                .ok()
+                .and_then(|m| m.modified().ok());
+            let wal_path = cli.db_path.with_extension("db-wal");
+            let wal_mtime = std::fs::metadata(&wal_path)
+                .ok()
+                .and_then(|m| m.modified().ok());
+
+            // Bloom is stale if database or WAL is newer
+            match (bloom_mtime, db_mtime, wal_mtime) {
+                (Some(bloom), Some(db), _) if db > bloom => true,
+                (Some(bloom), _, Some(wal)) if wal > bloom => true,
+                _ => false,
+            }
+        };
+
+        // Regenerate bloom filter if missing or stale
+        if bloom_is_stale()
             && cli.db_path.exists()
             && let Ok(db) = crate::db::Database::open_readonly(&cli.db_path)
         {
@@ -1075,6 +1106,85 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
     Ok(())
 }
 
+/// Validate a date argument in YYYY-MM-DD format.
+/// Returns the date string if valid, or an error message.
+#[cfg(feature = "indexer")]
+fn validate_date_format(date: &str, arg_name: &str) -> Result<()> {
+    let parts: Vec<&str> = date.split('-').collect();
+    if parts.len() != 3 {
+        anyhow::bail!("--{} must be in YYYY-MM-DD format, got: {}", arg_name, date);
+    }
+    let year = parts[0].parse::<u32>();
+    let month = parts[1].parse::<u32>();
+    let day = parts[2].parse::<u32>();
+    match (year, month, day) {
+        (Ok(y), Ok(m), Ok(d))
+            if (1970..=2100).contains(&y) && (1..=12).contains(&m) && (1..=31).contains(&d) =>
+        {
+            Ok(())
+        }
+        _ => anyhow::bail!(
+            "--{} must be a valid date in YYYY-MM-DD format, got: {}",
+            arg_name,
+            date
+        ),
+    }
+}
+
+/// Validate date range against MIN_INDEXABLE_DATE.
+/// Returns error if --until is before MIN_INDEXABLE_DATE.
+/// Warns if --since is before MIN_INDEXABLE_DATE.
+#[cfg(feature = "indexer")]
+fn validate_date_range(since: Option<&str>, until: Option<&str>) -> Result<()> {
+    use crate::index::git::MIN_INDEXABLE_DATE;
+
+    // Validate format first
+    if let Some(since) = since {
+        validate_date_format(since, "since")?;
+    }
+    if let Some(until) = until {
+        validate_date_format(until, "until")?;
+    }
+
+    // Check that --until is not before MIN_INDEXABLE_DATE
+    if let Some(until) = until
+        && until < MIN_INDEXABLE_DATE
+    {
+        anyhow::bail!(
+            "--until date {} is before the minimum indexable date {}.\n\
+             nixpkgs commits before {} have a different structure that \
+             doesn't work with modern Nix evaluation.",
+            until,
+            MIN_INDEXABLE_DATE,
+            MIN_INDEXABLE_DATE
+        );
+    }
+
+    // Warn if --since is before MIN_INDEXABLE_DATE (it will be clamped)
+    if let Some(since) = since
+        && since < MIN_INDEXABLE_DATE
+    {
+        eprintln!(
+            "Note: --since {} is before the minimum indexable date {}. \
+             Starting from {} instead.",
+            since, MIN_INDEXABLE_DATE, MIN_INDEXABLE_DATE
+        );
+    }
+
+    // Check that --since is not after --until
+    if let (Some(since), Some(until)) = (since, until)
+        && since > until
+    {
+        anyhow::bail!(
+            "--since {} is after --until {}. No commits in this range.",
+            since,
+            until
+        );
+    }
+
+    Ok(())
+}
+
 /// Run the indexer against a nixpkgs repository and update the local index database.
 ///
 /// This performs either a full rebuild or an incremental index (depending on `args.full`),
@@ -1102,6 +1212,9 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
     use crate::db::Database;
     use crate::index::{Indexer, IndexerConfig, save_bloom_filter};
     use std::sync::atomic::Ordering;
+
+    // Validate date arguments
+    validate_date_range(args.since.as_deref(), args.until.as_deref())?;
 
     // Ensure data directory exists before opening database
     paths::ensure_data_dir()?;
@@ -1196,37 +1309,10 @@ fn cmd_backfill(cli: &Cli, args: &cli::BackfillArgs) -> Result<()> {
     use crate::index::backfill::{BackfillConfig, create_shutdown_flag, run_backfill};
     use std::sync::atomic::Ordering;
 
+    // Validate date arguments
+    validate_date_range(args.since.as_deref(), args.until.as_deref())?;
+
     let nixpkgs_path = paths::expand_tilde(&args.nixpkgs_path);
-
-    // Validate date format for --since and --until (YYYY-MM-DD)
-    fn validate_date(date: &str, arg_name: &str) -> Result<()> {
-        let parts: Vec<&str> = date.split('-').collect();
-        if parts.len() != 3 {
-            anyhow::bail!("--{} must be in YYYY-MM-DD format, got: {}", arg_name, date);
-        }
-        let year = parts[0].parse::<u32>();
-        let month = parts[1].parse::<u32>();
-        let day = parts[2].parse::<u32>();
-        match (year, month, day) {
-            (Ok(y), Ok(m), Ok(d))
-                if (2000..=2100).contains(&y) && (1..=12).contains(&m) && (1..=31).contains(&d) =>
-            {
-                Ok(())
-            }
-            _ => anyhow::bail!(
-                "--{} must be a valid date in YYYY-MM-DD format, got: {}",
-                arg_name,
-                date
-            ),
-        }
-    }
-
-    if let Some(ref since) = args.since {
-        validate_date(since, "since")?;
-    }
-    if let Some(ref until) = args.until {
-        validate_date(until, "until")?;
-    }
 
     if args.history {
         eprintln!(

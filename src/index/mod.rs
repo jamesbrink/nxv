@@ -434,164 +434,179 @@ fn set_to_json(values: &HashSet<String>) -> Option<String> {
     serde_json::to_string(&list).ok()
 }
 
-/// Tracks timing data for smoothed ETA calculations.
+/// Tracks timing data for smoothed ETA calculations using exponential moving average (EMA).
 ///
-/// Uses a sliding window of recent commit processing times to calculate
-/// a stable ETA that doesn't jump wildly when individual commits vary
-/// in processing time.
-struct EtaTracker {
-    /// Recent processing times (sliding window)
-    times: VecDeque<Duration>,
-    /// Maximum window size
-    window_size: usize,
+/// Uses EMA with outlier rejection instead of simple sliding window average because:
+/// - Commit processing times vary wildly (some touch 1 file, others touch thousands)
+/// - Simple averages get thrown off by outliers
+/// - EMA provides smooth, responsive estimates
+pub(super) struct EtaTracker {
+    /// Exponential moving average of commit duration (in seconds)
+    ema_secs: Option<f64>,
+    /// EMA smoothing factor (0.0-1.0, higher = more responsive)
+    alpha: f64,
     /// When the current commit started processing
     commit_start: Option<Instant>,
     /// Total remaining commits
     total_remaining: u64,
+    /// Number of commits processed (for warm-up)
+    commits_processed: u64,
+    /// Minimum samples before showing ETA
+    warmup_count: u64,
+    /// Recent durations for outlier detection (rolling median)
+    recent_durations: VecDeque<f64>,
+    /// Window size for outlier detection
+    outlier_window: usize,
 }
 
 impl EtaTracker {
-    /// Creates an EtaTracker that smooths ETA estimates over a sliding window.
+    /// Creates an EtaTracker with exponential moving average smoothing.
     ///
-    /// `window_size` is the maximum number of recent commit durations retained for averaging; larger
-    /// values produce a smoother but less responsive ETA.
+    /// `window_size` controls the effective smoothing - larger values mean
+    /// more smoothing (less responsive but more stable).
     ///
-    /// # Examples
-    ///
-    /// ```
-    /// let tracker = EtaTracker::new(5);
-    /// assert_eq!(tracker.window_size, 5);
-    /// assert!(tracker.avg_time_per_commit().is_none());
-    /// assert_eq!(tracker.eta_string(), "calculating...");
-    /// ```
+    /// The EMA alpha is calculated as 2/(window_size+1), which gives:
+    /// - window_size=20 -> alpha=0.095 (smooth)
+    /// - window_size=50 -> alpha=0.039 (very smooth)
     fn new(window_size: usize) -> Self {
+        // Convert window size to EMA alpha: alpha = 2/(N+1)
+        // This gives equivalent smoothing to a simple moving average of size N
+        let alpha = 2.0 / (window_size as f64 + 1.0);
+
         Self {
-            times: VecDeque::with_capacity(window_size),
-            window_size,
+            ema_secs: None,
+            alpha,
             commit_start: None,
             total_remaining: 0,
+            commits_processed: 0,
+            warmup_count: 10, // Don't show ETA until 10 commits processed
+            recent_durations: VecDeque::with_capacity(50),
+            outlier_window: 50,
         }
     }
 
     /// Begin timing for the current commit.
-    ///
-    /// Records the current instant so that a subsequent call to `finish_commit` can
-    /// measure and record the commit's elapsed time.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// let mut tracker = EtaTracker::new(3);
-    /// tracker.start_commit(); // begin timing for one commit
-    /// ```
     fn start_commit(&mut self) {
         self.commit_start = Some(Instant::now());
     }
 
-    /// Stops the current commit timer and records its elapsed duration into the sliding window.
+    /// Stops the current commit timer and updates the EMA.
     ///
-    /// This appends the duration measured since the last `start_commit` to the internal times
-    /// buffer and drops the oldest entry if the buffer exceeds `window_size`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// let mut tracker = EtaTracker::new(3);
-    /// tracker.start_commit();
-    /// std::thread::sleep(std::time::Duration::from_millis(10));
-    /// tracker.finish_commit();
-    /// assert!(tracker.avg_time_per_commit().is_some());
-    /// ```
+    /// Uses outlier rejection: if a sample is more than 3x the median,
+    /// it's given reduced weight to prevent ETA spikes.
     fn finish_commit(&mut self) {
         if let Some(start) = self.commit_start.take() {
-            let elapsed = start.elapsed();
-            self.times.push_back(elapsed);
-            if self.times.len() > self.window_size {
-                self.times.pop_front();
+            let elapsed_secs = start.elapsed().as_secs_f64();
+            self.commits_processed += 1;
+
+            // Track recent durations for outlier detection
+            self.recent_durations.push_back(elapsed_secs);
+            if self.recent_durations.len() > self.outlier_window {
+                self.recent_durations.pop_front();
             }
+
+            // Calculate median for outlier detection
+            let median = self.calculate_median();
+
+            // Determine if this is an outlier and adjust alpha accordingly
+            let effective_alpha = if let Some(med) = median {
+                if elapsed_secs > med * 3.0 {
+                    // Outlier (slow): use much smaller alpha to reduce impact
+                    self.alpha * 0.1
+                } else if elapsed_secs < med * 0.1 {
+                    // Outlier (fast): also reduce impact
+                    self.alpha * 0.3
+                } else {
+                    self.alpha
+                }
+            } else {
+                self.alpha
+            };
+
+            // Update EMA: new_ema = alpha * sample + (1-alpha) * old_ema
+            self.ema_secs = Some(match self.ema_secs {
+                Some(current) => effective_alpha * elapsed_secs + (1.0 - effective_alpha) * current,
+                None => elapsed_secs, // First sample becomes the initial EMA
+            });
+        }
+    }
+
+    /// Calculate median of recent durations for outlier detection.
+    fn calculate_median(&self) -> Option<f64> {
+        if self.recent_durations.len() < 5 {
+            return None;
+        }
+
+        let mut sorted: Vec<f64> = self.recent_durations.iter().copied().collect();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        let mid = sorted.len() / 2;
+        if sorted.len().is_multiple_of(2) {
+            Some((sorted[mid - 1] + sorted[mid]) / 2.0)
+        } else {
+            Some(sorted[mid])
         }
     }
 
     /// Sets the number of remaining commits used to compute the ETA.
-    ///
-    /// This updates the internal remaining-count which eta() and eta_string() use
-    /// to calculate the estimated time left.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// let mut tracker = EtaTracker::new(3);
-    /// tracker.set_remaining(42);
-    /// assert_eq!(tracker.eta().is_none(), true);
-    /// ```
     fn set_remaining(&mut self, remaining: u64) {
         self.total_remaining = remaining;
     }
 
-    /// Compute the average duration per commit from the tracked sliding window.
-    ///
-    /// Returns `Some(duration)` equal to the arithmetic mean of the recorded commit durations when at least one sample exists, or `None` if no durations have been recorded.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::time::Duration;
-    /// let mut tracker = super::EtaTracker::new(5);
-    /// // simulate recorded commit durations
-    /// tracker.times.push_back(Duration::from_millis(100));
-    /// tracker.times.push_back(Duration::from_millis(200));
-    /// let avg = tracker.avg_time_per_commit().unwrap();
-    /// assert_eq!(avg, Duration::from_millis(150));
-    /// ```
-    fn avg_time_per_commit(&self) -> Option<Duration> {
-        if self.times.is_empty() {
-            return None;
-        }
-        let total: Duration = self.times.iter().sum();
-        Some(total / self.times.len() as u32)
+    /// Get the number of commits processed.
+    #[allow(dead_code)]
+    fn processed(&self) -> u64 {
+        self.commits_processed
     }
 
-    /// Compute a smoothed estimated remaining duration using the sliding-window average of recent commit timings.
+    /// Calculate percentage complete.
+    fn percentage(&self, total: u64) -> f64 {
+        if total == 0 {
+            return 100.0;
+        }
+        (self.commits_processed as f64 / total as f64) * 100.0
+    }
+
+    /// Returns a formatted progress string with percentage and ETA.
+    fn progress_string(&self, total: u64) -> String {
+        let pct = self.percentage(total);
+        let eta = self.eta_string();
+        format!("{:.1}% | {}", pct, eta)
+    }
+
+    /// Compute the average duration per commit from the EMA.
+    #[allow(dead_code)]
+    fn avg_time_per_commit(&self) -> Option<Duration> {
+        self.ema_secs.map(Duration::from_secs_f64)
+    }
+
+    /// Compute the estimated remaining duration.
     ///
-    /// Uses the average time per commit from the tracker multiplied by the configured remaining commit count.
-    ///
-    /// # Returns
-    ///
-    /// `Some(Duration)` equal to the average duration per commit multiplied by `total_remaining`, `None` if there is no timing data.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// let mut t = EtaTracker::new(3);
-    /// t.start_commit();
-    /// t.finish_commit();
-    /// t.set_remaining(5);
-    /// let e = t.eta();
-    /// assert!(e.is_some());
-    /// ```
+    /// Returns None during warm-up period to avoid showing wildly inaccurate ETAs.
     fn eta(&self) -> Option<Duration> {
-        let avg = self.avg_time_per_commit()?;
-        // Use checked multiplication to avoid overflow, cap at u32::MAX commits
-        let remaining = self.total_remaining.min(u32::MAX as u64) as u32;
-        avg.checked_mul(remaining).or(Some(Duration::MAX))
+        // Don't show ETA until we have enough samples
+        if self.commits_processed < self.warmup_count {
+            return None;
+        }
+
+        let avg_secs = self.ema_secs?;
+        let remaining_secs = avg_secs * self.total_remaining as f64;
+
+        // Cap at reasonable maximum (30 days)
+        let max_secs = 30.0 * 24.0 * 3600.0;
+        Some(Duration::from_secs_f64(remaining_secs.min(max_secs)))
     }
 
     /// Returns a human-readable ETA string for the remaining work.
     ///
-    /// The duration is formatted as:
-    /// - `"<secs>s"` for durations less than 60 seconds,
-    /// - `"<mins>m <secs>s"` for durations less than an hour,
-    /// - `"<hours>h <mins>m"` for one hour or more.
-    ///
-    /// If no ETA can be computed, returns `"calculating..."`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// let tracker = EtaTracker::new(3);
-    /// assert_eq!(tracker.eta_string(), "calculating...");
-    /// ```
+    /// Shows "warming up..." during initial sample collection,
+    /// then provides stable ETA estimates.
     fn eta_string(&self) -> String {
+        if self.commits_processed < self.warmup_count {
+            let remaining = self.warmup_count - self.commits_processed;
+            return format!("warming up ({} more)...", remaining);
+        }
+
         match self.eta() {
             Some(eta) => {
                 let secs = eta.as_secs();
@@ -985,12 +1000,12 @@ impl Indexer {
                 break;
             }
 
-            // Update progress bar with smoothed ETA
+            // Update progress bar with percentage and smoothed ETA
             if let Some(ref pb) = progress_bar {
                 pb.set_position(commit_idx as u64);
                 pb.set_message(format!(
-                    "({}) {} ({}) | {} pkgs | {} ranges",
-                    eta_tracker.eta_string(),
+                    "{} | {} ({}) | {} pkgs | {} ranges",
+                    eta_tracker.progress_string(total_commits as u64),
                     &commit.short_hash,
                     commit.date.format("%Y-%m-%d"),
                     result.packages_found,
@@ -1398,54 +1413,93 @@ mod tests {
         let tracker = EtaTracker::new(10);
         assert!(tracker.avg_time_per_commit().is_none());
         assert!(tracker.eta().is_none());
-        assert_eq!(tracker.eta_string(), "calculating...");
+        // Shows warm-up message when no commits processed
+        assert!(tracker.eta_string().contains("warming up"));
     }
 
     #[test]
-    fn test_eta_tracker_single_commit() {
+    fn test_eta_tracker_warmup_period() {
         let mut tracker = EtaTracker::new(10);
-        tracker.set_remaining(5);
+        tracker.set_remaining(100);
 
-        tracker.start_commit();
-        thread::sleep(Duration::from_millis(50));
-        tracker.finish_commit();
+        // Process fewer commits than warmup_count
+        for _ in 0..5 {
+            tracker.start_commit();
+            thread::sleep(Duration::from_millis(5));
+            tracker.finish_commit();
+        }
 
-        let avg = tracker.avg_time_per_commit().unwrap();
-        assert!(avg >= Duration::from_millis(50));
-
-        let eta = tracker.eta().unwrap();
-        // 5 remaining * ~50ms = ~250ms
-        assert!(eta >= Duration::from_millis(200));
+        // Should still show warming up
+        assert!(tracker.eta_string().contains("warming up"));
+        assert!(tracker.eta().is_none());
     }
 
     #[test]
-    fn test_eta_tracker_sliding_window() {
-        let mut tracker = EtaTracker::new(3);
-        tracker.set_remaining(10);
+    fn test_eta_tracker_after_warmup() {
+        let mut tracker = EtaTracker::new(10);
+        tracker.set_remaining(50);
 
-        // Add 5 commits - only last 3 should be kept
-        for _ in 0..5 {
+        // Process more commits than warmup_count (10)
+        for _ in 0..12 {
             tracker.start_commit();
             thread::sleep(Duration::from_millis(10));
             tracker.finish_commit();
         }
 
-        assert_eq!(tracker.times.len(), 3);
+        // Should now show actual ETA
+        let eta = tracker.eta();
+        assert!(eta.is_some());
+        assert!(!tracker.eta_string().contains("warming up"));
+    }
+
+    #[test]
+    fn test_eta_tracker_ema_smoothing() {
+        let mut tracker = EtaTracker::new(10);
+        tracker.set_remaining(10);
+
+        // Add consistent commits to establish baseline
+        for _ in 0..15 {
+            tracker.start_commit();
+            thread::sleep(Duration::from_millis(20));
+            tracker.finish_commit();
+        }
+
+        let ema_before = tracker.ema_secs.unwrap();
+
+        // Add one outlier (very slow)
+        tracker.start_commit();
+        thread::sleep(Duration::from_millis(200));
+        tracker.finish_commit();
+
+        let ema_after = tracker.ema_secs.unwrap();
+
+        // EMA should not have jumped dramatically due to outlier rejection
+        // (outlier gets reduced alpha, so impact is dampened)
+        assert!(
+            ema_after < ema_before * 2.0,
+            "EMA jumped too much after outlier"
+        );
     }
 
     #[test]
     fn test_eta_tracker_formatting() {
-        let mut tracker = EtaTracker::new(10);
+        let mut tracker = EtaTracker::new(5);
         tracker.set_remaining(1);
 
-        // Add a commit that takes ~100ms
-        tracker.start_commit();
-        thread::sleep(Duration::from_millis(100));
-        tracker.finish_commit();
+        // Process enough commits to pass warmup
+        for _ in 0..12 {
+            tracker.start_commit();
+            thread::sleep(Duration::from_millis(10));
+            tracker.finish_commit();
+        }
 
-        // Should format as seconds
+        // Should format with time units
         let eta_str = tracker.eta_string();
-        assert!(eta_str.contains("s") || eta_str.contains("calculating"));
+        assert!(
+            eta_str.contains("s") || eta_str.contains("m") || eta_str.contains("h"),
+            "Expected time format, got: {}",
+            eta_str
+        );
     }
 
     /// Creates a temporary git repository resembling a minimal nixpkgs checkout.

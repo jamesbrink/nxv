@@ -8,18 +8,17 @@ use super::protocol::{WorkRequest, WorkResponse};
 use crate::index::extractor;
 use std::io;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Memory threshold configuration from CLI.
-static mut MAX_MEMORY_MIB: usize = 6 * 1024; // Default: 6 GiB
+/// Memory threshold configuration from CLI (in MiB).
+/// Default: 6 GiB. Uses atomic for safe concurrent access.
+static MAX_MEMORY_MIB: AtomicUsize = AtomicUsize::new(6 * 1024);
 
 /// Set the memory threshold for worker restart.
 ///
-/// # Safety
-/// This should only be called once at startup before any threads are created.
+/// This can be called at any time but should typically be set once at startup.
 pub fn set_max_memory(mib: usize) {
-    unsafe {
-        MAX_MEMORY_MIB = mib;
-    }
+    MAX_MEMORY_MIB.store(mib, Ordering::Relaxed);
 }
 
 /// Get the current memory usage in MiB.
@@ -51,7 +50,7 @@ fn get_memory_usage_mib() -> usize {
 /// Check if memory exceeds the threshold.
 fn is_over_memory_threshold() -> bool {
     let current = get_memory_usage_mib();
-    let threshold = unsafe { MAX_MEMORY_MIB };
+    let threshold = MAX_MEMORY_MIB.load(Ordering::Relaxed);
     current > threshold
 }
 
@@ -170,21 +169,18 @@ mod tests {
 
     #[test]
     fn test_is_over_memory_threshold() {
+        // Save original value
+        let original = MAX_MEMORY_MIB.load(Ordering::Relaxed);
+
         // Set a very high threshold - should not be over
-        unsafe {
-            MAX_MEMORY_MIB = 100_000;
-        }
+        MAX_MEMORY_MIB.store(100_000, Ordering::Relaxed);
         assert!(!is_over_memory_threshold());
 
         // Set a very low threshold - should be over
-        unsafe {
-            MAX_MEMORY_MIB = 1;
-        }
+        MAX_MEMORY_MIB.store(1, Ordering::Relaxed);
         assert!(is_over_memory_threshold());
 
-        // Reset to default
-        unsafe {
-            MAX_MEMORY_MIB = 6 * 1024;
-        }
+        // Restore original value
+        MAX_MEMORY_MIB.store(original, Ordering::Relaxed);
     }
 }

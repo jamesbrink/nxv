@@ -202,6 +202,12 @@ impl Worker {
 
     /// Handle worker restart request.
     fn handle_restart(&mut self) -> Result<()> {
+        tracing::info!(
+            worker_id = self.id,
+            restart_count = self.restarts + 1,
+            jobs_completed = self.jobs_completed,
+            "Worker requesting restart (memory threshold exceeded)"
+        );
         if let Some(mut proc) = self.proc.take() {
             proc.stop(Duration::from_secs(5))?;
         }
@@ -223,9 +229,22 @@ impl Worker {
 
         let failure = WorkerFailure::new(reason.clone()).with_context(context);
 
+        tracing::warn!(
+            worker_id = self.id,
+            reason = %reason,
+            context = context,
+            recoverable = failure.is_recoverable(),
+            "Worker died unexpectedly"
+        );
+
         if failure.is_recoverable() {
             // Try to respawn
             self.restarts += 1;
+            tracing::info!(
+                worker_id = self.id,
+                restart_count = self.restarts,
+                "Attempting to respawn worker"
+            );
             if let Err(e) = self.spawn() {
                 return Ok(NxvError::Worker(format!(
                     "Worker {} died ({}) and failed to respawn: {}",
@@ -238,6 +257,7 @@ impl Worker {
                     self.id, e
                 )));
             }
+            tracing::info!(worker_id = self.id, "Worker respawned successfully");
             // Successfully respawned - caller should retry
             Ok(NxvError::Worker(format!(
                 "Worker {} died ({}) but was respawned - retry operation",

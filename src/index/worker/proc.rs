@@ -44,6 +44,8 @@ impl Proc {
     ///
     /// Takes ownership of the child's stdin and stdout.
     pub fn from_child(mut child: std::process::Child) -> Result<Self> {
+        use std::os::unix::io::IntoRawFd;
+
         let pid = Pid::from_raw(child.id() as i32);
 
         let stdin = child
@@ -55,14 +57,10 @@ impl Proc {
             .take()
             .ok_or_else(|| NxvError::Worker("Child stdout not captured".into()))?;
 
-        // Convert to raw fds and wrap in PipeFd
-        use std::os::unix::io::AsRawFd;
-        let stdin_fd = unsafe { PipeFd::from_raw(stdin.as_raw_fd()) };
-        let stdout_fd = unsafe { PipeFd::from_raw(stdout.as_raw_fd()) };
-
-        // Prevent the original handles from closing the fds
-        std::mem::forget(stdin);
-        std::mem::forget(stdout);
+        // Convert to raw fds using IntoRawFd to transfer ownership cleanly
+        // Safety: IntoRawFd consumes the handle and gives us ownership of the fd
+        let stdin_fd = unsafe { PipeFd::from_raw(stdin.into_raw_fd()) };
+        let stdout_fd = unsafe { PipeFd::from_raw(stdout.into_raw_fd()) };
 
         Ok(Self::new(pid, stdin_fd, stdout_fd))
     }

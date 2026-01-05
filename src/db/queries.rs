@@ -214,7 +214,19 @@ impl PackageVersion {
     pub fn vulnerabilities(&self) -> Vec<String> {
         self.known_vulnerabilities
             .as_ref()
-            .and_then(|v| serde_json::from_str(v).ok())
+            .and_then(|v| {
+                serde_json::from_str(v)
+                    .map_err(|e| {
+                        tracing::warn!(
+                            attr = %self.attribute_path,
+                            error = %e,
+                            raw_value = %v,
+                            "Failed to parse known_vulnerabilities JSON"
+                        );
+                        e
+                    })
+                    .ok()
+            })
             .unwrap_or_default()
     }
 }

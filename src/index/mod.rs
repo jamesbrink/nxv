@@ -832,6 +832,7 @@ impl Indexer {
                                 ranges_created: 0,
                                 unique_names: 0,
                                 was_interrupted: false,
+                                extraction_failures: 0,
                             });
                         }
                         eprintln!("Found {} new commits to process", commits.len());
@@ -919,7 +920,8 @@ impl Indexer {
             pb.set_style(
                 ProgressStyle::default_bar()
                     .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} {msg}")
-                    .unwrap()
+                    // Template is a compile-time constant, this should never fail
+                    .expect("Invalid progress bar template")
                     .progress_chars("█▓▒░  "),
             );
             pb.enable_steady_tick(std::time::Duration::from_millis(100));
@@ -974,6 +976,7 @@ impl Indexer {
             ranges_created: 0,
             unique_names: 0,
             was_interrupted: false,
+            extraction_failures: 0,
         };
 
         let mut prev_commit_hash: Option<String> = resume_from.map(String::from);
@@ -1170,6 +1173,13 @@ impl Indexer {
                 ) {
                     Ok(pkgs) => pkgs,
                     Err(e) => {
+                        result.extraction_failures += 1;
+                        tracing::warn!(
+                            commit = %commit.short_hash,
+                            system = %system,
+                            error = %e,
+                            "Extraction failed for system"
+                        );
                         warn(
                             &progress_bar,
                             format!(
@@ -1411,6 +1421,8 @@ pub struct IndexResult {
     pub unique_names: u64,
     /// Whether the indexing was interrupted (e.g., by Ctrl+C).
     pub was_interrupted: bool,
+    /// Number of extraction failures (per-system failures during indexing).
+    pub extraction_failures: u64,
 }
 
 /// Constructs a Bloom filter containing all unique package attribute paths from the database.
@@ -1696,10 +1708,12 @@ mod tests {
             ranges_created: 0,
             unique_names: 0,
             was_interrupted: false,
+            extraction_failures: 0,
         };
 
         assert_eq!(result.commits_processed, 0);
         assert!(!result.was_interrupted);
+        assert_eq!(result.extraction_failures, 0);
     }
 
     #[test]

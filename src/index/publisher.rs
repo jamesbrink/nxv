@@ -188,8 +188,69 @@ pub fn resolve_secret_key(key: &str) -> Result<String> {
     }
 
     // Otherwise, assume it's raw key content (user may have stripped the comment)
-    // Try to use it as-is and let the parser handle validation
+    // Validate format before returning
+    validate_secret_key_format(key)?;
     Ok(key.to_string())
+}
+
+/// Validate that a string looks like a valid minisign secret key.
+///
+/// Performs basic format validation to catch common mistakes early:
+/// - Checks that the key is not empty
+/// - Verifies the key has proper structure (comment + key data, or just key data)
+/// - Detects if a public key was provided instead of a secret key
+///
+/// Note: This is a format check, not a cryptographic validation. The actual
+/// key parsing is still performed by the minisign crate during signing.
+fn validate_secret_key_format(key_str: &str) -> Result<()> {
+    let lines: Vec<&str> = key_str.lines().collect();
+
+    if lines.is_empty() || key_str.trim().is_empty() {
+        return Err(NxvError::Signing("Secret key is empty".into()));
+    }
+
+    // Determine which line contains the actual key data
+    let key_line = if lines[0].starts_with("untrusted comment:") {
+        // Standard format with comment
+        if lines.len() < 2 {
+            return Err(NxvError::Signing(
+                "Secret key appears incomplete: has comment but missing key data".into(),
+            ));
+        }
+        lines[1].trim()
+    } else {
+        // Raw key data without comment
+        lines[0].trim()
+    };
+
+    // Check if this is a public key instead of a secret key
+    // Public keys start with "RW" prefix, secret keys typically start with "ED" or other prefixes
+    if key_line.starts_with("RW") {
+        return Err(NxvError::Signing(
+            "This appears to be a public key (starts with RW), not a secret key. \
+             Secret keys are stored in .key files, public keys in .pub files."
+                .into(),
+        ));
+    }
+
+    // Basic check that the key data looks like base64 (contains only valid base64 chars)
+    // This catches common mistakes like passing plain text
+    if key_line.len() < 10 {
+        return Err(NxvError::Signing(
+            "Secret key data is too short to be valid".into(),
+        ));
+    }
+
+    let valid_base64 = key_line
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=');
+    if !valid_base64 {
+        return Err(NxvError::Signing(
+            "Secret key contains invalid characters. Expected base64-encoded key data.".into(),
+        ));
+    }
+
+    Ok(())
 }
 
 /// Sign a manifest file using a minisign secret key.

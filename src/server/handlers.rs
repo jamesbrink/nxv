@@ -27,6 +27,9 @@ use super::AppState;
 use super::error::ApiError;
 use super::types::{self, *};
 
+/// Maximum length for query strings to prevent DoS via oversized inputs.
+const MAX_QUERY_LENGTH: usize = 1000;
+
 /// Execute a database operation with concurrency limiting and timeout.
 ///
 /// This helper:
@@ -149,6 +152,14 @@ pub async fn search_packages(
     State(state): State<Arc<AppState>>,
     Query(params): Query<SearchParams>,
 ) -> Result<Json<ApiResponse<Vec<PackageVersion>>>, ApiError> {
+    // Validate query length to prevent DoS via oversized inputs
+    if params.q.len() > MAX_QUERY_LENGTH {
+        return Err(ApiError::bad_request(format!(
+            "Query too long (max {} characters)",
+            MAX_QUERY_LENGTH
+        )));
+    }
+
     let db_path = state.db_path.clone();
 
     // Cap limit to prevent memory exhaustion from malicious requests
@@ -227,6 +238,14 @@ pub async fn search_description(
     State(state): State<Arc<AppState>>,
     Query(params): Query<DescriptionSearchParams>,
 ) -> Result<Json<ApiResponse<Vec<PackageVersion>>>, ApiError> {
+    // Validate query length to prevent DoS via oversized inputs
+    if params.q.len() > MAX_QUERY_LENGTH {
+        return Err(ApiError::bad_request(format!(
+            "Query too long (max {} characters)",
+            MAX_QUERY_LENGTH
+        )));
+    }
+
     let db_path = state.db_path.clone();
     let query = params.q.clone();
     // Cap limit to prevent memory exhaustion from malicious requests
@@ -625,6 +644,42 @@ pub async fn health_check(State(state): State<Arc<AppState>>) -> Json<HealthResp
     })
 }
 
+/// Escape a string for use in a Nix string literal.
+///
+/// Handles backslash and quote escaping to prevent Nix code injection.
+fn escape_nix_string(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
+        .replace("${", "\\${")
+}
+
+/// Validate that a string looks like a valid Nix store path.
+///
+/// Store paths must start with `/nix/store/` followed by a hash and name.
+/// This validation prevents injection attacks through malformed paths.
+fn is_valid_store_path(path: &str) -> bool {
+    // Must start with /nix/store/
+    if !path.starts_with("/nix/store/") {
+        return false;
+    }
+
+    // Must have content after the prefix (at least the hash)
+    if path.len() <= 11 {
+        return false;
+    }
+
+    // Must not contain characters that could escape the Nix expression
+    // Quote, semicolon, newlines, and dollar-brace could enable injection
+    !path.contains('"')
+        && !path.contains(';')
+        && !path.contains('\n')
+        && !path.contains('\r')
+        && !path.contains("${")
+}
+
 /// Generate fetchClosure expression for a package version.
 ///
 /// Returns a ready-to-use Nix expression for `builtins.fetchClosure` if
@@ -688,12 +743,33 @@ pub async fn get_fetch_closure(
     match pkg {
         Some(p) => {
             if let Some(ref store_path) = p.store_path {
+                // Validate store path to prevent Nix code injection
+                if !is_valid_store_path(store_path) {
+                    tracing::warn!(
+                        store_path = %store_path,
+                        "Invalid store path in database"
+                    );
+                    return Ok(Json(types::FetchClosureResponse {
+                        attr: params.attr,
+                        version: params.version,
+                        system,
+                        store_path: None,
+                        commit: p.last_commit_hash,
+                        nix_expr: None,
+                        error: Some("Store path in database is invalid or malformed.".to_string()),
+                    }));
+                }
+
                 // Generate fetchClosure expression
                 // Most nixpkgs packages are input-addressed, so we include inputAddressed = true.
                 // This requires users to trust the binary cache (cache.nixos.org by default).
+                //
+                // Note: cache_url is escaped to prevent Nix code injection via the URL parameter.
+                // Store path is validated above and used as-is since Nix requires the exact path.
+                let escaped_cache_url = escape_nix_string(&cache_url);
                 let nix_expr = format!(
                     r#"builtins.fetchClosure {{
-  fromStore = "{cache_url}";
+  fromStore = "{escaped_cache_url}";
   fromPath = {store_path};
   inputAddressed = true;
 }}"#

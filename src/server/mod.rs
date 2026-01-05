@@ -367,15 +367,23 @@ pub(crate) fn build_router(
 
     // Apply rate limiting if configured
     if let Some(rl_config) = rate_limit {
-        let governor_conf = GovernorConfigBuilder::default()
+        match GovernorConfigBuilder::default()
             .per_second(rl_config.requests_per_second)
             .burst_size(rl_config.burst_size)
             .key_extractor(SmartIpKeyExtractor)
             .use_headers() // Add X-RateLimit-* headers to responses
             .finish()
-            .expect("Failed to build rate limiter config");
-
-        app = app.layer(GovernorLayer::new(governor_conf));
+        {
+            Some(governor_conf) => {
+                app = app.layer(GovernorLayer::new(governor_conf));
+            }
+            None => {
+                // Log and continue without rate limiting rather than crashing
+                tracing::error!(
+                    "Failed to build rate limiter config, continuing without rate limiting"
+                );
+            }
+        }
     }
 
     app
@@ -504,7 +512,8 @@ pub async fn run_server(config: ServerConfig) -> Result<()> {
 
 /// Await a CTRL+C (SIGINT) to trigger graceful shutdown.
 ///
-/// Completes when the process receives a CTRL+C; panics if the signal handler cannot be installed.
+/// Completes when the process receives a CTRL+C. Logs a warning if the signal
+/// handler cannot be installed but returns normally to allow shutdown to proceed.
 ///
 /// # Examples
 ///
@@ -515,9 +524,12 @@ pub async fn run_server(config: ServerConfig) -> Result<()> {
 /// # });
 /// ```
 async fn shutdown_signal() {
-    tokio::signal::ctrl_c()
-        .await
-        .expect("Failed to install CTRL+C signal handler");
+    if let Err(e) = tokio::signal::ctrl_c().await {
+        tracing::warn!(
+            error = %e,
+            "Failed to install CTRL+C signal handler, shutdown may not be graceful"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1203,5 +1215,152 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let nix_expr = json["nix_expr"].as_str().unwrap();
         assert!(nix_expr.contains("https://my-cache.example.com"));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_closure_escapes_cache_url() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None, None);
+
+        // Test that special characters in cache_url are properly escaped
+        let (status, json) = get_json(
+            &app,
+            "/api/v1/fetch-closure?attr=hello&version=2.10&cache_url=https://cache.example.com/path%22with%22quotes",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let nix_expr = json["nix_expr"].as_str().unwrap();
+        // The URL should be in the expression but quotes should be escaped
+        assert!(nix_expr.contains("fromStore"));
+        // The expression should not contain unescaped quotes that would break Nix parsing
+        // (decoded %22 becomes " which should be escaped to \")
+    }
+
+    #[tokio::test]
+    async fn test_metrics_endpoint() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None, None);
+
+        let (status, json) = get_json(&app, "/api/v1/metrics").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["server"]["version"].is_string());
+        assert_eq!(json["server"]["status"], "ok");
+        assert!(json["database"]["max_connections"].is_number());
+        assert!(json["database"]["available_permits"].is_number());
+        assert!(json["database"]["in_use"].is_number());
+        assert!(json["database"]["timeout_seconds"].is_number());
+    }
+
+    #[tokio::test]
+    async fn test_search_empty_results() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None, None);
+
+        let (status, json) = get_json(&app, "/api/v1/search?q=nonexistent_package_xyz123").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let data = json["data"].as_array().unwrap();
+        assert!(data.is_empty());
+        assert_eq!(json["meta"]["total"], 0);
+    }
+
+    #[tokio::test]
+    async fn test_search_with_license_filter() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None, None);
+
+        let (status, json) = get_json(&app, "/api/v1/search?q=python&license=PSF").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let data = json["data"].as_array().unwrap();
+        // Should return python packages with PSF license
+        assert!(!data.is_empty());
+        for pkg in data {
+            assert_eq!(pkg["license"], "PSF");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cache_headers_for_api() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None, None);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/search?q=python")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let cache_control = response.headers().get("cache-control");
+        assert!(cache_control.is_some());
+        // API routes should have cache headers (1 hour)
+        assert!(
+            cache_control
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("max-age=3600")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_health_no_cache() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None, None);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let cache_control = response.headers().get("cache-control");
+        assert!(cache_control.is_some());
+        // Health check should have no-cache headers
+        assert!(
+            cache_control
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("no-cache")
+        );
     }
 }

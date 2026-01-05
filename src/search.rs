@@ -10,6 +10,10 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
+/// Maximum number of results to return, regardless of limit parameter.
+/// This prevents memory exhaustion from requests with limit=0 or very large limits.
+const MAX_RESULTS: usize = 10_000;
+
 /// Sort order for search results.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ValueEnum, utoipa::ToSchema,
@@ -284,11 +288,20 @@ pub fn paginate(
 ) -> (Vec<PackageVersion>, usize) {
     let total = results.len();
 
-    let data: Vec<_> = if limit > 0 {
-        results.into_iter().skip(offset).take(limit).collect()
+    // Enforce maximum limit to prevent memory exhaustion.
+    // If limit is 0 (meaning "unlimited"), cap at MAX_RESULTS.
+    // Otherwise, cap the provided limit at MAX_RESULTS.
+    let effective_limit = if limit == 0 {
+        MAX_RESULTS
     } else {
-        results.into_iter().skip(offset).collect()
+        limit.min(MAX_RESULTS)
     };
+
+    let data: Vec<_> = results
+        .into_iter()
+        .skip(offset)
+        .take(effective_limit)
+        .collect();
 
     (data, total)
 }

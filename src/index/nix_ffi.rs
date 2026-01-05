@@ -103,6 +103,27 @@ unsafe fn get_error_message(ctx: *mut nix_c_context) -> Option<String> {
 }
 
 /// Callback for extracting strings from Nix values.
+///
+/// This callback is passed to `nix_get_string()` to extract the string data from
+/// a Nix value. The Nix C API calls this callback exactly once with a pointer to
+/// the string data and its length.
+///
+/// # Safety
+///
+/// The `user_data` pointer MUST point to a valid `Option<String>` that:
+/// - Remains valid for the entire duration of the `nix_get_string()` call
+/// - Is not accessed by other threads during the callback
+/// - Was created on the same stack frame as the `nix_get_string()` call
+///
+/// The Nix C API guarantees that:
+/// - This callback is called exactly once per `nix_get_string()` invocation
+/// - `start` points to valid memory for `n` bytes
+/// - The callback is called synchronously, not asynchronously
+///
+/// The pointer cast and dereference are safe because:
+/// 1. The caller (in `eval_json`) creates `result_str` as a local variable
+/// 2. The pointer is cast back to the same type it was created from
+/// 3. The callback completes before `nix_get_string()` returns
 extern "C" fn string_callback(
     start: *const std::os::raw::c_char,
     n: std::os::raw::c_uint,
@@ -271,6 +292,36 @@ type EvalTask = Box<dyn FnOnce(&NixEvaluator) + Send>;
 type EvalWorkerSender = Mutex<mpsc::Sender<(EvalTask, mpsc::Sender<()>)>>;
 
 /// Global eval worker - lazily initialized persistent thread with large stack.
+///
+/// # Worker Thread Design
+///
+/// This persistent worker thread ensures safe and efficient Nix evaluations:
+///
+/// 1. **Single Evaluator Instance**: The Nix C API is not designed for concurrent
+///    access from multiple threads. By keeping one evaluator in one thread, we
+///    avoid thread-safety issues without complex synchronization.
+///
+/// 2. **Large Stack (64MB)**: Nix evaluations can be deeply recursive, especially
+///    when evaluating nixpkgs which has complex interdependencies. The default
+///    thread stack (~8MB on most systems) can overflow. This worker uses a 64MB
+///    stack to handle even the most complex evaluations.
+///
+/// 3. **Lazy Initialization**: The evaluator takes ~2-3 seconds to initialize
+///    (loading nixpkgs paths, setting up the store). By creating it once and
+///    reusing it, we amortize this cost across many evaluations.
+///
+/// 4. **Process Lifetime**: The worker lives for the entire process lifetime.
+///    There is no explicit shutdown mechanism because:
+///    - The Nix C API doesn't support clean shutdown of all resources
+///    - Attempting to free resources during process exit can cause hangs
+///    - The OS efficiently reclaims all resources when the process exits
+///
+/// # Thread Safety
+///
+/// - The `OnceLock` ensures the worker is initialized exactly once
+/// - The `Mutex<Sender>` ensures only one task is submitted at a time
+/// - Tasks run sequentially on the worker thread (no concurrent Nix evaluation)
+/// - Results are communicated back via channels
 static EVAL_WORKER: std::sync::OnceLock<EvalWorkerSender> = std::sync::OnceLock::new();
 
 /// Initialize the global eval worker thread.

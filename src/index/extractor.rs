@@ -123,8 +123,9 @@ pub fn extract_packages_for_attrs<P: AsRef<Path>>(
             let attr_file = temp_dir.path().join("attrs.json");
             let json = serde_json::to_string(attr_names)?;
             std::fs::write(&attr_file, &json)?;
+            // Quote the path to handle spaces and special characters
             format!(
-                "builtins.fromJSON (builtins.readFile {})",
+                "builtins.fromJSON (builtins.readFile \"{}\")",
                 attr_file.display()
             )
         } else {
@@ -133,9 +134,11 @@ pub fn extract_packages_for_attrs<P: AsRef<Path>>(
         }
     };
 
-    // Build an expression that imports and calls the extract file
+    // Build an expression that imports and calls the extract file.
+    // Note: Nix import takes a path, not a string, so we don't quote nix_file.
+    // But nixpkgsPath is assigned as a string, so we quote it.
     let expr = format!(
-        "import {} {{ nixpkgsPath = {}; system = \"{}\"; attrNames = {}; }}",
+        "import {} {{ nixpkgsPath = \"{}\"; system = \"{}\"; attrNames = {}; }}",
         nix_file.display(),
         repo_path_str,
         system,

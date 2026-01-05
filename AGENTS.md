@@ -3,7 +3,9 @@
 ## Project Structure & Module Organization
 - `src/` contains the Rust CLI, database, remote update logic, server, and indexer (feature-gated). See `src/index/` for indexer internals and `src/server/` for the HTTP API.
 - `tests/` holds integration tests (notably `tests/integration.rs`).
+- `benches/` contains performance benchmarks (search, bloom filter, FFI).
 - `frontend/` contains the static HTML/CSS/JS for the web UI served by `nxv serve`.
+- `nix/` contains the NixOS module (`module.nix`) for running as a systemd service.
 - `docs/` hosts implementation specs and design notes.
 - `scripts/` includes operational scripts (e.g., cache publishing).
 
@@ -31,7 +33,7 @@
 - Include screenshots or recordings for UI changes in `frontend/`.
 
 ## Configuration & Data Paths
-- Key environment variables: `NXV_DB_PATH`, `NXV_API_URL`, `NXV_MANIFEST_URL`.
+- Key environment variables: `NXV_DB_PATH`, `NXV_API_URL`, `NXV_MANIFEST_URL`, `NXV_PUBLIC_KEY`, `NXV_SECRET_KEY`, `NXV_API_TIMEOUT`, `NO_COLOR`.
 - Default data locations are platform-specific (see `CLAUDE.md` and `README.md`).
 
 ## Agent Notes

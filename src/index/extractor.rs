@@ -142,8 +142,8 @@ pub fn extract_packages_for_attrs<P: AsRef<Path>>(
         attr_names_arg
     );
 
-    // Use FFI evaluator (reuses thread-local instance)
-    let json_output = with_evaluator(|eval| eval.eval_json(&expr, "<extract>"))?;
+    // Use FFI evaluator with large stack thread
+    let json_output = with_evaluator(move |eval| eval.eval_json(&expr, "<extract>"))?;
     let packages: Vec<PackageInfo> = serde_json::from_str(&json_output)?;
 
     Ok(packages)
@@ -173,8 +173,8 @@ pub fn extract_attr_positions<P: AsRef<Path>>(
         system
     );
 
-    // Use FFI evaluator (reuses thread-local instance)
-    let json_output = with_evaluator(|eval| eval.eval_json(&expr, "<positions>"))?;
+    // Use FFI evaluator with large stack thread
+    let json_output = with_evaluator(move |eval| eval.eval_json(&expr, "<positions>"))?;
     let positions: Vec<AttrPosition> = serde_json::from_str(&json_output)?;
 
     Ok(positions)

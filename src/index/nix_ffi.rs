@@ -240,11 +240,18 @@ thread_local! {
     static THREAD_EVALUATOR: RefCell<Option<NixEvaluator>> = const { RefCell::new(None) };
 }
 
+/// Stack size for evaluation threads (64 MB).
+/// Nix evaluations can be deeply recursive and need substantial stack space.
+const EVAL_STACK_SIZE: usize = 64 * 1024 * 1024;
+
 /// Execute a function with a reused thread-local evaluator.
 ///
 /// This amortizes the expensive evaluator creation (~2-3s) across multiple
 /// evaluations. The evaluator is created on first use and reused for subsequent
 /// calls within the same thread.
+///
+/// **Note:** Evaluations run in a dedicated thread with a large stack (64MB)
+/// to prevent stack overflow during complex nixpkgs evaluations.
 ///
 /// # Arguments
 /// * `f` - Function that receives a reference to the evaluator
@@ -258,19 +265,34 @@ thread_local! {
 /// ```
 pub fn with_evaluator<F, T>(f: F) -> Result<T>
 where
-    F: FnOnce(&NixEvaluator) -> Result<T>,
+    F: FnOnce(&NixEvaluator) -> Result<T> + Send + 'static,
+    T: Send + 'static,
 {
-    THREAD_EVALUATOR.with(|cell| {
-        let mut borrow = cell.borrow_mut();
+    // Run evaluation in a thread with a large stack to avoid stack overflow.
+    // Nix evaluations can be deeply recursive, especially for nixpkgs.
+    // Note: This creates a new thread per call, which is expensive but safe.
+    // The thread-local evaluator is reused within each thread's lifetime.
+    let handle = std::thread::Builder::new()
+        .name("nix-eval".into())
+        .stack_size(EVAL_STACK_SIZE)
+        .spawn(move || {
+            THREAD_EVALUATOR.with(|cell| {
+                let mut borrow = cell.borrow_mut();
 
-        // Initialize evaluator on first use
-        if borrow.is_none() {
-            *borrow = Some(NixEvaluator::new()?);
-        }
+                // Initialize evaluator on first use in this thread
+                if borrow.is_none() {
+                    *borrow = Some(NixEvaluator::new()?);
+                }
 
-        // Use the evaluator
-        f(borrow.as_ref().unwrap())
-    })
+                // Use the evaluator
+                f(borrow.as_ref().unwrap())
+            })
+        })
+        .map_err(|e| NxvError::NixEval(format!("Failed to spawn eval thread: {}", e)))?;
+
+    handle
+        .join()
+        .map_err(|_| NxvError::NixEval("Eval thread panicked".into()))?
 }
 
 /// Clear the thread-local evaluator, freeing resources.

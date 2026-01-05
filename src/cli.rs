@@ -347,6 +347,18 @@ pub struct IndexArgs {
     /// Limit the number of commits processed.
     #[arg(long)]
     pub max_commits: Option<usize>,
+
+    /// Number of parallel worker processes for evaluation (default: number of systems).
+    #[arg(long)]
+    pub workers: Option<usize>,
+
+    /// Memory threshold (MiB) before worker restart (default: 6144).
+    #[arg(long, default_value_t = 6144)]
+    pub max_memory: usize,
+
+    /// Internal flag for worker subprocess mode (hidden from help).
+    #[arg(long, hide = true)]
+    pub internal_worker: bool,
 }
 
 /// Fields that can be backfilled from nixpkgs.

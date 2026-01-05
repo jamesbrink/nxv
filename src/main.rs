@@ -1214,6 +1214,14 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
     use crate::index::{Indexer, IndexerConfig, save_bloom_filter};
     use std::sync::atomic::Ordering;
 
+    // Check for internal worker mode first
+    if args.internal_worker {
+        // Set memory threshold from CLI args
+        crate::index::worker::worker_main::set_max_memory(args.max_memory);
+        // Run worker subprocess loop (never returns)
+        crate::index::worker::run_worker_main();
+    }
+
     // Validate date arguments
     validate_date_range(args.since.as_deref(), args.until.as_deref())?;
 
@@ -1234,6 +1242,8 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
         since: args.since.clone(),
         until: args.until.clone(),
         max_commits: args.max_commits,
+        worker_count: args.workers,
+        max_memory_mib: args.max_memory,
     };
 
     let indexer = Indexer::new(config);

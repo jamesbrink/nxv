@@ -8,7 +8,7 @@ use std::path::Path;
 use std::process::Command;
 
 /// Information about an extracted package.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PackageInfo {
     pub name: String,

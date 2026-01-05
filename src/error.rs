@@ -60,6 +60,10 @@ pub enum NxvError {
     #[cfg(feature = "indexer")]
     #[error("Signing error: {0}")]
     Signing(String),
+
+    #[cfg(feature = "indexer")]
+    #[error("Worker error: {0}")]
+    Worker(String),
 }
 
 /// Result type alias for nxv operations.

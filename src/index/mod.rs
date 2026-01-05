@@ -7,6 +7,7 @@ pub mod extractor;
 pub mod git;
 pub mod nix_ffi;
 pub mod publisher;
+pub mod worker;
 
 /// A checkpoint-serializable version of OpenRange for database persistence.
 /// This is used to save/restore open ranges across indexer restarts.
@@ -88,6 +89,12 @@ pub struct IndexerConfig {
     pub until: Option<String>,
     /// Optional limit on number of commits.
     pub max_commits: Option<usize>,
+    /// Number of parallel worker processes for evaluation.
+    /// If None, uses the number of systems for parallel evaluation.
+    /// If Some(1), disables parallel evaluation (sequential mode).
+    pub worker_count: Option<usize>,
+    /// Memory threshold (MiB) before worker restart.
+    pub max_memory_mib: usize,
 }
 
 impl Default for IndexerConfig {
@@ -104,6 +111,8 @@ impl Default for IndexerConfig {
             since: None,
             until: None,
             max_commits: None,
+            worker_count: None, // Default: use parallel evaluation with one worker per system
+            max_memory_mib: 6 * 1024, // 6 GiB
         }
     }
 }
@@ -908,6 +917,40 @@ impl Indexer {
         // Note: nixpkgs_path is unused here because we use WorktreeSession for all checkouts
         let _ = nixpkgs_path.as_ref();
 
+        // Determine if we should use parallel evaluation
+        let use_parallel = self.config.worker_count != Some(1) && systems.len() > 1;
+        let worker_count = self.config.worker_count.unwrap_or(systems.len());
+
+        // Create worker pool for parallel evaluation (if enabled)
+        let worker_pool = if use_parallel && worker_count > 1 {
+            let pool_config = worker::WorkerPoolConfig {
+                worker_count,
+                max_memory_mib: self.config.max_memory_mib,
+                ..Default::default()
+            };
+            match worker::WorkerPool::new(pool_config) {
+                Ok(pool) => {
+                    eprintln!(
+                        "Using parallel evaluation with {} workers",
+                        pool.worker_count()
+                    );
+                    Some(pool)
+                }
+                Err(e) => {
+                    eprintln!(
+                        "Warning: Failed to create worker pool ({}), falling back to sequential",
+                        e
+                    );
+                    None
+                }
+            }
+        } else {
+            if systems.len() > 1 {
+                eprintln!("Using sequential evaluation (--workers=1)");
+            }
+            None
+        };
+
         // Set up progress bar if enabled
         let multi_progress = if self.config.show_progress {
             Some(MultiProgress::new())
@@ -1165,12 +1208,30 @@ impl Indexer {
             // Extract packages for all systems
             let mut aggregates: HashMap<String, PackageAggregate> = HashMap::new();
 
-            for system in systems {
-                let packages = match extractor::extract_packages_for_attrs(
-                    worktree_path,
-                    system,
-                    &target_list,
-                ) {
+            // Use parallel evaluation if worker pool is available, otherwise sequential
+            let extraction_results: Vec<(String, Result<Vec<extractor::PackageInfo>>)> =
+                if let Some(ref pool) = worker_pool {
+                    // Parallel extraction using worker pool
+                    let results = pool.extract_parallel(worktree_path, systems, &target_list);
+                    systems.iter().cloned().zip(results).collect()
+                } else {
+                    // Sequential extraction (fallback)
+                    systems
+                        .iter()
+                        .map(|system| {
+                            let result = extractor::extract_packages_for_attrs(
+                                worktree_path,
+                                system,
+                                &target_list,
+                            );
+                            (system.clone(), result)
+                        })
+                        .collect()
+                };
+
+            // Process results from all systems
+            for (system, packages_result) in extraction_results {
+                let packages = match packages_result {
                     Ok(pkgs) => pkgs,
                     Err(e) => {
                         result.extraction_failures += 1;
@@ -1765,6 +1826,8 @@ mod tests {
             since: None,
             until: None,
             max_commits: None,
+            worker_count: Some(1), // Sequential for tests
+            max_memory_mib: 6 * 1024,
         };
         let _indexer = Indexer::new(config);
 
@@ -1795,6 +1858,8 @@ mod tests {
             since: None,
             until: None,
             max_commits: None,
+            worker_count: Some(1), // Sequential for tests
+            max_memory_mib: 6 * 1024,
         };
         let _indexer = Indexer::new(config);
 

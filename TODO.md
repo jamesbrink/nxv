@@ -31,8 +31,8 @@ This experimental branch integrates `nix-bindings` to replace subprocess calls t
   - Graceful degradation if Nix C API not available
 
 - [x] **Phase 6: Tests and validation**
-  - All 285 unit + 64 integration tests pass
-  - 4 FFI tests added (marked `#[ignore]` - require Nix C API)
+  - All 294 unit + 64 integration tests pass (358 total, 11 ignored)
+  - FFI tests marked `#[ignore]` - require Nix C API at runtime
   - Clippy clean, nix flake check passes
 
 - [x] **Phase 7: Reuse NixEvaluator across evaluations**

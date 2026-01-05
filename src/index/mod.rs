@@ -34,12 +34,35 @@ use crate::error::{NxvError, Result};
 use chrono::{DateTime, TimeZone, Utc};
 use git::{NixpkgsRepo, WorktreeSession};
 
-/// Check if a commit date is after the store path extraction cutoff (2020-01-01).
-/// Store paths are only extracted for commits from this date onwards because
-/// older binaries are unlikely to be in cache.nixos.org after GC events.
+/// Cutoff date for store path extraction (2020-01-01).
+///
+/// Store paths are only extracted for commits from this date onwards because:
+///
+/// 1. **Binary cache availability**: cache.nixos.org has performed garbage collection
+///    events that removed "ancient store paths" (announced January 2024). Binaries
+///    from 2020+ are generally still available, while older ones are less reliable.
+///
+/// 2. **Practical utility**: Users wanting historical versions typically need relatively
+///    recent ones. Very old packages (pre-2020) often have other issues like incompatible
+///    Nix evaluation or missing dependencies.
+///
+/// 3. **Index size**: Including store paths for all historical packages would
+///    significantly increase database size with diminishing returns.
+///
+/// This date is used by:
+/// - `is_after_store_path_cutoff()` to filter during indexing
+/// - Documentation in `PackageVersion.store_path` and API responses
+///
+/// See `docs/specs/store-path-indexing.md` for full rationale.
+pub const STORE_PATH_CUTOFF_DATE: (i32, u32, u32) = (2020, 1, 1);
+
+/// Check if a commit date is after the store path extraction cutoff.
+///
+/// Store paths are only extracted for commits from [`STORE_PATH_CUTOFF_DATE`]
+/// onwards because older binaries are unlikely to be in cache.nixos.org.
 fn is_after_store_path_cutoff(date: DateTime<Utc>) -> bool {
-    // 2020-01-01 00:00:00 UTC
-    let cutoff = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
+    let (year, month, day) = STORE_PATH_CUTOFF_DATE;
+    let cutoff = Utc.with_ymd_and_hms(year, month, day, 0, 0, 0).unwrap();
     date >= cutoff
 }
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};

@@ -8,6 +8,28 @@
 //! Creating a `NixEvaluator` is expensive (~2-3s for initial Nix state setup).
 //! Use `with_evaluator()` to reuse a thread-local evaluator across multiple
 //! evaluations, amortizing the setup cost.
+//!
+//! # Worker Thread Lifecycle
+//!
+//! A single persistent worker thread handles all Nix evaluations. This design:
+//!
+//! - **Prevents stack overflow**: The worker has a 64MB stack (vs ~8MB default)
+//!   to handle deeply recursive Nix evaluations
+//! - **Amortizes setup cost**: The expensive `NixEvaluator` is created once
+//! - **Serializes evaluations**: The Nix C API is single-threaded; this ensures
+//!   thread safety without complex synchronization
+//!
+//! The worker thread runs for the lifetime of the process and cannot be
+//! explicitly terminated. This is intentional - the Nix C API doesn't support
+//! clean shutdown, and attempting to free resources during process exit can
+//! cause hangs. The OS reclaims all resources when the process exits.
+//!
+//! # Memory Management
+//!
+//! Values allocated via `nix_alloc_value()` are managed by the Nix garbage
+//! collector, which is tied to the `EvalState`. When the `NixEvaluator` is
+//! dropped, `nix_state_free()` releases the entire evaluation state including
+//! all allocated values. Individual values don't need explicit cleanup.
 
 #![allow(unsafe_code)]
 
@@ -163,7 +185,9 @@ impl NixEvaluator {
         let path_cstr = CString::new(path).map_err(|_| NxvError::NixEval("Invalid path".into()))?;
 
         unsafe {
-            // Allocate value
+            // Allocate a Nix value. This is managed by the Nix GC and will be
+            // automatically freed when the EvalState is destroyed (see Drop impl).
+            // No explicit cleanup is needed for individual values.
             let value = nix_alloc_value(self.ctx, self.state);
             if value.is_null() {
                 return Err(NxvError::NixEval("Failed to allocate value".into()));

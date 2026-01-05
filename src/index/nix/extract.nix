@@ -178,15 +178,43 @@ let
   # This gives us the /nix/store/hash-name-version path without building
   # Note: We use a different name for the return value because "outPath" is a special
   # Nix attribute that causes coercion issues when serializing to JSON.
-  # We validate that the path starts with /nix/store/ to filter invalid paths.
+  #
+  # Store path format: /nix/store/<32-char-hash>-<name>
+  # The hash is base32 encoded (chars: 0-9, a-z excluding e,o,t,u)
+  # We validate both the prefix and the hash format to catch invalid paths early.
   getStorePath = pkg:
     let
       storePrefix = "/nix/store/";
+      storePrefixLen = 11;
+      hashLen = 32;
+      # Base32 alphabet used by Nix (lowercase, no e/o/t/u)
+      base32Chars = "0123456789abcdfghijklmnpqrsvwxyz";
+
       result = builtins.tryEval (
         if pkg ? outPath then builtins.toString pkg.outPath else null
       );
       path = if result.success then result.value else null;
-    in if path != null && builtins.substring 0 11 path == storePrefix
+
+      # Extract the hash portion (32 chars after /nix/store/)
+      hash = if path != null && builtins.stringLength path > (storePrefixLen + hashLen)
+             then builtins.substring storePrefixLen hashLen path
+             else null;
+
+      # Validate hash contains only valid base32 characters
+      isValidHash = hash != null &&
+        builtins.stringLength hash == hashLen &&
+        builtins.all (c: builtins.elem c (builtins.stringToCharacters base32Chars))
+                     (builtins.stringToCharacters hash);
+
+      # Check that hash is followed by a hyphen (separator before name)
+      hasHyphenAfterHash = path != null &&
+        builtins.stringLength path > (storePrefixLen + hashLen) &&
+        builtins.substring (storePrefixLen + hashLen) 1 path == "-";
+
+    in if path != null
+          && builtins.substring 0 storePrefixLen path == storePrefix
+          && isValidHash
+          && hasHyphenAfterHash
        then path
        else null;
 

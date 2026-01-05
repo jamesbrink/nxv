@@ -264,12 +264,24 @@ pub fn search_by_name(
 }
 
 /// Search for packages by attribute path.
+///
+/// Matches packages where:
+/// - The attribute path starts with the query (prefix match)
+/// - The attribute path contains the query after a dot (suffix/component match)
+///
+/// This allows searching "qtwebengine" to find "qt5.qtwebengine", or
+/// "numpy" to find "python3Packages.numpy".
 pub fn search_by_attr(conn: &rusqlite::Connection, attr_path: &str) -> Result<Vec<PackageVersion>> {
     let mut stmt = conn.prepare(
-        "SELECT * FROM package_versions WHERE attribute_path LIKE ? ESCAPE '\\' ORDER BY last_commit_date DESC",
+        r#"SELECT * FROM package_versions
+           WHERE attribute_path LIKE ? ESCAPE '\'
+              OR attribute_path LIKE ? ESCAPE '\'
+           ORDER BY last_commit_date DESC"#,
     )?;
-    let pattern = format!("{}%", escape_like_pattern(attr_path));
-    let rows = stmt.query_map([&pattern], PackageVersion::from_row)?;
+    let escaped = escape_like_pattern(attr_path);
+    let prefix_pattern = format!("{}%", escaped);
+    let suffix_pattern = format!("%.{}%", escaped);
+    let rows = stmt.query_map([&prefix_pattern, &suffix_pattern], PackageVersion::from_row)?;
 
     let mut results = Vec::new();
     for row in rows {
@@ -278,25 +290,25 @@ pub fn search_by_attr(conn: &rusqlite::Connection, attr_path: &str) -> Result<Ve
     Ok(results)
 }
 
-/// Finds package versions whose attribute path and version start with the given prefixes.
+/// Finds package versions whose attribute path matches the query and version starts with given prefix.
 ///
-/// The `package` argument is matched as a prefix against the `attribute_path` column
-/// (i.e., `attribute_path LIKE 'package%'`) and the `version` argument is matched as a
-/// prefix against the `version` column. Results are ordered by `first_commit_date` descending.
+/// The `package` argument matches attribute paths where:
+/// - The path starts with the query (prefix match)
+/// - The path contains the query after a dot (suffix/component match)
+///
+/// The `version` argument is matched as a prefix against the `version` column.
+/// Results are ordered by `first_commit_date` descending.
 ///
 /// # Returns
 ///
-/// A vector of `PackageVersion` entries that match the provided package and version prefixes.
+/// A vector of `PackageVersion` entries that match the provided package and version patterns.
 ///
 /// # Examples
 ///
 /// ```
 /// // Assuming `conn` is a valid rusqlite::Connection populated with package_versions...
-/// let matches = search_by_name_version(&conn, "python", "3.11").unwrap();
-/// for pv in matches {
-///     assert!(pv.attribute_path.starts_with("python"));
-///     assert!(pv.version.starts_with("3.11"));
-/// }
+/// let matches = search_by_name_version(&conn, "numpy", "1.24").unwrap();
+/// // Matches both "numpy" and "python3Packages.numpy"
 /// ```
 pub fn search_by_name_version(
     conn: &rusqlite::Connection,
@@ -304,13 +316,19 @@ pub fn search_by_name_version(
     version: &str,
 ) -> Result<Vec<PackageVersion>> {
     // Search by attribute_path (package) and version prefix
+    // Support both prefix match and suffix/component match for nested packages
     let mut stmt = conn.prepare(
-        "SELECT * FROM package_versions WHERE attribute_path LIKE ? ESCAPE '\\' AND version LIKE ? ESCAPE '\\' ORDER BY first_commit_date DESC",
+        r#"SELECT * FROM package_versions
+           WHERE (attribute_path LIKE ? ESCAPE '\' OR attribute_path LIKE ? ESCAPE '\')
+             AND version LIKE ? ESCAPE '\'
+           ORDER BY first_commit_date DESC"#,
     )?;
-    let package_pattern = format!("{}%", escape_like_pattern(package));
+    let escaped_pkg = escape_like_pattern(package);
+    let prefix_pattern = format!("{}%", escaped_pkg);
+    let suffix_pattern = format!("%.{}%", escaped_pkg);
     let version_pattern = format!("{}%", escape_like_pattern(version));
     let rows = stmt.query_map(
-        [&package_pattern, &version_pattern],
+        [&prefix_pattern, &suffix_pattern, &version_pattern],
         PackageVersion::from_row,
     )?;
 
@@ -659,7 +677,7 @@ mod tests {
     /// Creates a temporary SQLite database pre-populated with sample package_versions rows for use in tests.
     ///
     /// The returned TempDir owns the temporary file location and should be kept alive while the Database is used.
-    /// The database is populated with four sample entries (two python versions, one python2, one nodejs).
+    /// The database is populated with sample entries including nested packages (qt5.qtwebengine, python3Packages.numpy).
     ///
     /// # Examples
     ///
@@ -673,6 +691,7 @@ mod tests {
         let db = Database::open(&db_path).unwrap();
 
         // Insert test data - attribute_path is the "Package" that users install with
+        // Includes nested packages like qt5.qtwebengine and python3Packages.numpy
         db.connection()
             .execute(
                 r#"
@@ -682,7 +701,9 @@ mod tests {
                 ('python-3.11.0', '3.11.0', 'abc1234567890', 1700000000, 'def1234567890', 1700100000, 'python', 'Python interpreter'),
                 ('python-3.12.0', '3.12.0', 'ghi1234567890', 1701000000, 'jkl1234567890', 1701100000, 'python', 'Python interpreter'),
                 ('python2-2.7.18', '2.7.18', 'mno1234567890', 1600000000, 'pqr1234567890', 1600100000, 'python2', 'Python 2 interpreter'),
-                ('nodejs-20.0.0', '20.0.0', 'stu1234567890', 1702000000, 'vwx1234567890', 1702100000, 'nodejs', 'Node.js runtime')
+                ('nodejs-20.0.0', '20.0.0', 'stu1234567890', 1702000000, 'vwx1234567890', 1702100000, 'nodejs', 'Node.js runtime'),
+                ('qtwebengine-5.15.2', '5.15.2', 'qtw1234567890', 1703000000, 'qtx1234567890', 1703100000, 'qt5.qtwebengine', 'Qt WebEngine'),
+                ('numpy-1.24.0', '1.24.0', 'npy1234567890', 1704000000, 'npz1234567890', 1704100000, 'python3Packages.numpy', 'NumPy for Python')
             "#,
                 [],
             )
@@ -740,8 +761,8 @@ mod tests {
     fn test_search_by_attr() {
         let (_dir, db) = create_test_db();
         let results = search_by_attr(db.connection(), "python").unwrap();
-        // Should match "python" and "python2" attribute paths
-        assert_eq!(results.len(), 3);
+        // Should match "python", "python2", and "python3Packages.numpy" attribute paths
+        assert_eq!(results.len(), 4);
     }
 
     #[test]
@@ -750,6 +771,38 @@ mod tests {
         let results = search_by_attr(db.connection(), "nodejs").unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].attribute_path, "nodejs");
+    }
+
+    #[test]
+    fn test_search_by_attr_nested_package() {
+        let (_dir, db) = create_test_db();
+        // Searching "qtwebengine" should find "qt5.qtwebengine"
+        let results = search_by_attr(db.connection(), "qtwebengine").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].attribute_path, "qt5.qtwebengine");
+
+        // Searching "numpy" should find "python3Packages.numpy"
+        let results = search_by_attr(db.connection(), "numpy").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].attribute_path, "python3Packages.numpy");
+    }
+
+    #[test]
+    fn test_search_by_attr_full_nested_path() {
+        let (_dir, db) = create_test_db();
+        // Searching full path should also work
+        let results = search_by_attr(db.connection(), "qt5.qtwebengine").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].attribute_path, "qt5.qtwebengine");
+    }
+
+    #[test]
+    fn test_search_by_name_version_nested_package() {
+        let (_dir, db) = create_test_db();
+        // Searching "numpy" with version should find nested package
+        let results = search_by_name_version(db.connection(), "numpy", "1.24").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].attribute_path, "python3Packages.numpy");
     }
 
     #[test]
@@ -808,8 +861,8 @@ mod tests {
     fn test_get_stats() {
         let (_dir, db) = create_test_db();
         let stats = get_stats(db.connection()).unwrap();
-        assert_eq!(stats.total_ranges, 4);
-        assert_eq!(stats.unique_names, 4); // python-3.11.0, python-3.12.0, python2-2.7.18, nodejs-20.0.0
+        assert_eq!(stats.total_ranges, 6);
+        assert_eq!(stats.unique_names, 6); // python-3.11.0, python-3.12.0, python2-2.7.18, nodejs-20.0.0, qtwebengine-5.15.2, numpy-1.24.0
     }
 
     #[test]
@@ -861,7 +914,7 @@ mod tests {
     fn test_get_all_unique_attrs() {
         let (_dir, db) = create_test_db();
         let attrs = get_all_unique_attrs(db.connection()).unwrap();
-        assert_eq!(attrs.len(), 3); // nodejs, python, python2
+        assert_eq!(attrs.len(), 5); // nodejs, python, python2, python3Packages.numpy, qt5.qtwebengine
         assert!(attrs.contains(&"python".to_string()));
         assert!(attrs.contains(&"python2".to_string()));
         assert!(attrs.contains(&"nodejs".to_string()));
@@ -882,9 +935,10 @@ mod tests {
         let (_dir, db) = create_test_db();
         // Test with prefix that matches multiple packages
         let results = complete_package_prefix(db.connection(), "python", 10).unwrap();
-        assert_eq!(results.len(), 2); // python, python2
+        assert_eq!(results.len(), 3); // python, python2, python3Packages.numpy
         assert!(results.contains(&"python".to_string()));
         assert!(results.contains(&"python2".to_string()));
+        assert!(results.contains(&"python3Packages.numpy".to_string()));
     }
 
     #[test]
@@ -917,7 +971,7 @@ mod tests {
         let (_dir, db) = create_test_db();
         // Empty prefix should return all packages (up to limit)
         let results = complete_package_prefix(db.connection(), "", 10).unwrap();
-        assert_eq!(results.len(), 3); // nodejs, python, python2
+        assert_eq!(results.len(), 5); // nodejs, python, python2, python3Packages.numpy, qt5.qtwebengine
     }
 
     #[test]
@@ -971,7 +1025,7 @@ mod tests {
 
         // Test that normal prefix search still works
         let results = search_by_attr(db.connection(), "python").unwrap();
-        assert_eq!(results.len(), 3); // python (x2 versions) + python2
+        assert_eq!(results.len(), 4); // python (x2 versions) + python2 + python3Packages.numpy
     }
 
     #[test]

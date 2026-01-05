@@ -16,6 +16,7 @@ use crate::error::Result;
 use crate::index::extractor;
 use crate::index::git::NixpkgsRepo;
 use indicatif::{ProgressBar, ProgressStyle};
+use owo_colors::OwoColorize;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -285,15 +286,25 @@ fn run_backfill_head<P: AsRef<Path>, Q: AsRef<Path>>(
 
         progress.set_position(result.packages_checked as u64);
         progress.set_message(format!(
-            "{} updated, {} source, {} home, {} vuln",
-            result.records_updated,
-            result.source_paths_filled,
-            result.homepages_filled,
-            result.vulnerabilities_filled
+            "{} {} {} {} {} {} {} {}",
+            result.records_updated.to_string().cyan(),
+            "updated".dimmed(),
+            result.source_paths_filled.to_string().green(),
+            "source".dimmed(),
+            result.homepages_filled.to_string().green(),
+            "home".dimmed(),
+            result.vulnerabilities_filled.to_string().yellow(),
+            "vuln".dimmed()
         ));
     }
 
-    progress.finish_with_message(format!("Done! {} records updated", result.records_updated));
+    progress.finish_with_message(format!(
+        "{} {} {} {}",
+        "Done!".green().bold(),
+        result.records_updated.to_string().cyan(),
+        "records".dimmed(),
+        "updated".dimmed()
+    ));
 
     Ok(result)
 }
@@ -500,17 +511,24 @@ fn run_backfill_historical<P: AsRef<Path>, Q: AsRef<Path>>(
 
         progress.set_position(result.commits_processed as u64);
         progress.set_message(format!(
-            "{} | {} pkgs, {} updated",
+            "{} | {} {} {} {}",
             eta_tracker.progress_string(total_commits as u64),
-            result.packages_checked,
-            result.records_updated
+            result.packages_checked.to_string().green(),
+            "pkgs".dimmed(),
+            result.records_updated.to_string().cyan(),
+            "updated".dimmed()
         ));
     }
 
     // WorktreeSession auto-cleans up on drop
     progress.finish_with_message(format!(
-        "Done! {} commits, {} records updated",
-        result.commits_processed, result.records_updated
+        "{} {} {} {} {} {}",
+        "Done!".green().bold(),
+        result.commits_processed.to_string().cyan(),
+        "commits".dimmed(),
+        result.records_updated.to_string().cyan(),
+        "records".dimmed(),
+        "updated".dimmed()
     ));
 
     Ok(result)

@@ -43,6 +43,7 @@ fn is_after_store_path_cutoff(date: DateTime<Utc>) -> bool {
     date >= cutoff
 }
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use owo_colors::OwoColorize;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
@@ -913,13 +914,15 @@ impl Indexer {
                     if !checkpoint_ranges.is_empty() {
                         if let Some(ref pb) = progress_bar {
                             pb.println(format!(
-                                "Restored {} open ranges from checkpoint",
-                                checkpoint_ranges.len()
+                                "{} {} open ranges from checkpoint",
+                                "Restored".green(),
+                                checkpoint_ranges.len().to_string().yellow()
                             ));
                         } else {
                             eprintln!(
-                                "Restored {} open ranges from checkpoint",
-                                checkpoint_ranges.len()
+                                "{} {} open ranges from checkpoint",
+                                "Restored".green(),
+                                checkpoint_ranges.len().to_string().yellow()
                             );
                         }
                         checkpoint_ranges
@@ -984,7 +987,10 @@ impl Indexer {
             // Check for shutdown
             if self.is_shutdown_requested() {
                 if let Some(ref pb) = progress_bar {
-                    pb.println("Shutdown requested, saving checkpoint...");
+                    pb.println(format!(
+                        "{} saving checkpoint...",
+                        "Shutdown requested,".yellow()
+                    ));
                 }
                 result.was_interrupted = true;
 
@@ -1011,8 +1017,9 @@ impl Indexer {
 
                     if let Some(ref pb) = progress_bar {
                         pb.println(format!(
-                            "Saved {} open ranges to checkpoint",
-                            open_ranges.len()
+                            "{} {} open ranges to checkpoint",
+                            "Saved".green(),
+                            open_ranges.len().to_string().yellow()
                         ));
                     }
                 }
@@ -1024,12 +1031,16 @@ impl Indexer {
             if let Some(ref pb) = progress_bar {
                 pb.set_position(commit_idx as u64);
                 pb.set_message(format!(
-                    "{} | {} ({}) | {} pkgs | {} ranges",
+                    "{} | {} {} | {} {} | {} {} {} {}",
                     eta_tracker.progress_string(total_commits as u64),
-                    &commit.short_hash,
-                    commit.date.format("%Y-%m-%d"),
-                    result.packages_found,
-                    result.ranges_created
+                    commit.short_hash.cyan(),
+                    format!("({})", commit.date.format("%Y-%m-%d")).dimmed(),
+                    result.packages_found.to_string().green(),
+                    "pkgs".dimmed(),
+                    open_ranges.len().to_string().yellow(),
+                    "open".dimmed(),
+                    result.ranges_created.to_string().cyan(),
+                    "closed".dimmed()
                 ));
             }
 
@@ -1292,8 +1303,14 @@ impl Indexer {
         // Finish progress bar
         if let Some(ref pb) = progress_bar {
             pb.finish_with_message(format!(
-                "done | {} commits | {} pkgs | {} ranges",
-                result.commits_processed, result.packages_found, result.ranges_created
+                "{} | {} {} | {} {} | {} {}",
+                "done".green().bold(),
+                result.commits_processed.to_string().cyan(),
+                "commits".dimmed(),
+                result.packages_found.to_string().green(),
+                "pkgs".dimmed(),
+                result.ranges_created.to_string().cyan(),
+                "ranges".dimmed()
             ));
         }
 

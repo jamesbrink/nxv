@@ -2,53 +2,66 @@
 
 use crate::db::queries::PackageVersion;
 
+use crate::output::TableOptions;
+
 /// Print search results as plain tab-separated text.
 ///
 /// Each `PackageVersion` in `results` is printed as one line with the columns:
 /// `PACKAGE` (attribute path), `VERSION`, `COMMIT` (last commit hash), `DATE` (formatted `YYYY-MM-DD`), and `DESCRIPTION`.
-/// If `show_platforms` is `true`, a `PLATFORMS` column is appended.
-/// For `description` and `platforms`, `None` is rendered as `-`. If `results` is empty, prints `No packages found.`.
+/// If `options.show_platforms` is `true`, a `PLATFORMS` column is appended.
+/// If `options.show_store_path` is `true`, a `STORE_PATH` column is appended.
+/// For `description`, `platforms`, and `store_path`, `None` is rendered as `-`. If `results` is empty, prints `No packages found.`.
 ///
 /// # Parameters
 ///
 /// - `results`: slice of `PackageVersion` entries to print.
-/// - `show_platforms`: when `true`, include a `PLATFORMS` column for each row.
+/// - `options`: display options controlling which optional columns to show.
 ///
 /// # Examples
 ///
 /// ```
 /// // Print nothing but the "No packages found." message.
-/// print_plain(&[], false);
+/// print_plain(&[], TableOptions::default());
 /// ```
-pub fn print_plain(results: &[PackageVersion], show_platforms: bool) {
+pub fn print_plain(results: &[PackageVersion], options: TableOptions) {
     if results.is_empty() {
         println!("No packages found.");
         return;
     }
 
-    // Print header - PACKAGE (attr path) is what users install with
-    if show_platforms {
-        println!("PACKAGE\tVERSION\tCOMMIT\tDATE\tDESCRIPTION\tPLATFORMS");
-    } else {
-        println!("PACKAGE\tVERSION\tCOMMIT\tDATE\tDESCRIPTION");
+    // Build header dynamically based on options
+    let mut header = String::from("PACKAGE\tVERSION\tCOMMIT\tDATE\tDESCRIPTION");
+    if options.show_platforms {
+        header.push_str("\tPLATFORMS");
     }
+    if options.show_store_path {
+        header.push_str("\tSTORE_PATH");
+    }
+    println!("{}", header);
 
     for pkg in results {
         let date = pkg.last_commit_date.format("%Y-%m-%d").to_string();
         let description = pkg.description.as_deref().unwrap_or("-");
 
-        if show_platforms {
+        // Build row dynamically
+        let mut row = format!(
+            "{}\t{}\t{}\t{}\t{}",
+            pkg.attribute_path, pkg.version, pkg.last_commit_hash, date, description
+        );
+
+        if options.show_platforms {
             let platforms = pkg.platforms.as_deref().unwrap_or("-");
-            println!(
-                "{}\t{}\t{}\t{}\t{}\t{}",
-                pkg.attribute_path, pkg.version, pkg.last_commit_hash, date, description, platforms
-            );
-        } else {
-            println!(
-                "{}\t{}\t{}\t{}\t{}",
-                pkg.attribute_path, pkg.version, pkg.last_commit_hash, date, description
-            );
+            row.push('\t');
+            row.push_str(platforms);
         }
+
+        if options.show_store_path {
+            let store_path = pkg.store_path.as_deref().unwrap_or("-");
+            row.push('\t');
+            row.push_str(store_path);
+        }
+
+        println!("{}", row);
     }
 }
 
@@ -60,7 +73,7 @@ mod tests {
     #[test]
     fn test_print_plain_empty() {
         // Should not panic
-        print_plain(&[], false);
+        print_plain(&[], TableOptions::default());
     }
 
     #[test]
@@ -81,10 +94,26 @@ mod tests {
             platforms: None,
             source_path: None,
             known_vulnerabilities: None,
+            store_path: None,
         }];
 
         // Should not panic
-        print_plain(&results, false);
-        print_plain(&results, true);
+        print_plain(&results, TableOptions::default());
+        print_plain(
+            &results,
+            TableOptions {
+                show_platforms: true,
+                show_store_path: false,
+                ascii: false,
+            },
+        );
+        print_plain(
+            &results,
+            TableOptions {
+                show_platforms: false,
+                show_store_path: true,
+                ascii: false,
+            },
+        );
     }
 }

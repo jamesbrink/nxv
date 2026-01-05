@@ -15,7 +15,7 @@ const DEFAULT_BUSY_TIMEOUT_SECS: u64 = 5;
 
 /// Current schema version.
 #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
-const SCHEMA_VERSION: u32 = 4;
+const SCHEMA_VERSION: u32 = 5;
 
 /// Database connection wrapper.
 pub struct Database {
@@ -157,6 +157,7 @@ impl Database {
                 platforms TEXT,
                 source_path TEXT,
                 known_vulnerabilities TEXT,
+                store_path TEXT,
                 UNIQUE(attribute_path, version, first_commit_hash)
             );
 
@@ -181,7 +182,8 @@ impl Database {
                 maintainers TEXT,
                 platforms TEXT,
                 source_path TEXT,
-                known_vulnerabilities TEXT
+                known_vulnerabilities TEXT,
+                store_path TEXT
             );
             "#,
         )?;
@@ -327,10 +329,47 @@ impl Database {
                     maintainers TEXT,
                     platforms TEXT,
                     source_path TEXT,
-                    known_vulnerabilities TEXT
+                    known_vulnerabilities TEXT,
+                    store_path TEXT
                 );
                 "#,
             )?;
+        }
+
+        if current_version < 5 {
+            // Migration v4 -> v5: Add store_path column for fetchClosure support
+            let has_store_path: bool = self
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM pragma_table_info('package_versions') WHERE name='store_path'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+
+            if !has_store_path {
+                self.conn.execute(
+                    "ALTER TABLE package_versions ADD COLUMN store_path TEXT",
+                    [],
+                )?;
+            }
+
+            // Also add to checkpoint_open_ranges if not present
+            let checkpoint_has_store_path: bool = self
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM pragma_table_info('checkpoint_open_ranges') WHERE name='store_path'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+
+            if !checkpoint_has_store_path {
+                self.conn.execute(
+                    "ALTER TABLE checkpoint_open_ranges ADD COLUMN store_path TEXT",
+                    [],
+                )?;
+            }
         }
 
         if current_version < SCHEMA_VERSION {
@@ -401,8 +440,8 @@ impl Database {
                     (name, version, first_commit_hash, first_commit_date,
                      last_commit_hash, last_commit_date, attribute_path,
                      description, license, homepage, maintainers, platforms, source_path,
-                     known_vulnerabilities)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     known_vulnerabilities, store_path)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
             )?;
 
@@ -422,6 +461,7 @@ impl Database {
                     pkg.platforms,
                     pkg.source_path,
                     pkg.known_vulnerabilities,
+                    pkg.store_path,
                 ])?;
                 inserted += changes;
             }
@@ -452,8 +492,8 @@ impl Database {
                 INSERT INTO checkpoint_open_ranges
                     (key, name, version, first_commit_hash, first_commit_date,
                      attribute_path, description, license, homepage, maintainers,
-                     platforms, source_path, known_vulnerabilities)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     platforms, source_path, known_vulnerabilities, store_path)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
             )?;
 
@@ -472,6 +512,7 @@ impl Database {
                     range.platforms,
                     range.source_path,
                     range.known_vulnerabilities,
+                    range.store_path,
                 ])?;
             }
         }
@@ -496,7 +537,7 @@ impl Database {
             r#"
             SELECT key, name, version, first_commit_hash, first_commit_date,
                    attribute_path, description, license, homepage, maintainers,
-                   platforms, source_path, known_vulnerabilities
+                   platforms, source_path, known_vulnerabilities, store_path
             FROM checkpoint_open_ranges
             "#,
         )?;
@@ -519,6 +560,7 @@ impl Database {
                     platforms: row.get(10)?,
                     source_path: row.get(11)?,
                     known_vulnerabilities: row.get(12)?,
+                    store_path: row.get(13).ok().flatten(),
                 },
             ))
         })?;
@@ -668,6 +710,7 @@ mod tests {
                 platforms: None,
                 source_path: None,
                 known_vulnerabilities: None,
+                store_path: None,
             },
             PackageVersion {
                 id: 0,
@@ -685,6 +728,7 @@ mod tests {
                 platforms: None,
                 source_path: None,
                 known_vulnerabilities: None,
+                store_path: None,
             },
         ];
 
@@ -726,6 +770,7 @@ mod tests {
             platforms: None,
             source_path: None,
             known_vulnerabilities: None,
+            store_path: None,
         };
 
         // First insert should succeed
@@ -775,6 +820,7 @@ mod tests {
             platforms: None,
             source_path: None,
             known_vulnerabilities: None,
+            store_path: None,
         };
 
         db.insert_package_ranges_batch(&[pkg]).unwrap();
@@ -818,6 +864,7 @@ mod tests {
                 platforms: None,
                 source_path: None,
                 known_vulnerabilities: None,
+                store_path: None,
             })
             .collect();
 

@@ -234,6 +234,10 @@ pub struct PackageVersionSchema {
     /// Known security vulnerabilities (JSON array, may be null for secure packages).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub known_vulnerabilities: Option<String>,
+    /// Store path for x86_64-linux (e.g., /nix/store/hash-name-version).
+    /// Only populated for packages from 2020-01-01 onwards.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub store_path: Option<String>,
 }
 
 impl From<PackageVersion> for PackageVersionSchema {
@@ -267,8 +271,55 @@ impl From<PackageVersion> for PackageVersionSchema {
             platforms: p.platforms,
             source_path: p.source_path,
             known_vulnerabilities: p.known_vulnerabilities,
+            store_path: p.store_path,
         }
     }
+}
+
+/// Fetch closure query parameters.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct FetchClosureParams {
+    /// Package attribute path.
+    pub attr: String,
+    /// Package version.
+    pub version: String,
+    /// Nix cache URL (default: https://cache.nixos.org).
+    #[serde(default = "default_cache_url")]
+    pub cache_url: String,
+    /// Target system (default: x86_64-linux).
+    /// Note: Currently only x86_64-linux store paths are indexed.
+    #[serde(default = "default_system")]
+    pub system: String,
+}
+
+fn default_cache_url() -> String {
+    "https://cache.nixos.org".to_string()
+}
+
+fn default_system() -> String {
+    "x86_64-linux".to_string()
+}
+
+/// Fetch closure response containing Nix expression.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct FetchClosureResponse {
+    /// The package attribute path.
+    pub attr: String,
+    /// The package version.
+    pub version: String,
+    /// Target system for the store path.
+    pub system: String,
+    /// The store path (if available).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub store_path: Option<String>,
+    /// The nixpkgs commit hash where this version was found.
+    pub commit: String,
+    /// Ready-to-use fetchClosure Nix expression.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nix_expr: Option<String>,
+    /// Error message if store path is not available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Index statistics schema.

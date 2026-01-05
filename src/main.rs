@@ -356,6 +356,7 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
     let format: OutputFormat = args.format.into();
     let options = TableOptions {
         show_platforms: args.show_platforms,
+        show_store_path: args.show_store_path,
         ascii: args.ascii,
     };
     print_results(&result.data, format, options);

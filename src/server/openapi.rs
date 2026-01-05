@@ -25,6 +25,7 @@ use super::types::*;
         handlers::get_version_info,
         handlers::get_first_occurrence,
         handlers::get_last_occurrence,
+        handlers::get_fetch_closure,
         handlers::get_stats,
         handlers::health_check,
         handlers::get_metrics,
@@ -39,6 +40,7 @@ use super::types::*;
         VersionHistorySchema,
         PackageVersionSchema,
         IndexStatsSchema,
+        FetchClosureResponse,
     )),
     tags(
         (name = "packages", description = "Package search and information"),

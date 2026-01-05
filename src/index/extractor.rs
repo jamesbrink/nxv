@@ -25,6 +25,11 @@ pub struct PackageInfo {
     pub source_path: Option<String>,
     /// Known security vulnerabilities or EOL notices from meta.knownVulnerabilities
     pub known_vulnerabilities: Option<Vec<String>>,
+    /// Store path for the package output (e.g., "/nix/store/hash-name-version")
+    /// Only populated for commits from 2020-01-01 onwards.
+    /// Note: Named "storePath" in Nix output because "outPath" is a special attribute.
+    #[serde(rename = "storePath", default)]
+    pub out_path: Option<String>,
 }
 
 /// Attribute position information for mapping attribute names to files.
@@ -260,6 +265,7 @@ mod tests {
             platforms: Some(vec!["x86_64-linux".to_string()]),
             source_path: Some("pkgs/test/default.nix".to_string()),
             known_vulnerabilities: None,
+            out_path: Some("/nix/store/abc123-test-1.0.0".to_string()),
         };
 
         let license_json = pkg.license_json().unwrap();

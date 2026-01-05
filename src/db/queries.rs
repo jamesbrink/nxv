@@ -60,6 +60,9 @@ pub struct PackageVersion {
     pub source_path: Option<String>,
     /// Known security vulnerabilities or EOL notices (JSON array)
     pub known_vulnerabilities: Option<String>,
+    /// Store path for x86_64-linux (e.g., /nix/store/hash-name-version)
+    /// Only populated for commits from 2020-01-01 onwards.
+    pub store_path: Option<String>,
 }
 
 impl PackageVersion {
@@ -120,6 +123,7 @@ impl PackageVersion {
             platforms: row.get("platforms")?,
             source_path: row.get("source_path").ok().flatten(),
             known_vulnerabilities: row.get("known_vulnerabilities").ok().flatten(),
+            store_path: row.get("store_path").ok().flatten(),
         })
     }
 
@@ -1168,6 +1172,7 @@ mod tests {
             platforms: None,
             source_path: None,
             known_vulnerabilities,
+            store_path: None,
         }
     }
 

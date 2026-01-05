@@ -303,6 +303,7 @@ pub(crate) fn build_router(
             "/packages/{attr}/versions/{version}/last",
             get(handlers::get_last_occurrence),
         )
+        .route("/fetch-closure", get(handlers::get_fetch_closure))
         .route("/stats", get(handlers::get_stats))
         .layer(SetResponseHeaderLayer::if_not_present(
             header::CACHE_CONTROL,

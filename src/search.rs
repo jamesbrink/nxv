@@ -328,6 +328,7 @@ mod tests {
             platforms: None,
             source_path: None,
             known_vulnerabilities: None,
+            store_path: None,
         }
     }
 
@@ -506,6 +507,7 @@ mod proptests {
                 platforms: None,
                 source_path: None,
                 known_vulnerabilities: None,
+                store_path: None,
             }
         }
     }

@@ -37,6 +37,7 @@ mod tests {
             platforms: Some("[\"x86_64-linux\"]".to_string()),
             source_path: None,
             known_vulnerabilities: None,
+            store_path: None,
         }];
 
         // Should not panic

@@ -625,6 +625,115 @@ pub async fn health_check(State(state): State<Arc<AppState>>) -> Json<HealthResp
     })
 }
 
+/// Generate fetchClosure expression for a package version.
+///
+/// Returns a ready-to-use Nix expression for `builtins.fetchClosure` if
+/// the store path is available for this package version.
+///
+/// Note: Currently only x86_64-linux store paths are indexed. Other systems
+/// will return an error indicating store paths are not available.
+#[utoipa::path(
+    get,
+    path = "/api/v1/fetch-closure",
+    params(
+        ("attr" = String, Query, description = "Package attribute path"),
+        ("version" = String, Query, description = "Package version"),
+        ("cache_url" = Option<String>, Query, description = "Nix cache URL (default: https://cache.nixos.org)"),
+        ("system" = Option<String>, Query, description = "Target system (default: x86_64-linux). Note: Only x86_64-linux is currently indexed."),
+    ),
+    responses(
+        (status = 200, description = "Fetch closure expression", body = FetchClosureResponse),
+        (status = 404, description = "Package not found"),
+        (status = 503, description = "Index not available"),
+    ),
+    tag = "packages"
+)]
+#[instrument(skip(state), fields(attr = %params.attr, version = %params.version, system = %params.system))]
+pub async fn get_fetch_closure(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<types::FetchClosureParams>,
+) -> Result<Json<types::FetchClosureResponse>, ApiError> {
+    let db_path = state.db_path.clone();
+    let attr = params.attr.clone();
+    let version = params.version.clone();
+    let cache_url = params.cache_url.clone();
+    let system = params.system.clone();
+
+    // Currently only x86_64-linux store paths are indexed
+    if system != "x86_64-linux" {
+        tracing::debug!(system = %system, "Store paths only indexed for x86_64-linux");
+        return Ok(Json(types::FetchClosureResponse {
+            attr: params.attr,
+            version: params.version,
+            system,
+            store_path: None,
+            commit: String::new(),
+            nix_expr: None,
+            error: Some(format!(
+                "Store paths are currently only indexed for x86_64-linux. \
+                 Requested system '{}' is not yet supported.",
+                params.system
+            )),
+        }));
+    }
+
+    // Get the package version (most recent occurrence)
+    let pkg = run_db_operation(&state, move || {
+        let _span = tracing::info_span!("db_get_version").entered();
+        let db = Database::open_readonly(&db_path)?;
+        queries::get_last_occurrence(db.connection(), &attr, &version)
+    })
+    .await?;
+
+    match pkg {
+        Some(p) => {
+            if let Some(ref store_path) = p.store_path {
+                // Generate fetchClosure expression
+                let nix_expr = format!(
+                    r#"builtins.fetchClosure {{
+  fromStore = "{}";
+  fromPath = "{}";
+}}"#,
+                    cache_url, store_path
+                );
+
+                Ok(Json(types::FetchClosureResponse {
+                    attr: params.attr,
+                    version: params.version,
+                    system,
+                    store_path: Some(store_path.clone()),
+                    commit: p.last_commit_hash,
+                    nix_expr: Some(nix_expr),
+                    error: None,
+                }))
+            } else {
+                // Store path not available (pre-2020 package or extraction failed)
+                tracing::debug!("Store path not available for this package");
+                Ok(Json(types::FetchClosureResponse {
+                    attr: params.attr,
+                    version: params.version,
+                    system,
+                    store_path: None,
+                    commit: p.last_commit_hash,
+                    nix_expr: None,
+                    error: Some(
+                        "Store path not available. This may be a pre-2020 package or \
+                         store path extraction failed during indexing."
+                            .to_string(),
+                    ),
+                }))
+            }
+        }
+        None => {
+            tracing::trace!("Version not found");
+            Err(ApiError::not_found(format!(
+                "Version '{}' of '{}' not found",
+                params.version, params.attr
+            )))
+        }
+    }
+}
+
 /// Get server metrics for monitoring.
 ///
 /// Returns metrics about the server including database connection pool utilization

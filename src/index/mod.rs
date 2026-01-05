@@ -24,14 +24,24 @@ pub struct CheckpointRange {
     pub platforms: Option<String>,
     pub source_path: Option<String>,
     pub known_vulnerabilities: Option<String>,
+    pub store_path: Option<String>,
 }
 
 use crate::bloom::PackageBloomFilter;
 use crate::db::Database;
 use crate::db::queries::PackageVersion;
 use crate::error::{NxvError, Result};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use git::{NixpkgsRepo, WorktreeSession};
+
+/// Check if a commit date is after the store path extraction cutoff (2020-01-01).
+/// Store paths are only extracted for commits from this date onwards because
+/// older binaries are unlikely to be in cache.nixos.org after GC events.
+fn is_after_store_path_cutoff(date: DateTime<Utc>) -> bool {
+    // 2020-01-01 00:00:00 UTC
+    let cutoff = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
+    date >= cutoff
+}
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
@@ -89,6 +99,7 @@ struct OpenRange {
     platforms: Option<String>,
     source_path: Option<String>,
     known_vulnerabilities: Option<String>,
+    store_path: Option<String>,
 }
 
 impl OpenRange {
@@ -126,6 +137,7 @@ impl OpenRange {
             platforms: self.platforms.clone(),
             source_path: self.source_path.clone(),
             known_vulnerabilities: self.known_vulnerabilities.clone(),
+            store_path: self.store_path.clone(),
         }
     }
 
@@ -144,6 +156,7 @@ impl OpenRange {
             platforms: self.platforms.clone(),
             source_path: self.source_path.clone(),
             known_vulnerabilities: self.known_vulnerabilities.clone(),
+            store_path: self.store_path.clone(),
         }
     }
 
@@ -162,6 +175,7 @@ impl OpenRange {
             platforms: cr.platforms,
             source_path: cr.source_path,
             known_vulnerabilities: cr.known_vulnerabilities,
+            store_path: cr.store_path,
         }
     }
 
@@ -263,6 +277,7 @@ struct PackageAggregate {
     platforms: HashSet<String>,
     source_path: Option<String>,
     known_vulnerabilities: Option<Vec<String>>,
+    store_path: Option<String>,
 }
 
 impl PackageAggregate {
@@ -317,6 +332,7 @@ impl PackageAggregate {
             platforms,
             source_path: pkg.source_path,
             known_vulnerabilities: pkg.known_vulnerabilities,
+            store_path: pkg.out_path,
         }
     }
 
@@ -385,6 +401,10 @@ impl PackageAggregate {
         // Merge known_vulnerabilities - keep existing or use new
         if self.known_vulnerabilities.is_none() {
             self.known_vulnerabilities = pkg.known_vulnerabilities;
+        }
+        // Merge store_path - keep existing or use new
+        if self.store_path.is_none() {
+            self.store_path = pkg.out_path;
         }
     }
 
@@ -1132,7 +1152,13 @@ impl Indexer {
                     if let Some(existing) = aggregates.get_mut(&key) {
                         existing.merge(pkg);
                     } else {
-                        aggregates.insert(key, PackageAggregate::new(pkg));
+                        let mut agg = PackageAggregate::new(pkg);
+                        // Clear store_path for commits before 2020-01-01
+                        // (older binaries unlikely to be in cache.nixos.org)
+                        if !is_after_store_path_cutoff(commit.date) {
+                            agg.store_path = None;
+                        }
+                        aggregates.insert(key, agg);
                     }
                 }
             }
@@ -1180,6 +1206,7 @@ impl Indexer {
                             platforms: platforms_json,
                             source_path: aggregate.source_path.clone(),
                             known_vulnerabilities: aggregate.known_vulnerabilities_json(),
+                            store_path: aggregate.store_path.clone(),
                         },
                     );
                 }
@@ -1608,6 +1635,7 @@ mod tests {
             platforms: None,
             source_path: Some("pkgs/hello/default.nix".to_string()),
             known_vulnerabilities: None,
+            store_path: None,
         };
 
         let last_date = Utc::now();
@@ -1774,6 +1802,7 @@ mod tests {
                 platforms: None,
                 source_path: None,
                 known_vulnerabilities: None,
+                store_path: None,
             },
             PackageVersion {
                 id: 0,
@@ -1791,6 +1820,7 @@ mod tests {
                 platforms: None,
                 source_path: None,
                 known_vulnerabilities: None,
+                store_path: None,
             },
         ];
 
@@ -1842,6 +1872,7 @@ mod tests {
                 platforms: None,
                 source_path: None,
                 known_vulnerabilities: None,
+                store_path: None,
             };
             db.insert_package_ranges_batch(&[pkg]).unwrap();
 
@@ -1878,6 +1909,7 @@ mod tests {
                 platforms: None,
                 source_path: None,
                 known_vulnerabilities: None,
+                store_path: None,
             };
             db.insert_package_ranges_batch(&[pkg]).unwrap();
 

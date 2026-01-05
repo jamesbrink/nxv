@@ -147,6 +147,10 @@ pub struct SearchArgs {
     #[arg(long)]
     pub show_platforms: bool,
 
+    /// Show store path column in output (for fetchClosure support).
+    #[arg(long)]
+    pub show_store_path: bool,
+
     /// Sort results.
     #[arg(long, value_enum, default_value_t = SortOrder::Date)]
     pub sort: SortOrder,

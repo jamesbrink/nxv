@@ -43,6 +43,9 @@ pub fn print_table(results: &[PackageVersion], options: TableOptions) {
     if options.show_platforms {
         headers.push("Platforms");
     }
+    if options.show_store_path {
+        headers.push("Store Path");
+    }
     table.set_header(headers);
 
     for pkg in results {
@@ -71,6 +74,11 @@ pub fn print_table(results: &[PackageVersion], options: TableOptions) {
         if options.show_platforms {
             let platforms = pkg.platforms.as_deref().unwrap_or("-");
             row.push(Cell::new(platforms));
+        }
+
+        if options.show_store_path {
+            let store_path = pkg.store_path.as_deref().unwrap_or("-");
+            row.push(Cell::new(store_path).fg(Color::Magenta));
         }
 
         table.add_row(row);
@@ -108,6 +116,7 @@ mod tests {
             platforms: None,
             source_path: None,
             known_vulnerabilities: None,
+            store_path: None,
         }];
 
         // Should not panic
@@ -116,6 +125,7 @@ mod tests {
             &results,
             TableOptions {
                 show_platforms: true,
+                show_store_path: false,
                 ascii: false,
             },
         );
@@ -123,6 +133,7 @@ mod tests {
             &results,
             TableOptions {
                 show_platforms: false,
+                show_store_path: true,
                 ascii: true,
             },
         );

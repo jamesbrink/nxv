@@ -3,7 +3,7 @@
 { nixpkgsPath, system, attrNames ? null }:
 let
   # Import nixpkgs with current system and permissive config
-  pkgsResult = builtins.tryEval (import nixpkgsPath {
+  pkgs = import nixpkgsPath {
     system = system;
     config = {
       allowUnfree = true;
@@ -11,10 +11,7 @@ let
       allowInsecure = true;
       allowUnsupportedSystem = true;
     };
-  });
-  pkgs = if pkgsResult.success && builtins.isAttrs pkgsResult.value
-         then pkgsResult.value
-         else {};
+  };
 
   # Known package sets that contain nested derivations
   # These will be recursively explored to find nested packages
@@ -177,6 +174,17 @@ let
       );
     in if result.success then result.value else null;
 
+  # Safely extract the output path (store path) from a derivation
+  # This gives us the /nix/store/hash-name-version path without building
+  # Note: We use a different name for the return value because "outPath" is a special
+  # Nix attribute that causes coercion issues when serializing to JSON.
+  getStorePath = pkg:
+    let
+      result = builtins.tryEval (
+        if pkg ? outPath then builtins.toString pkg.outPath else null
+      );
+    in if result.success then result.value else null;
+
   # Safely extract package info - each field is independently evaluated
   getPackageInfo = attrPath: pkg:
     let
@@ -184,6 +192,7 @@ let
       name = tryDeep (toString' (pkg.pname or pkg.name or attrPath));
       version = tryDeep (toString' (pkg.version or "unknown"));
       sourcePath = getSourcePath meta;
+      storePath = getStorePath pkg;
     in {
       name = if name != null then name else attrPath;
       version = if version != null then version else "unknown";
@@ -195,6 +204,7 @@ let
       platforms = if meta ? platforms then getPlatforms meta.platforms else null;
       sourcePath = safeString sourcePath;
       knownVulnerabilities = if meta ? knownVulnerabilities then getKnownVulnerabilities meta.knownVulnerabilities else null;
+      storePath = storePath;
     };
 
   # Check if an attribute name matches a nested package set pattern
@@ -334,5 +344,8 @@ let
     ) nestedPackageSets;
 
   results = topLevelResults ++ dottedResults ++ nestedResults;
+
+  # Final safety filter: remove any null entries that might have slipped through
+  filteredResults = builtins.filter (x: x != null) results;
 in
-  results
+  filteredResults

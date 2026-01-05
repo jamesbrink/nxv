@@ -25,7 +25,8 @@ pub struct CheckpointRange {
     pub platforms: Option<String>,
     pub source_path: Option<String>,
     pub known_vulnerabilities: Option<String>,
-    pub store_path: Option<String>,
+    /// Store paths per architecture (e.g., {"x86_64-linux": "/nix/store/..."})
+    pub store_paths: std::collections::HashMap<String, String>,
 }
 
 use crate::bloom::PackageBloomFilter;
@@ -132,7 +133,8 @@ struct OpenRange {
     platforms: Option<String>,
     source_path: Option<String>,
     known_vulnerabilities: Option<String>,
-    store_path: Option<String>,
+    /// Store paths per architecture
+    store_paths: HashMap<String, String>,
 }
 
 impl OpenRange {
@@ -170,7 +172,7 @@ impl OpenRange {
             platforms: self.platforms.clone(),
             source_path: self.source_path.clone(),
             known_vulnerabilities: self.known_vulnerabilities.clone(),
-            store_path: self.store_path.clone(),
+            store_paths: self.store_paths.clone(),
         }
     }
 
@@ -189,7 +191,7 @@ impl OpenRange {
             platforms: self.platforms.clone(),
             source_path: self.source_path.clone(),
             known_vulnerabilities: self.known_vulnerabilities.clone(),
-            store_path: self.store_path.clone(),
+            store_paths: self.store_paths.clone(),
         }
     }
 
@@ -208,7 +210,7 @@ impl OpenRange {
             platforms: cr.platforms,
             source_path: cr.source_path,
             known_vulnerabilities: cr.known_vulnerabilities,
-            store_path: cr.store_path,
+            store_paths: cr.store_paths,
         }
     }
 
@@ -310,7 +312,8 @@ struct PackageAggregate {
     platforms: HashSet<String>,
     source_path: Option<String>,
     known_vulnerabilities: Option<Vec<String>>,
-    store_path: Option<String>,
+    /// Store paths per architecture
+    store_paths: HashMap<String, String>,
 }
 
 impl PackageAggregate {
@@ -339,10 +342,11 @@ impl PackageAggregate {
     /// assert_eq!(agg.name, "foo");
     /// assert!(agg.license.contains("MIT"));
     /// ```
-    fn new(pkg: extractor::PackageInfo) -> Self {
+    fn new(pkg: extractor::PackageInfo, system: &str) -> Self {
         let mut license = HashSet::new();
         let mut maintainers = HashSet::new();
         let mut platforms = HashSet::new();
+        let mut store_paths = HashMap::new();
 
         if let Some(licenses) = pkg.license {
             license.extend(licenses);
@@ -352,6 +356,9 @@ impl PackageAggregate {
         }
         if let Some(platforms_list) = pkg.platforms {
             platforms.extend(platforms_list);
+        }
+        if let Some(path) = pkg.out_path {
+            store_paths.insert(system.to_string(), path);
         }
 
         Self {
@@ -365,7 +372,7 @@ impl PackageAggregate {
             platforms,
             source_path: pkg.source_path,
             known_vulnerabilities: pkg.known_vulnerabilities,
-            store_path: pkg.out_path,
+            store_paths,
         }
     }
 
@@ -412,7 +419,7 @@ impl PackageAggregate {
     /// assert!(agg.license.contains("MIT"));
     /// assert_eq!(agg.source_path.as_deref(), Some("pkgs/foo/default.nix"));
     /// ```
-    fn merge(&mut self, pkg: extractor::PackageInfo) {
+    fn merge(&mut self, pkg: extractor::PackageInfo, system: &str) {
         if self.description.is_none() {
             self.description = pkg.description;
         }
@@ -435,9 +442,9 @@ impl PackageAggregate {
         if self.known_vulnerabilities.is_none() {
             self.known_vulnerabilities = pkg.known_vulnerabilities;
         }
-        // Merge store_path - keep existing or use new
-        if self.store_path.is_none() {
-            self.store_path = pkg.out_path;
+        // Merge store_path for this system - each architecture gets its own path
+        if let Some(path) = pkg.out_path {
+            self.store_paths.entry(system.to_string()).or_insert(path);
         }
     }
 
@@ -1255,13 +1262,13 @@ impl Indexer {
                 for pkg in packages {
                     let key = format!("{}::{}", pkg.attribute_path, pkg.version);
                     if let Some(existing) = aggregates.get_mut(&key) {
-                        existing.merge(pkg);
+                        existing.merge(pkg, &system);
                     } else {
-                        let mut agg = PackageAggregate::new(pkg);
-                        // Clear store_path for commits before 2020-01-01
+                        let mut agg = PackageAggregate::new(pkg, &system);
+                        // Clear store_paths for commits before 2020-01-01
                         // (older binaries unlikely to be in cache.nixos.org)
                         if !is_after_store_path_cutoff(commit.date) {
-                            agg.store_path = None;
+                            agg.store_paths.clear();
                         }
                         aggregates.insert(key, agg);
                     }
@@ -1311,7 +1318,7 @@ impl Indexer {
                             platforms: platforms_json,
                             source_path: aggregate.source_path.clone(),
                             known_vulnerabilities: aggregate.known_vulnerabilities_json(),
-                            store_path: aggregate.store_path.clone(),
+                            store_paths: aggregate.store_paths.clone(),
                         },
                     );
                 }
@@ -1748,7 +1755,7 @@ mod tests {
             platforms: None,
             source_path: Some("pkgs/hello/default.nix".to_string()),
             known_vulnerabilities: None,
-            store_path: None,
+            store_paths: HashMap::new(),
         };
 
         let last_date = Utc::now();
@@ -1921,7 +1928,7 @@ mod tests {
                 platforms: None,
                 source_path: None,
                 known_vulnerabilities: None,
-                store_path: None,
+                store_paths: HashMap::new(),
             },
             PackageVersion {
                 id: 0,
@@ -1939,7 +1946,7 @@ mod tests {
                 platforms: None,
                 source_path: None,
                 known_vulnerabilities: None,
-                store_path: None,
+                store_paths: HashMap::new(),
             },
         ];
 
@@ -1991,7 +1998,7 @@ mod tests {
                 platforms: None,
                 source_path: None,
                 known_vulnerabilities: None,
-                store_path: None,
+                store_paths: HashMap::new(),
             };
             db.insert_package_ranges_batch(&[pkg]).unwrap();
 
@@ -2028,7 +2035,7 @@ mod tests {
                 platforms: None,
                 source_path: None,
                 known_vulnerabilities: None,
-                store_path: None,
+                store_paths: HashMap::new(),
             };
             db.insert_package_ranges_batch(&[pkg]).unwrap();
 

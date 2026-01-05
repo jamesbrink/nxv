@@ -15,7 +15,15 @@ const DEFAULT_BUSY_TIMEOUT_SECS: u64 = 5;
 
 /// Current schema version.
 #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
-const SCHEMA_VERSION: u32 = 5;
+const SCHEMA_VERSION: u32 = 6;
+
+/// Supported systems for store paths.
+pub const STORE_PATH_SYSTEMS: [&str; 4] = [
+    "x86_64-linux",
+    "aarch64-linux",
+    "x86_64-darwin",
+    "aarch64-darwin",
+];
 
 /// Database connection wrapper.
 pub struct Database {
@@ -157,7 +165,10 @@ impl Database {
                 platforms TEXT,
                 source_path TEXT,
                 known_vulnerabilities TEXT,
-                store_path TEXT,
+                store_path_x86_64_linux TEXT,
+                store_path_aarch64_linux TEXT,
+                store_path_x86_64_darwin TEXT,
+                store_path_aarch64_darwin TEXT,
                 UNIQUE(attribute_path, version, first_commit_hash)
             );
 
@@ -183,7 +194,10 @@ impl Database {
                 platforms TEXT,
                 source_path TEXT,
                 known_vulnerabilities TEXT,
-                store_path TEXT
+                store_path_x86_64_linux TEXT,
+                store_path_aarch64_linux TEXT,
+                store_path_x86_64_darwin TEXT,
+                store_path_aarch64_darwin TEXT
             );
             "#,
         )?;
@@ -372,6 +386,76 @@ impl Database {
             }
         }
 
+        if current_version < 6 {
+            // Migration v5 -> v6: Add per-architecture store_path columns
+            // Add columns to package_versions
+            for system in STORE_PATH_SYSTEMS {
+                let col_name = format!("store_path_{}", system.replace('-', "_"));
+                let has_col: bool = self
+                    .conn
+                    .query_row(
+                        &format!(
+                            "SELECT COUNT(*) > 0 FROM pragma_table_info('package_versions') WHERE name='{}'",
+                            col_name
+                        ),
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(false);
+
+                if !has_col {
+                    self.conn.execute(
+                        &format!("ALTER TABLE package_versions ADD COLUMN {} TEXT", col_name),
+                        [],
+                    )?;
+                }
+            }
+
+            // Migrate existing store_path data to store_path_x86_64_linux
+            // (since previous indexer used x86_64-linux as default)
+            let has_old_store_path: bool = self
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM pragma_table_info('package_versions') WHERE name='store_path'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+
+            if has_old_store_path {
+                self.conn.execute(
+                    "UPDATE package_versions SET store_path_x86_64_linux = store_path WHERE store_path IS NOT NULL AND store_path_x86_64_linux IS NULL",
+                    [],
+                )?;
+            }
+
+            // Add columns to checkpoint_open_ranges
+            for system in STORE_PATH_SYSTEMS {
+                let col_name = format!("store_path_{}", system.replace('-', "_"));
+                let has_col: bool = self
+                    .conn
+                    .query_row(
+                        &format!(
+                            "SELECT COUNT(*) > 0 FROM pragma_table_info('checkpoint_open_ranges') WHERE name='{}'",
+                            col_name
+                        ),
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(false);
+
+                if !has_col {
+                    self.conn.execute(
+                        &format!(
+                            "ALTER TABLE checkpoint_open_ranges ADD COLUMN {} TEXT",
+                            col_name
+                        ),
+                        [],
+                    )?;
+                }
+            }
+        }
+
         if current_version < SCHEMA_VERSION {
             self.set_meta("schema_version", &SCHEMA_VERSION.to_string())?;
         }
@@ -440,8 +524,10 @@ impl Database {
                     (name, version, first_commit_hash, first_commit_date,
                      last_commit_hash, last_commit_date, attribute_path,
                      description, license, homepage, maintainers, platforms, source_path,
-                     known_vulnerabilities, store_path)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     known_vulnerabilities,
+                     store_path_x86_64_linux, store_path_aarch64_linux,
+                     store_path_x86_64_darwin, store_path_aarch64_darwin)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
             )?;
 
@@ -461,7 +547,10 @@ impl Database {
                     pkg.platforms,
                     pkg.source_path,
                     pkg.known_vulnerabilities,
-                    pkg.store_path,
+                    pkg.store_paths.get("x86_64-linux"),
+                    pkg.store_paths.get("aarch64-linux"),
+                    pkg.store_paths.get("x86_64-darwin"),
+                    pkg.store_paths.get("aarch64-darwin"),
                 ])?;
                 inserted += changes;
             }
@@ -492,8 +581,10 @@ impl Database {
                 INSERT INTO checkpoint_open_ranges
                     (key, name, version, first_commit_hash, first_commit_date,
                      attribute_path, description, license, homepage, maintainers,
-                     platforms, source_path, known_vulnerabilities, store_path)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     platforms, source_path, known_vulnerabilities,
+                     store_path_x86_64_linux, store_path_aarch64_linux,
+                     store_path_x86_64_darwin, store_path_aarch64_darwin)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
             )?;
 
@@ -512,7 +603,10 @@ impl Database {
                     range.platforms,
                     range.source_path,
                     range.known_vulnerabilities,
-                    range.store_path,
+                    range.store_paths.get("x86_64-linux"),
+                    range.store_paths.get("aarch64-linux"),
+                    range.store_paths.get("x86_64-darwin"),
+                    range.store_paths.get("aarch64-darwin"),
                 ])?;
             }
         }
@@ -537,7 +631,9 @@ impl Database {
             r#"
             SELECT key, name, version, first_commit_hash, first_commit_date,
                    attribute_path, description, license, homepage, maintainers,
-                   platforms, source_path, known_vulnerabilities, store_path
+                   platforms, source_path, known_vulnerabilities,
+                   store_path_x86_64_linux, store_path_aarch64_linux,
+                   store_path_x86_64_darwin, store_path_aarch64_darwin
             FROM checkpoint_open_ranges
             "#,
         )?;
@@ -545,6 +641,21 @@ impl Database {
         let rows = stmt.query_map([], |row| {
             let key: String = row.get(0)?;
             let timestamp: i64 = row.get(4)?;
+
+            let mut store_paths = HashMap::new();
+            if let Some(path) = row.get::<_, Option<String>>(13)? {
+                store_paths.insert("x86_64-linux".to_string(), path);
+            }
+            if let Some(path) = row.get::<_, Option<String>>(14)? {
+                store_paths.insert("aarch64-linux".to_string(), path);
+            }
+            if let Some(path) = row.get::<_, Option<String>>(15)? {
+                store_paths.insert("x86_64-darwin".to_string(), path);
+            }
+            if let Some(path) = row.get::<_, Option<String>>(16)? {
+                store_paths.insert("aarch64-darwin".to_string(), path);
+            }
+
             Ok((
                 key,
                 crate::index::CheckpointRange {
@@ -560,7 +671,7 @@ impl Database {
                     platforms: row.get(10)?,
                     source_path: row.get(11)?,
                     known_vulnerabilities: row.get(12)?,
-                    store_path: row.get(13).ok().flatten(),
+                    store_paths,
                 },
             ))
         })?;
@@ -710,7 +821,7 @@ mod tests {
                 platforms: None,
                 source_path: None,
                 known_vulnerabilities: None,
-                store_path: None,
+                store_paths: std::collections::HashMap::new(),
             },
             PackageVersion {
                 id: 0,
@@ -728,7 +839,7 @@ mod tests {
                 platforms: None,
                 source_path: None,
                 known_vulnerabilities: None,
-                store_path: None,
+                store_paths: std::collections::HashMap::new(),
             },
         ];
 
@@ -770,7 +881,7 @@ mod tests {
             platforms: None,
             source_path: None,
             known_vulnerabilities: None,
-            store_path: None,
+            store_paths: std::collections::HashMap::new(),
         };
 
         // First insert should succeed
@@ -820,7 +931,7 @@ mod tests {
             platforms: None,
             source_path: None,
             known_vulnerabilities: None,
-            store_path: None,
+            store_paths: std::collections::HashMap::new(),
         };
 
         db.insert_package_ranges_batch(&[pkg]).unwrap();
@@ -864,7 +975,7 @@ mod tests {
                 platforms: None,
                 source_path: None,
                 known_vulnerabilities: None,
-                store_path: None,
+                store_paths: std::collections::HashMap::new(),
             })
             .collect();
 

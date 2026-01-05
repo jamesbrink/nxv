@@ -567,7 +567,10 @@ mod tests {
                 platforms TEXT,
                 source_path TEXT,
                 known_vulnerabilities TEXT,
-                store_path TEXT,
+                store_path_x86_64_linux TEXT,
+                store_path_aarch64_linux TEXT,
+                store_path_x86_64_darwin TEXT,
+                store_path_aarch64_darwin TEXT,
                 UNIQUE(attribute_path, version, first_commit_hash)
             );
             CREATE INDEX idx_packages_name ON package_versions(name);
@@ -579,7 +582,7 @@ mod tests {
             INSERT INTO meta (key, value) VALUES ('last_indexed_commit', 'abc1234567890def');
             INSERT INTO package_versions
                 (name, version, first_commit_hash, first_commit_date,
-                 last_commit_hash, last_commit_date, attribute_path, description, license, store_path)
+                 last_commit_hash, last_commit_date, attribute_path, description, license, store_path_x86_64_linux)
             VALUES
                 ('python', '3.11.0', 'aaa111', 1700000000, 'bbb222', 1700100000, 'python311', 'Python interpreter', 'PSF', '/nix/store/abc123-python3-3.11.0'),
                 ('python', '3.12.0', 'ccc333', 1700200000, 'ddd444', 1700300000, 'python312', 'Python interpreter', 'PSF', '/nix/store/def456-python3-3.12.0'),
@@ -1173,11 +1176,11 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(json["store_path"].is_null());
         assert!(json["nix_expr"].is_null());
+        let error_msg = json["error"].as_str().expect("error should be present");
         assert!(
-            json["error"]
-                .as_str()
-                .unwrap()
-                .contains("only indexed for x86_64-linux")
+            error_msg.contains("Store path not available"),
+            "Error message: {}",
+            error_msg
         );
     }
 

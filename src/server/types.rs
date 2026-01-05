@@ -234,10 +234,10 @@ pub struct PackageVersionSchema {
     /// Known security vulnerabilities (JSON array, may be null for secure packages).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub known_vulnerabilities: Option<String>,
-    /// Store path for x86_64-linux (e.g., /nix/store/hash-name-version).
+    /// Store paths per architecture (e.g., {"x86_64-linux": "/nix/store/hash-name-version"}).
     /// Only populated for packages from 2020-01-01 onwards.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub store_path: Option<String>,
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub store_paths: std::collections::HashMap<String, String>,
 }
 
 impl From<PackageVersion> for PackageVersionSchema {
@@ -271,7 +271,7 @@ impl From<PackageVersion> for PackageVersionSchema {
             platforms: p.platforms,
             source_path: p.source_path,
             known_vulnerabilities: p.known_vulnerabilities,
-            store_path: p.store_path,
+            store_paths: p.store_paths,
         }
     }
 }
@@ -287,7 +287,7 @@ pub struct FetchClosureParams {
     #[serde(default = "default_cache_url")]
     pub cache_url: String,
     /// Target system (default: x86_64-linux).
-    /// Note: Currently only x86_64-linux store paths are indexed.
+    /// Supported systems: x86_64-linux, aarch64-linux, x86_64-darwin, aarch64-darwin.
     #[serde(default = "default_system")]
     pub system: String,
 }

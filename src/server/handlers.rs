@@ -714,9 +714,15 @@ pub async fn get_fetch_closure(
     let cache_url = params.cache_url.clone();
     let system = params.system.clone();
 
-    // Currently only x86_64-linux store paths are indexed
-    if system != "x86_64-linux" {
-        tracing::debug!(system = %system, "Store paths only indexed for x86_64-linux");
+    // Validate requested system is one of the supported architectures
+    const SUPPORTED_SYSTEMS: [&str; 4] = [
+        "x86_64-linux",
+        "aarch64-linux",
+        "x86_64-darwin",
+        "aarch64-darwin",
+    ];
+    if !SUPPORTED_SYSTEMS.contains(&system.as_str()) {
+        tracing::debug!(system = %system, "Unsupported system requested");
         return Ok(Json(types::FetchClosureResponse {
             attr: params.attr,
             version: params.version,
@@ -725,9 +731,9 @@ pub async fn get_fetch_closure(
             commit: String::new(),
             nix_expr: None,
             error: Some(format!(
-                "Store paths are currently only indexed for x86_64-linux. \
-                 Requested system '{}' is not yet supported.",
-                params.system
+                "Unsupported system '{}'. Supported systems: {}",
+                params.system,
+                SUPPORTED_SYSTEMS.join(", ")
             )),
         }));
     }
@@ -742,7 +748,7 @@ pub async fn get_fetch_closure(
 
     match pkg {
         Some(p) => {
-            if let Some(ref store_path) = p.store_path {
+            if let Some(store_path) = p.store_paths.get(&system) {
                 // Validate store path to prevent Nix code injection
                 if !is_valid_store_path(store_path) {
                     tracing::warn!(
@@ -785,8 +791,20 @@ pub async fn get_fetch_closure(
                     error: None,
                 }))
             } else {
-                // Store path not available (pre-2020 package or extraction failed)
-                tracing::debug!("Store path not available for this package");
+                // Store path not available for this system (pre-2020 package, extraction failed, or unsupported system)
+                let available_systems: Vec<_> = p.store_paths.keys().cloned().collect();
+                let error_msg = if available_systems.is_empty() {
+                    "Store path not available. This may be a pre-2020 package or \
+                     store path extraction failed during indexing."
+                        .to_string()
+                } else {
+                    format!(
+                        "Store path not available for system '{}'. Available systems: {}",
+                        system,
+                        available_systems.join(", ")
+                    )
+                };
+                tracing::debug!(system = %system, available = ?available_systems, "Store path not available for requested system");
                 Ok(Json(types::FetchClosureResponse {
                     attr: params.attr,
                     version: params.version,
@@ -794,11 +812,7 @@ pub async fn get_fetch_closure(
                     store_path: None,
                     commit: p.last_commit_hash,
                     nix_expr: None,
-                    error: Some(
-                        "Store path not available. This may be a pre-2020 package or \
-                         store path extraction failed during indexing."
-                            .to_string(),
-                    ),
+                    error: Some(error_msg),
                 }))
             }
         }

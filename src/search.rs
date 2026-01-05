@@ -341,7 +341,7 @@ mod tests {
             platforms: None,
             source_path: None,
             known_vulnerabilities: None,
-            store_path: None,
+            store_paths: std::collections::HashMap::new(),
         }
     }
 
@@ -520,7 +520,7 @@ mod proptests {
                 platforms: None,
                 source_path: None,
                 known_vulnerabilities: None,
-                store_path: None,
+                store_paths: std::collections::HashMap::new(),
             }
         }
     }

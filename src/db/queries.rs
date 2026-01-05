@@ -3,6 +3,7 @@
 use crate::error::Result;
 use chrono::{DateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Escapes SQL LIKE wildcard characters (`%`, `_`, `\`) in user input.
 ///
@@ -60,9 +61,10 @@ pub struct PackageVersion {
     pub source_path: Option<String>,
     /// Known security vulnerabilities or EOL notices (JSON array)
     pub known_vulnerabilities: Option<String>,
-    /// Store path for x86_64-linux (e.g., /nix/store/hash-name-version)
+    /// Store paths per architecture (e.g., {"x86_64-linux": "/nix/store/hash-name-version"})
     /// Only populated for commits from 2020-01-01 onwards.
-    pub store_path: Option<String>,
+    #[serde(default)]
+    pub store_paths: HashMap<String, String>,
 }
 
 impl PackageVersion {
@@ -107,6 +109,37 @@ impl PackageVersion {
                 )
             })?;
 
+        // Build store_paths from the 4 architecture columns
+        let mut store_paths = HashMap::new();
+        if let Some(path) = row
+            .get::<_, Option<String>>("store_path_x86_64_linux")
+            .ok()
+            .flatten()
+        {
+            store_paths.insert("x86_64-linux".to_string(), path);
+        }
+        if let Some(path) = row
+            .get::<_, Option<String>>("store_path_aarch64_linux")
+            .ok()
+            .flatten()
+        {
+            store_paths.insert("aarch64-linux".to_string(), path);
+        }
+        if let Some(path) = row
+            .get::<_, Option<String>>("store_path_x86_64_darwin")
+            .ok()
+            .flatten()
+        {
+            store_paths.insert("x86_64-darwin".to_string(), path);
+        }
+        if let Some(path) = row
+            .get::<_, Option<String>>("store_path_aarch64_darwin")
+            .ok()
+            .flatten()
+        {
+            store_paths.insert("aarch64-darwin".to_string(), path);
+        }
+
         Ok(Self {
             id: row.get("id")?,
             name: row.get("name")?,
@@ -123,7 +156,7 @@ impl PackageVersion {
             platforms: row.get("platforms")?,
             source_path: row.get("source_path").ok().flatten(),
             known_vulnerabilities: row.get("known_vulnerabilities").ok().flatten(),
-            store_path: row.get("store_path").ok().flatten(),
+            store_paths,
         })
     }
 
@@ -1238,7 +1271,7 @@ mod tests {
             platforms: None,
             source_path: None,
             known_vulnerabilities,
-            store_path: None,
+            store_paths: HashMap::new(),
         }
     }
 

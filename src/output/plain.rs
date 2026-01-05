@@ -56,7 +56,12 @@ pub fn print_plain(results: &[PackageVersion], options: TableOptions) {
         }
 
         if options.show_store_path {
-            let store_path = pkg.store_path.as_deref().unwrap_or("-");
+            // Default to x86_64-linux store path for display
+            let store_path = pkg
+                .store_paths
+                .get("x86_64-linux")
+                .map(String::as_str)
+                .unwrap_or("-");
             row.push('\t');
             row.push_str(store_path);
         }
@@ -94,7 +99,7 @@ mod tests {
             platforms: None,
             source_path: None,
             known_vulnerabilities: None,
-            store_path: None,
+            store_paths: std::collections::HashMap::new(),
         }];
 
         // Should not panic

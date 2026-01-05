@@ -575,6 +575,12 @@ There are several other great tools in this space:
 
 nxv takes a different approach: it indexes every commit locally, giving you a complete offline-capable database with no gaps. Choose what works best for your use case!
 
+## Acknowledgments
+
+This project uses the following notable open-source libraries:
+
+- **[nix-rust/nix](https://github.com/nix-rust/nix)** — Rust-friendly bindings to Unix/Linux APIs. Licensed under MIT.
+
 ## License
 
 [MIT](LICENSE)

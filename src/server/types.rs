@@ -234,9 +234,14 @@ pub struct PackageVersionSchema {
     /// Known security vulnerabilities (JSON array, may be null for secure packages).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub known_vulnerabilities: Option<String>,
-    /// Store paths per architecture (e.g., {"x86_64-linux": "/nix/store/hash-name-version"}).
+    /// Store paths per architecture. Keys are system triples (x86_64-linux, aarch64-linux,
+    /// x86_64-darwin, aarch64-darwin), values are Nix store paths.
     /// Only populated for packages from 2020-01-01 onwards.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    #[schema(
+        value_type = Object,
+        example = json!({"x86_64-linux": "/nix/store/abc123-hello-2.10", "aarch64-linux": "/nix/store/def456-hello-2.10"})
+    )]
     pub store_paths: std::collections::HashMap<String, String>,
 }
 

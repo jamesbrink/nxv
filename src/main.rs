@@ -687,6 +687,49 @@ fn cmd_pkg_info(cli: &Cli, args: &cli::InfoArgs) -> Result<()> {
             println!("  {}", pkg.nix_shell_cmd());
             println!("  {}", pkg.nix_run_cmd());
 
+            // Show fetchClosure / Binary Cache section if store paths are available
+            if !pkg.store_paths.is_empty() {
+                println!();
+                println!("{}", "Binary Cache (fetchClosure)".bold().underline());
+
+                // Detect current system for highlighting
+                let current_system = format!(
+                    "{}-{}",
+                    std::env::consts::ARCH,
+                    if std::env::consts::OS == "macos" {
+                        "darwin"
+                    } else {
+                        std::env::consts::OS
+                    }
+                );
+
+                // Sort architectures for consistent display, current system first
+                let mut archs: Vec<_> = pkg.store_paths.keys().collect();
+                archs.sort_by(|a, b| {
+                    let a_current = a.as_str() == current_system;
+                    let b_current = b.as_str() == current_system;
+                    b_current.cmp(&a_current).then(a.cmp(b))
+                });
+
+                for arch in archs {
+                    if let Some(store_path) = pkg.store_paths.get(arch.as_str()) {
+                        let is_current = arch.as_str() == current_system;
+                        let arch_label = if is_current {
+                            format!("  {} {}", "▶".green(), arch.green().bold())
+                        } else {
+                            format!("    {}", arch.yellow())
+                        };
+                        println!("{}:", arch_label);
+                        println!("      {}: {}", "Path".yellow(), store_path.cyan());
+                        let expr = format!(
+                            "builtins.fetchClosure {{ fromStore = \"https://cache.nixos.org\"; fromPath = {}; inputAddressed = true; }}",
+                            store_path
+                        );
+                        println!("      {}: {}", "Expr".yellow(), expr.cyan());
+                    }
+                }
+            }
+
             if pkg.predates_flakes() {
                 println!();
                 println!(

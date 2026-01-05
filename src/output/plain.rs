@@ -56,14 +56,43 @@ pub fn print_plain(results: &[PackageVersion], options: TableOptions) {
         }
 
         if options.show_store_path {
-            // Default to x86_64-linux store path for display
-            let store_path = pkg
-                .store_paths
-                .get("x86_64-linux")
-                .map(String::as_str)
-                .unwrap_or("-");
+            // Detect current system
+            let current_system = format!(
+                "{}-{}",
+                std::env::consts::ARCH,
+                if std::env::consts::OS == "macos" {
+                    "darwin"
+                } else {
+                    std::env::consts::OS
+                }
+            );
+
+            // Show available architectures
+            let arch_count = pkg.store_paths.len();
+            let display = if arch_count == 0 {
+                "-".to_string()
+            } else {
+                // Prefer current system, fallback to x86_64-linux, then first available
+                let (primary, is_current) = pkg
+                    .store_paths
+                    .get(&current_system)
+                    .map(|p| (p.as_str(), true))
+                    .or_else(|| {
+                        pkg.store_paths
+                            .get("x86_64-linux")
+                            .map(|p| (p.as_str(), false))
+                    })
+                    .or_else(|| pkg.store_paths.values().next().map(|p| (p.as_str(), false)))
+                    .unwrap_or(("-", false));
+                let marker = if is_current { "* " } else { "" };
+                if arch_count > 1 {
+                    format!("{}{} (+{} arch)", marker, primary, arch_count - 1)
+                } else {
+                    format!("{}{}", marker, primary)
+                }
+            };
             row.push('\t');
-            row.push_str(store_path);
+            row.push_str(&display);
         }
 
         println!("{}", row);

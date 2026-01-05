@@ -112,6 +112,10 @@ harness = false
 name = "indexer_benchmark"
 harness = false
 
+[[bench]]
+name = "ffi_benchmark"
+harness = false
+
 [features]
 default = []
 indexer = ["git2", "ctrlc", "nix-bindings"]  # Enable indexer functionality

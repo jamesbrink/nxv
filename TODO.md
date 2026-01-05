@@ -31,59 +31,61 @@ This experimental branch integrates `nix-bindings` to replace subprocess calls t
   - Graceful degradation if Nix C API not available
 
 - [x] **Phase 6: Tests and validation**
-  - All 64 existing tests pass
-  - 2 new FFI tests added (marked `#[ignore]` - require Nix C API)
+  - All 285 unit + 64 integration tests pass
+  - 4 FFI tests added (marked `#[ignore]` - require Nix C API)
   - Clippy clean, nix flake check passes
 
-## Pending Phases
+- [x] **Phase 7: Reuse NixEvaluator across evaluations**
+  - Implemented thread-local storage (`thread_local!`) pattern
+  - Added `with_evaluator()` function for easy access
+  - Amortizes expensive evaluator creation (~2-3s) across many evaluations
+  - Each thread gets its own evaluator instance
+  - Added `clear_evaluator()` for memory management
 
-- [ ] **Phase 7: Reuse NixEvaluator across evaluations**
-  - Currently creates new evaluator per call (expensive)
-  - Options:
-    - Thread-local storage (`thread_local!`)
-    - Pass evaluator as parameter to extraction functions
-    - Use `Mutex<Option<NixEvaluator>>` for global singleton
-  - Goal: Initialize once, reuse for hundreds of commits
-
-- [ ] **Phase 8: Benchmark FFI vs subprocess**
-  - Add criterion benchmarks comparing:
+- [x] **Phase 8: Benchmark FFI vs subprocess**
+  - Added `benches/ffi_benchmark.rs` with criterion benchmarks
+  - Benchmarks compare:
     - Cold start (new evaluator + eval)
-    - Warm eval (reused evaluator)
+    - Warm eval (reused thread-local evaluator)
     - Subprocess baseline
-  - Measure memory usage
+    - Multiple evaluations (cold vs warm vs subprocess)
+  - Run with: `nix develop -c cargo bench --features indexer --bench ffi_benchmark`
+
+## Future Work
 
 - [ ] **Phase 9: Parallel evaluation (future)**
   - Consider worker pool pattern from nix-eval-jobs-rs
-  - Each worker has own `NixEvaluator`
+  - Each worker has own `NixEvaluator` (already supported by thread-local design)
   - Parent distributes work via IPC
   - Memory-based worker recycling
 
 ## Architecture
 
 ```
-Current (per-call evaluator):
+With thread-local evaluator reuse:
 extract_packages_for_attrs()
-    └─► NixEvaluator::new()     # Expensive (~2-3s)
-        └─► eval_json(expr)     # Fast once initialized
-    └─► [fallback] subprocess   # If FFI fails
+    └─► with_evaluator()           # Gets/creates thread-local evaluator
+        └─► eval_json(expr)        # Fast - reuses Nix state
+    └─► [fallback] subprocess      # If FFI fails
 
-Target (reused evaluator):
 Indexer::run()
-    └─► NixEvaluator::new()     # Once at start
-        for commit in commits:
-            └─► eval_json(...)  # Reuse state, fast
+    └─► for commit in commits:
+            extract_packages_for_attrs()
+                └─► with_evaluator()   # Same evaluator reused
+                    └─► eval_json(...) # Hundreds of fast evals
 ```
 
 ## Files Changed
 
 | File | Change |
 |------|--------|
-| `Cargo.toml` | Added `nix-bindings` dep |
+| `Cargo.toml` | Added `nix-bindings` dep, `ffi_benchmark` bench |
 | `build.rs` | NEW - Nix C library linking |
 | `flake.nix` | Nix C API deps for indexer |
 | `src/index/mod.rs` | Added `nix_ffi` module |
-| `src/index/nix_ffi.rs` | NEW - FFI wrapper |
-| `src/index/extractor.rs` | Uses FFI with fallback |
+| `src/index/nix_ffi.rs` | NEW - FFI wrapper with thread-local reuse |
+| `src/index/extractor.rs` | Uses FFI via `with_evaluator()` |
+| `benches/ffi_benchmark.rs` | NEW - FFI vs subprocess benchmarks |
 
 ## Notes
 
@@ -91,3 +93,4 @@ Indexer::run()
 - GitHub version has high-level API but has Nix version compatibility issues
 - We wrote our own minimal high-level wrapper in `nix_ffi.rs`
 - The `NixEvaluator` is `Send` but not `Sync` (Nix C API is single-threaded)
+- Thread-local storage naturally supports future parallel worker pools

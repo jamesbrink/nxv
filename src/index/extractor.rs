@@ -1,7 +1,7 @@
 //! Nix package extraction from nixpkgs commits.
 
 use crate::error::{NxvError, Result};
-use crate::index::nix_ffi::NixEvaluator;
+use crate::index::nix_ffi::with_evaluator;
 use serde::Deserialize;
 use std::path::Path;
 use std::process::Command;
@@ -136,8 +136,8 @@ pub fn extract_packages_for_attrs<P: AsRef<Path>>(
         attr_names_arg
     );
 
-    // Try FFI first, fall back to subprocess on failure
-    let json_output = match NixEvaluator::new().and_then(|e| e.eval_json(&expr, "<extract>")) {
+    // Try FFI first (reuses thread-local evaluator), fall back to subprocess on failure
+    let json_output = match with_evaluator(|eval| eval.eval_json(&expr, "<extract>")) {
         Ok(result) => result,
         Err(_) => {
             // Fall back to nix eval subprocess
@@ -186,8 +186,8 @@ pub fn extract_attr_positions<P: AsRef<Path>>(
         system
     );
 
-    // Try FFI first, fall back to subprocess on failure
-    let json_output = match NixEvaluator::new().and_then(|e| e.eval_json(&expr, "<positions>")) {
+    // Try FFI first (reuses thread-local evaluator), fall back to subprocess on failure
+    let json_output = match with_evaluator(|eval| eval.eval_json(&expr, "<positions>")) {
         Ok(result) => result,
         Err(_) => {
             // Fall back to nix eval subprocess

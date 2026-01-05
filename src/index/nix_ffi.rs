@@ -2,10 +2,17 @@
 //!
 //! This module provides safe wrappers around the raw nix-bindings FFI
 //! to evaluate Nix expressions without spawning external processes.
+//!
+//! # Evaluator Reuse
+//!
+//! Creating a `NixEvaluator` is expensive (~2-3s for initial Nix state setup).
+//! Use `with_evaluator()` to reuse a thread-local evaluator across multiple
+//! evaluations, amortizing the setup cost.
 
 #![allow(unsafe_code)]
 
 use crate::error::{NxvError, Result};
+use std::cell::RefCell;
 use std::ffi::CString;
 use std::ptr;
 use std::sync::Once;
@@ -227,6 +234,56 @@ impl Drop for NixEvaluator {
 // but it is Send (can be transferred between threads).
 unsafe impl Send for NixEvaluator {}
 
+// Thread-local evaluator for reuse across multiple evaluations.
+// Each thread gets its own evaluator instance.
+thread_local! {
+    static THREAD_EVALUATOR: RefCell<Option<NixEvaluator>> = const { RefCell::new(None) };
+}
+
+/// Execute a function with a reused thread-local evaluator.
+///
+/// This amortizes the expensive evaluator creation (~2-3s) across multiple
+/// evaluations. The evaluator is created on first use and reused for subsequent
+/// calls within the same thread.
+///
+/// # Arguments
+/// * `f` - Function that receives a reference to the evaluator
+///
+/// # Returns
+/// The result of the function, or an error if evaluator creation fails.
+///
+/// # Example
+/// ```ignore
+/// let result = with_evaluator(|eval| eval.eval_json("1 + 2", "<test>"))?;
+/// ```
+pub fn with_evaluator<F, T>(f: F) -> Result<T>
+where
+    F: FnOnce(&NixEvaluator) -> Result<T>,
+{
+    THREAD_EVALUATOR.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+
+        // Initialize evaluator on first use
+        if borrow.is_none() {
+            *borrow = Some(NixEvaluator::new()?);
+        }
+
+        // Use the evaluator
+        f(borrow.as_ref().unwrap())
+    })
+}
+
+/// Clear the thread-local evaluator, freeing resources.
+///
+/// This is useful for memory management in long-running processes,
+/// or for resetting state after errors.
+#[allow(dead_code)]
+pub fn clear_evaluator() {
+    THREAD_EVALUATOR.with(|cell| {
+        cell.borrow_mut().take();
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,5 +310,39 @@ mod tests {
             serde_json::from_str(&result).expect("Failed to parse JSON");
         assert_eq!(parsed["name"], "hello");
         assert_eq!(parsed["version"], "1.0");
+    }
+
+    #[test]
+    #[ignore] // Requires nix to be installed with C API
+    fn test_with_evaluator_reuses_instance() {
+        // First call should create the evaluator
+        let result1 =
+            with_evaluator(|eval| eval.eval_json("1 + 1", "<test>")).expect("First eval failed");
+        assert_eq!(result1, "2");
+
+        // Second call should reuse the same evaluator (fast)
+        let result2 =
+            with_evaluator(|eval| eval.eval_json("2 + 2", "<test>")).expect("Second eval failed");
+        assert_eq!(result2, "4");
+
+        // Third call with more complex expression
+        let result3 = with_evaluator(|eval| eval.eval_json(r#"builtins.length [1 2 3]"#, "<test>"))
+            .expect("Third eval failed");
+        assert_eq!(result3, "3");
+    }
+
+    #[test]
+    #[ignore] // Requires nix to be installed with C API
+    fn test_clear_evaluator() {
+        // Create an evaluator
+        with_evaluator(|eval| eval.eval_json("1", "<test>")).expect("Eval failed");
+
+        // Clear it
+        clear_evaluator();
+
+        // Should work again (creates new evaluator)
+        let result =
+            with_evaluator(|eval| eval.eval_json("42", "<test>")).expect("Eval after clear failed");
+        assert_eq!(result, "42");
     }
 }

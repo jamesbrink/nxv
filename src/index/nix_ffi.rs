@@ -12,7 +12,6 @@
 #![allow(unsafe_code)]
 
 use crate::error::{NxvError, Result};
-use std::cell::RefCell;
 use std::ffi::CString;
 use std::ptr;
 use std::sync::Once;
@@ -234,30 +233,63 @@ impl Drop for NixEvaluator {
 // but it is Send (can be transferred between threads).
 unsafe impl Send for NixEvaluator {}
 
-// Thread-local evaluator for reuse across multiple evaluations.
-// Each thread gets its own evaluator instance.
-thread_local! {
-    static THREAD_EVALUATOR: RefCell<Option<NixEvaluator>> = const { RefCell::new(None) };
-}
-
-/// Stack size for evaluation threads (64 MB).
+/// Stack size for the evaluation worker thread (64 MB).
 /// Nix evaluations can be deeply recursive and need substantial stack space.
 const EVAL_STACK_SIZE: usize = 64 * 1024 * 1024;
 
-/// Execute a function with a reused thread-local evaluator.
+use std::sync::Mutex;
+use std::sync::mpsc;
+
+/// Message type for the eval worker thread.
+type EvalTask = Box<dyn FnOnce(&NixEvaluator) + Send>;
+
+/// Type alias for the eval worker sender.
+type EvalWorkerSender = Mutex<mpsc::Sender<(EvalTask, mpsc::Sender<()>)>>;
+
+/// Global eval worker - lazily initialized persistent thread with large stack.
+static EVAL_WORKER: std::sync::OnceLock<EvalWorkerSender> = std::sync::OnceLock::new();
+
+/// Initialize the global eval worker thread.
+fn get_eval_sender() -> &'static EvalWorkerSender {
+    EVAL_WORKER.get_or_init(|| {
+        let (tx, rx) = mpsc::channel::<(EvalTask, mpsc::Sender<()>)>();
+
+        std::thread::Builder::new()
+            .name("nix-eval-worker".into())
+            .stack_size(EVAL_STACK_SIZE)
+            .spawn(move || {
+                // Create evaluator once in this thread
+                let evaluator = match NixEvaluator::new() {
+                    Ok(e) => e,
+                    Err(e) => {
+                        eprintln!("Failed to create Nix evaluator: {}", e);
+                        return;
+                    }
+                };
+
+                // Process tasks until channel closes
+                for (task, done_tx) in rx {
+                    task(&evaluator);
+                    let _ = done_tx.send(());
+                }
+            })
+            .expect("Failed to spawn eval worker thread");
+
+        Mutex::new(tx)
+    })
+}
+
+/// Execute a function with a reused evaluator on a dedicated worker thread.
 ///
 /// This amortizes the expensive evaluator creation (~2-3s) across multiple
-/// evaluations. The evaluator is created on first use and reused for subsequent
-/// calls within the same thread.
-///
-/// **Note:** Evaluations run in a dedicated thread with a large stack (64MB)
-/// to prevent stack overflow during complex nixpkgs evaluations.
+/// evaluations. A single persistent worker thread with a large stack (64MB)
+/// handles all evaluations to prevent stack overflow.
 ///
 /// # Arguments
 /// * `f` - Function that receives a reference to the evaluator
 ///
 /// # Returns
-/// The result of the function, or an error if evaluator creation fails.
+/// The result of the function, or an error if evaluation fails.
 ///
 /// # Example
 /// ```ignore
@@ -268,43 +300,39 @@ where
     F: FnOnce(&NixEvaluator) -> Result<T> + Send + 'static,
     T: Send + 'static,
 {
-    // Run evaluation in a thread with a large stack to avoid stack overflow.
-    // Nix evaluations can be deeply recursive, especially for nixpkgs.
-    // Note: This creates a new thread per call, which is expensive but safe.
-    // The thread-local evaluator is reused within each thread's lifetime.
-    let handle = std::thread::Builder::new()
-        .name("nix-eval".into())
-        .stack_size(EVAL_STACK_SIZE)
-        .spawn(move || {
-            THREAD_EVALUATOR.with(|cell| {
-                let mut borrow = cell.borrow_mut();
+    // Channel to receive the result
+    let (result_tx, result_rx) = mpsc::channel::<Result<T>>();
+    let (done_tx, done_rx) = mpsc::channel::<()>();
 
-                // Initialize evaluator on first use in this thread
-                if borrow.is_none() {
-                    *borrow = Some(NixEvaluator::new()?);
-                }
-
-                // Use the evaluator
-                f(borrow.as_ref().unwrap())
-            })
-        })
-        .map_err(|e| NxvError::NixEval(format!("Failed to spawn eval thread: {}", e)))?;
-
-    handle
-        .join()
-        .map_err(|_| NxvError::NixEval("Eval thread panicked".into()))?
-}
-
-/// Clear the thread-local evaluator, freeing resources.
-///
-/// This is useful for memory management in long-running processes,
-/// or for resetting state after errors.
-#[allow(dead_code)]
-pub fn clear_evaluator() {
-    THREAD_EVALUATOR.with(|cell| {
-        cell.borrow_mut().take();
+    // Wrap the closure to capture result
+    let task: EvalTask = Box::new(move |eval| {
+        let result = f(eval);
+        let _ = result_tx.send(result);
     });
+
+    // Send task to worker thread
+    {
+        let sender = get_eval_sender()
+            .lock()
+            .map_err(|_| NxvError::NixEval("Eval worker mutex poisoned".into()))?;
+        sender
+            .send((task, done_tx))
+            .map_err(|_| NxvError::NixEval("Eval worker thread died".into()))?;
+    }
+
+    // Wait for completion
+    done_rx
+        .recv()
+        .map_err(|_| NxvError::NixEval("Eval worker did not complete".into()))?;
+
+    // Get result
+    result_rx
+        .recv()
+        .map_err(|_| NxvError::NixEval("Failed to receive eval result".into()))?
 }
+
+// Note: The worker thread persists for the lifetime of the process.
+// There is no clear_evaluator() function since the worker is global.
 
 #[cfg(test)]
 mod tests {
@@ -351,20 +379,5 @@ mod tests {
         let result3 = with_evaluator(|eval| eval.eval_json(r#"builtins.length [1 2 3]"#, "<test>"))
             .expect("Third eval failed");
         assert_eq!(result3, "3");
-    }
-
-    #[test]
-    #[ignore] // Requires nix to be installed with C API
-    fn test_clear_evaluator() {
-        // Create an evaluator
-        with_evaluator(|eval| eval.eval_json("1", "<test>")).expect("Eval failed");
-
-        // Clear it
-        clear_evaluator();
-
-        // Should work again (creates new evaluator)
-        let result =
-            with_evaluator(|eval| eval.eval_json("42", "<test>")).expect("Eval after clear failed");
-        assert_eq!(result, "42");
     }
 }

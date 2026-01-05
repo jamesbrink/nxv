@@ -8,6 +8,24 @@ pub mod git;
 pub mod nix_ffi;
 pub mod publisher;
 
+/// A checkpoint-serializable version of OpenRange for database persistence.
+/// This is used to save/restore open ranges across indexer restarts.
+#[derive(Debug, Clone)]
+pub struct CheckpointRange {
+    pub name: String,
+    pub version: String,
+    pub first_commit_hash: String,
+    pub first_commit_date: chrono::DateTime<chrono::Utc>,
+    pub attribute_path: String,
+    pub description: Option<String>,
+    pub license: Option<String>,
+    pub homepage: Option<String>,
+    pub maintainers: Option<String>,
+    pub platforms: Option<String>,
+    pub source_path: Option<String>,
+    pub known_vulnerabilities: Option<String>,
+}
+
 use crate::bloom::PackageBloomFilter;
 use crate::db::Database;
 use crate::db::queries::PackageVersion;
@@ -108,6 +126,42 @@ impl OpenRange {
             platforms: self.platforms.clone(),
             source_path: self.source_path.clone(),
             known_vulnerabilities: self.known_vulnerabilities.clone(),
+        }
+    }
+
+    /// Convert to a CheckpointRange for serialization.
+    fn to_checkpoint(&self) -> CheckpointRange {
+        CheckpointRange {
+            name: self.name.clone(),
+            version: self.version.clone(),
+            first_commit_hash: self.first_commit_hash.clone(),
+            first_commit_date: self.first_commit_date,
+            attribute_path: self.attribute_path.clone(),
+            description: self.description.clone(),
+            license: self.license.clone(),
+            homepage: self.homepage.clone(),
+            maintainers: self.maintainers.clone(),
+            platforms: self.platforms.clone(),
+            source_path: self.source_path.clone(),
+            known_vulnerabilities: self.known_vulnerabilities.clone(),
+        }
+    }
+
+    /// Create from a CheckpointRange for deserialization.
+    fn from_checkpoint(cr: CheckpointRange) -> Self {
+        Self {
+            name: cr.name,
+            version: cr.version,
+            first_commit_hash: cr.first_commit_hash,
+            first_commit_date: cr.first_commit_date,
+            attribute_path: cr.attribute_path,
+            description: cr.description,
+            license: cr.license,
+            homepage: cr.homepage,
+            maintainers: cr.maintainers,
+            platforms: cr.platforms,
+            source_path: cr.source_path,
+            known_vulnerabilities: cr.known_vulnerabilities,
         }
     }
 
@@ -817,7 +871,38 @@ impl Indexer {
         let mut eta_tracker = EtaTracker::new(20);
 
         // Track open ranges: attribute_path+version -> OpenRange
-        let mut open_ranges: HashMap<String, OpenRange> = HashMap::new();
+        // Try to load from checkpoint if resuming
+        let mut open_ranges: HashMap<String, OpenRange> = if resume_from.is_some() {
+            match db.load_checkpoint_ranges() {
+                Ok(checkpoint_ranges) => {
+                    if !checkpoint_ranges.is_empty() {
+                        if let Some(ref pb) = progress_bar {
+                            pb.println(format!(
+                                "Restored {} open ranges from checkpoint",
+                                checkpoint_ranges.len()
+                            ));
+                        } else {
+                            eprintln!(
+                                "Restored {} open ranges from checkpoint",
+                                checkpoint_ranges.len()
+                            );
+                        }
+                        checkpoint_ranges
+                            .into_iter()
+                            .map(|(k, v)| (k, OpenRange::from_checkpoint(v)))
+                            .collect()
+                    } else {
+                        HashMap::new()
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Warning: Could not load checkpoint ranges: {}", e);
+                    HashMap::new()
+                }
+            }
+        } else {
+            HashMap::new()
+        };
 
         // Track unique package names for bloom filter
         let mut unique_names: HashSet<String> = HashSet::new();
@@ -868,23 +953,33 @@ impl Indexer {
                 }
                 result.was_interrupted = true;
 
-                // Close all open ranges at the previous commit
-                if let (Some(prev_hash), Some(prev_date)) = (&prev_commit_hash, prev_commit_date) {
-                    for range in open_ranges.values() {
-                        pending_inserts.push(range.to_package_version(prev_hash, prev_date));
-                    }
-                }
-
-                // Insert pending ranges
+                // Insert any pending ranges (ranges that were closed during this run)
                 if !pending_inserts.is_empty() {
                     result.ranges_created +=
                         db.insert_package_ranges_batch(&pending_inserts)? as u64;
                 }
 
-                // Save checkpoint
+                // Save checkpoint with open ranges for resume
                 if let Some(ref prev_hash) = prev_commit_hash {
                     db.set_meta("last_indexed_commit", prev_hash)?;
                     db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
+                    db.set_meta("checkpoint_open_ranges", &open_ranges.len().to_string())?;
+
+                    // Save open ranges to checkpoint table for resume capability
+                    let checkpoint_ranges: HashMap<String, CheckpointRange> = open_ranges
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.to_checkpoint()))
+                        .collect();
+                    db.save_checkpoint_ranges(&checkpoint_ranges)?;
+
+                    db.checkpoint()?;
+
+                    if let Some(ref pb) = progress_bar {
+                        pb.println(format!(
+                            "Saved {} open ranges to checkpoint",
+                            open_ranges.len()
+                        ));
+                    }
                 }
 
                 break;
@@ -1114,6 +1209,14 @@ impl Indexer {
                     db.set_meta("last_indexed_commit", prev_hash)?;
                     db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
                     db.set_meta("checkpoint_open_ranges", &open_ranges.len().to_string())?;
+
+                    // Save open ranges to checkpoint table for resume capability
+                    let checkpoint_ranges: HashMap<String, CheckpointRange> = open_ranges
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.to_checkpoint()))
+                        .collect();
+                    db.save_checkpoint_ranges(&checkpoint_ranges)?;
+
                     db.checkpoint()?;
                 }
             }
@@ -1136,6 +1239,9 @@ impl Indexer {
                 db.set_meta("last_indexed_commit", last_hash)?;
                 db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
             }
+
+            // Clear checkpoint ranges - indexing completed successfully
+            db.clear_checkpoint_ranges()?;
         }
 
         // Set final unique names count

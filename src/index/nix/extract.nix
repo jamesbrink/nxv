@@ -3,7 +3,7 @@
 { nixpkgsPath, system, attrNames ? null }:
 let
   # Import nixpkgs with current system and permissive config
-  pkgs = import nixpkgsPath {
+  pkgsResult = builtins.tryEval (import nixpkgsPath {
     system = system;
     config = {
       allowUnfree = true;
@@ -11,7 +11,46 @@ let
       allowInsecure = true;
       allowUnsupportedSystem = true;
     };
-  };
+  });
+  pkgs = if pkgsResult.success && builtins.isAttrs pkgsResult.value
+         then pkgsResult.value
+         else {};
+
+  # Known package sets that contain nested derivations
+  # These will be recursively explored to find nested packages
+  nestedPackageSets = [
+    # Qt packages (contains qtwebengine, etc.)
+    "qt5" "qt6" "libsForQt5" "kdePackages"
+    # Python packages
+    "python3Packages" "python311Packages" "python312Packages" "python313Packages"
+    # Scripting language packages
+    "perlPackages" "rubyPackages" "rubyPackages_3_1" "rubyPackages_3_2" "rubyPackages_3_3"
+    "luaPackages" "lua51Packages" "lua52Packages" "lua53Packages" "luajitPackages"
+    # Node/JS packages
+    "nodePackages" "nodePackages_latest"
+    # Haskell packages
+    "haskellPackages" "haskell.packages.ghc94" "haskell.packages.ghc96"
+    # OCaml packages
+    "ocamlPackages" "ocaml-ng.ocamlPackages_4_14"
+    # Elm packages
+    "elmPackages"
+    # R packages
+    "rPackages"
+    # Emacs packages
+    "emacsPackages"
+    # Vim plugins
+    "vimPlugins"
+    # Desktop environments
+    "gnome" "pantheon" "mate" "cinnamon" "xfce"
+    # PHP packages
+    "phpPackages" "php81Packages" "php82Packages" "php83Packages"
+    # Rust packages (crates)
+    "rustPackages"
+    # Go packages
+    "goPackages"
+    # Texlive packages
+    "texlive"
+  ];
 
   # Force full evaluation and catch any errors - this is critical for lazy evaluation
   tryDeep = expr:
@@ -158,6 +197,40 @@ let
       knownVulnerabilities = if meta ? knownVulnerabilities then getKnownVulnerabilities meta.knownVulnerabilities else null;
     };
 
+  # Check if an attribute name matches a nested package set pattern
+  isNestedPackageSet = name:
+    builtins.elem name nestedPackageSets ||
+    # Also check for patterns like pythonXXPackages, rubyPackages_X_X, etc.
+    (builtins.match "python[0-9]+Packages" name != null) ||
+    (builtins.match "rubyPackages_[0-9_]+" name != null) ||
+    (builtins.match "php[0-9]+Packages" name != null) ||
+    (builtins.match "lua[0-9]+Packages" name != null);
+
+  # Process a nested package set, extracting all derivations from it
+  processNestedSet = prefix: attrSet:
+    let
+      result = builtins.tryEval (
+        if builtins.isAttrs attrSet then
+          let
+            nestedNames = builtins.tryEval (builtins.attrNames attrSet);
+          in
+            if nestedNames.success then
+              builtins.concatMap (nestedName:
+                let
+                  fullPath = "${prefix}.${nestedName}";
+                  valueResult = builtins.tryEval attrSet.${nestedName};
+                  value = if valueResult.success then valueResult.value else null;
+                  isDeriv = if value != null then isDerivation value else false;
+                  info = if isDeriv then getPackageInfo fullPath value else null;
+                  forcedResult = if info != null then builtins.tryEval (builtins.deepSeq info info) else { success = false; };
+                in
+                  if forcedResult.success then [forcedResult.value] else []
+              ) nestedNames.value
+            else []
+        else []
+      );
+    in if result.success then result.value else [];
+
   # Process each package name with full error isolation
   # The entire result is forced to catch any remaining lazy errors
   # Use hasAttr first since tryEval doesn't catch missing attribute errors
@@ -172,10 +245,45 @@ let
       forcedResult = if info != null then builtins.tryEval (builtins.deepSeq info info) else { success = false; };
     in if forcedResult.success then forcedResult.value else null;
 
+  # Process a dotted attribute path like "qt6.qtwebengine"
+  processDottedAttr = attrPath:
+    let
+      parts = builtins.filter (x: builtins.isString x) (builtins.split "\\." attrPath);
+      # Navigate to the value through the path
+      getValue = currentSet: remainingParts:
+        if builtins.length remainingParts == 0 then currentSet
+        else
+          let
+            head = builtins.elemAt remainingParts 0;
+            tail = builtins.genList (i: builtins.elemAt remainingParts (i + 1)) (builtins.length remainingParts - 1);
+            hasAttrResult = builtins.tryEval (builtins.hasAttr head currentSet);
+          in
+            if hasAttrResult.success && hasAttrResult.value then
+              let
+                nextResult = builtins.tryEval currentSet.${head};
+              in
+                if nextResult.success then getValue nextResult.value tail
+                else null
+            else null;
+      valueResult = builtins.tryEval (getValue pkgs parts);
+      value = if valueResult.success then valueResult.value else null;
+      isDeriv = if value != null then isDerivation value else false;
+      info = if isDeriv then getPackageInfo attrPath value else null;
+      forcedResult = if info != null then builtins.tryEval (builtins.deepSeq info info) else { success = false; };
+    in if forcedResult.success then forcedResult.value else null;
+
+  # Check if a name is a dotted path (nested attribute)
+  isDottedPath = name: builtins.match ".*\\..*" name != null;
+
   # Get list of attribute names and process them
   names = if attrNames != null then attrNames else builtins.attrNames pkgs;
-  # Wrap entire lambda body in tryEval, returning list directly to avoid field access issues
-  results = builtins.concatMap (name:
+
+  # Separate top-level names from dotted paths
+  topLevelNames = builtins.filter (n: !isDottedPath n) names;
+  dottedNames = builtins.filter isDottedPath names;
+
+  # Process top-level packages
+  topLevelResults = builtins.concatMap (name:
     let
       # Do all computation inside a single tryEval that returns a list
       safeResult = builtins.tryEval (
@@ -191,6 +299,40 @@ let
         )
       );
     in if extracted.success then extracted.value else []
-  ) names;
+  ) topLevelNames;
+
+  # Process dotted attribute paths (nested packages)
+  dottedResults = builtins.concatMap (attrPath:
+    let
+      safeResult = builtins.tryEval (
+        let
+          pkg = processDottedAttr attrPath;
+          forced = builtins.deepSeq pkg pkg;
+        in if forced != null then [forced] else []
+      );
+      extracted = builtins.tryEval (
+        builtins.seq safeResult.success (
+          if safeResult.success then safeResult.value else []
+        )
+      );
+    in if extracted.success then extracted.value else []
+  ) dottedNames;
+
+  # Process nested package sets (only when not filtering by specific attrs)
+  nestedResults = if attrNames != null then [] else
+    builtins.concatMap (setName:
+      let
+        exists = builtins.hasAttr setName pkgs;
+        valueResult = if exists then builtins.tryEval pkgs.${setName} else { success = false; };
+        value = if valueResult.success then valueResult.value else null;
+        nested = if value != null && builtins.isAttrs value
+                 then processNestedSet setName value
+                 else [];
+        forcedNested = builtins.tryEval (builtins.deepSeq nested nested);
+      in
+        if forcedNested.success then forcedNested.value else []
+    ) nestedPackageSets;
+
+  results = topLevelResults ++ dottedResults ++ nestedResults;
 in
   results

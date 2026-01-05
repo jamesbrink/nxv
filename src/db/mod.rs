@@ -15,7 +15,7 @@ const DEFAULT_BUSY_TIMEOUT_SECS: u64 = 5;
 
 /// Current schema version.
 #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 4;
 
 /// Database connection wrapper.
 pub struct Database {
@@ -166,6 +166,23 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_packages_attr ON package_versions(attribute_path);
             CREATE INDEX IF NOT EXISTS idx_packages_first_date ON package_versions(first_commit_date DESC);
             CREATE INDEX IF NOT EXISTS idx_packages_last_date ON package_versions(last_commit_date DESC);
+
+            -- Checkpoint table for persisting open ranges across restarts
+            CREATE TABLE IF NOT EXISTS checkpoint_open_ranges (
+                key TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                version TEXT NOT NULL,
+                first_commit_hash TEXT NOT NULL,
+                first_commit_date INTEGER NOT NULL,
+                attribute_path TEXT NOT NULL,
+                description TEXT,
+                license TEXT,
+                homepage TEXT,
+                maintainers TEXT,
+                platforms TEXT,
+                source_path TEXT,
+                known_vulnerabilities TEXT
+            );
             "#,
         )?;
 
@@ -293,6 +310,29 @@ impl Database {
             )?;
         }
 
+        if current_version < 4 {
+            // Migration v3 -> v4: Add checkpoint_open_ranges table
+            self.conn.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS checkpoint_open_ranges (
+                    key TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    version TEXT NOT NULL,
+                    first_commit_hash TEXT NOT NULL,
+                    first_commit_date INTEGER NOT NULL,
+                    attribute_path TEXT NOT NULL,
+                    description TEXT,
+                    license TEXT,
+                    homepage TEXT,
+                    maintainers TEXT,
+                    platforms TEXT,
+                    source_path TEXT,
+                    known_vulnerabilities TEXT
+                );
+                "#,
+            )?;
+        }
+
         if current_version < SCHEMA_VERSION {
             self.set_meta("schema_version", &SCHEMA_VERSION.to_string())?;
         }
@@ -389,6 +429,116 @@ impl Database {
 
         tx.commit()?;
         Ok(inserted)
+    }
+
+    /// Save checkpoint open ranges to the database.
+    ///
+    /// This persists the current open ranges so they can be restored on resume.
+    /// Called during periodic checkpoints and graceful shutdown.
+    #[cfg(feature = "indexer")]
+    pub fn save_checkpoint_ranges(
+        &mut self,
+        ranges: &std::collections::HashMap<String, crate::index::CheckpointRange>,
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+
+        // Clear existing checkpoint ranges
+        tx.execute("DELETE FROM checkpoint_open_ranges", [])?;
+
+        // Insert all current ranges
+        {
+            let mut stmt = tx.prepare_cached(
+                r#"
+                INSERT INTO checkpoint_open_ranges
+                    (key, name, version, first_commit_hash, first_commit_date,
+                     attribute_path, description, license, homepage, maintainers,
+                     platforms, source_path, known_vulnerabilities)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                "#,
+            )?;
+
+            for (key, range) in ranges {
+                stmt.execute(rusqlite::params![
+                    key,
+                    range.name,
+                    range.version,
+                    range.first_commit_hash,
+                    range.first_commit_date.timestamp(),
+                    range.attribute_path,
+                    range.description,
+                    range.license,
+                    range.homepage,
+                    range.maintainers,
+                    range.platforms,
+                    range.source_path,
+                    range.known_vulnerabilities,
+                ])?;
+            }
+        }
+
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Load checkpoint open ranges from the database.
+    ///
+    /// Returns the previously saved open ranges for resuming indexing.
+    #[cfg(feature = "indexer")]
+    pub fn load_checkpoint_ranges(
+        &self,
+    ) -> Result<std::collections::HashMap<String, crate::index::CheckpointRange>> {
+        use chrono::{TimeZone, Utc};
+        use std::collections::HashMap;
+
+        let mut ranges = HashMap::new();
+
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT key, name, version, first_commit_hash, first_commit_date,
+                   attribute_path, description, license, homepage, maintainers,
+                   platforms, source_path, known_vulnerabilities
+            FROM checkpoint_open_ranges
+            "#,
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            let key: String = row.get(0)?;
+            let timestamp: i64 = row.get(4)?;
+            Ok((
+                key,
+                crate::index::CheckpointRange {
+                    name: row.get(1)?,
+                    version: row.get(2)?,
+                    first_commit_hash: row.get(3)?,
+                    first_commit_date: Utc.timestamp_opt(timestamp, 0).single().unwrap_or_default(),
+                    attribute_path: row.get(5)?,
+                    description: row.get(6)?,
+                    license: row.get(7)?,
+                    homepage: row.get(8)?,
+                    maintainers: row.get(9)?,
+                    platforms: row.get(10)?,
+                    source_path: row.get(11)?,
+                    known_vulnerabilities: row.get(12)?,
+                },
+            ))
+        })?;
+
+        for row in rows {
+            let (key, range) = row?;
+            ranges.insert(key, range);
+        }
+
+        Ok(ranges)
+    }
+
+    /// Clear checkpoint open ranges from the database.
+    ///
+    /// Called when indexing completes successfully.
+    #[cfg(feature = "indexer")]
+    pub fn clear_checkpoint_ranges(&self) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM checkpoint_open_ranges", [])?;
+        Ok(())
     }
 
     /// Update the last_commit fields for an existing package version range.
@@ -489,7 +639,7 @@ mod tests {
         let db = Database::open(&db_path).unwrap();
 
         let version = db.get_meta("schema_version").unwrap();
-        assert_eq!(version, Some("3".to_string()));
+        assert_eq!(version, Some(SCHEMA_VERSION.to_string()));
     }
 
     #[test]

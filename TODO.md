@@ -51,9 +51,21 @@ This experimental branch integrates `nix-bindings` to replace subprocess calls t
     - Multiple evaluations (cold vs warm vs subprocess)
   - Run with: `nix develop -c cargo bench --features indexer --bench ffi_benchmark`
 
+- [x] **Phase 9: Proper checkpoint serialization**
+  - Added `checkpoint_open_ranges` table to database schema (v4)
+  - Open ranges are now fully serialized during checkpoints
+  - Resume capability: loads previous open ranges on restart
+  - Graceful shutdown saves checkpoint without closing ranges
+
+- [x] **Phase 10: Nested package extraction**
+  - Added support for nested package sets (qt6.*, python3Packages.*, etc.)
+  - Known nested sets: qt5, qt6, libsForQt5, kdePackages, python*Packages, perlPackages, nodePackages, haskellPackages, ocamlPackages, elmPackages, rPackages, emacsPackages, vimPlugins, gnome, pantheon, mate, cinnamon, xfce, php*Packages, rustPackages, goPackages, texlive
+  - Dotted attribute paths (e.g., `qt6.qtwebengine`) are now properly extracted
+  - Position extraction also includes nested packages
+
 ## Future Work
 
-- [ ] **Phase 9: Parallel evaluation (future)**
+- [ ] **Phase 11: Parallel evaluation (future)**
   - Consider worker pool pattern from nix-eval-jobs-rs
   - Each worker has own `NixEvaluator` (already supported by thread-local design)
   - Parent distributes work via IPC
@@ -82,9 +94,12 @@ Indexer::run()
 | `Cargo.toml` | Added `nix-bindings` dep, `ffi_benchmark` bench |
 | `build.rs` | NEW - Nix C library linking |
 | `flake.nix` | Nix C API deps for indexer |
-| `src/index/mod.rs` | Added `nix_ffi` module |
+| `src/index/mod.rs` | Added `nix_ffi` module, `CheckpointRange` type, checkpoint load/save |
 | `src/index/nix_ffi.rs` | NEW - FFI wrapper with thread-local reuse |
 | `src/index/extractor.rs` | Uses FFI via `with_evaluator()` |
+| `src/index/nix/extract.nix` | Added nested package extraction, dotted path support |
+| `src/index/nix/positions.nix` | Added nested package position extraction |
+| `src/db/mod.rs` | Schema v4 with `checkpoint_open_ranges` table, save/load methods |
 | `benches/ffi_benchmark.rs` | NEW - FFI vs subprocess benchmarks |
 
 ## Notes

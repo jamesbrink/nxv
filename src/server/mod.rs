@@ -555,6 +555,7 @@ mod tests {
                 platforms TEXT,
                 source_path TEXT,
                 known_vulnerabilities TEXT,
+                store_path TEXT,
                 UNIQUE(attribute_path, version, first_commit_hash)
             );
             CREATE INDEX idx_packages_name ON package_versions(name);
@@ -566,12 +567,12 @@ mod tests {
             INSERT INTO meta (key, value) VALUES ('last_indexed_commit', 'abc1234567890def');
             INSERT INTO package_versions
                 (name, version, first_commit_hash, first_commit_date,
-                 last_commit_hash, last_commit_date, attribute_path, description, license)
+                 last_commit_hash, last_commit_date, attribute_path, description, license, store_path)
             VALUES
-                ('python', '3.11.0', 'aaa111', 1700000000, 'bbb222', 1700100000, 'python311', 'Python interpreter', 'PSF'),
-                ('python', '3.12.0', 'ccc333', 1700200000, 'ddd444', 1700300000, 'python312', 'Python interpreter', 'PSF'),
-                ('nodejs', '20.0.0', 'eee555', 1700400000, 'fff666', 1700500000, 'nodejs_20', 'Node.js runtime', 'MIT'),
-                ('hello', '2.10', 'ggg777', 1700600000, 'hhh888', 1700700000, 'hello', 'Hello World program', 'GPL-3.0');
+                ('python', '3.11.0', 'aaa111', 1700000000, 'bbb222', 1700100000, 'python311', 'Python interpreter', 'PSF', '/nix/store/abc123-python3-3.11.0'),
+                ('python', '3.12.0', 'ccc333', 1700200000, 'ddd444', 1700300000, 'python312', 'Python interpreter', 'PSF', '/nix/store/def456-python3-3.12.0'),
+                ('nodejs', '20.0.0', 'eee555', 1700400000, 'fff666', 1700500000, 'nodejs_20', 'Node.js runtime', 'MIT', NULL),
+                ('hello', '2.10', 'ggg777', 1700600000, 'hhh888', 1700700000, 'hello', 'Hello World program', 'GPL-3.0', '/nix/store/xyz789-hello-2.10');
 
             INSERT INTO package_versions_fts (rowid, attribute_path, description)
             SELECT id, attribute_path, description FROM package_versions;
@@ -1084,5 +1085,123 @@ mod tests {
                 i + 1
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_closure_with_store_path() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None, None);
+
+        let (status, json) = get_json(&app, "/api/v1/fetch-closure?attr=hello&version=2.10").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["attr"], "hello");
+        assert_eq!(json["version"], "2.10");
+        assert_eq!(json["system"], "x86_64-linux");
+        assert_eq!(json["store_path"], "/nix/store/xyz789-hello-2.10");
+        assert!(json["error"].is_null());
+
+        // Verify the nix expression includes inputAddressed = true
+        let nix_expr = json["nix_expr"].as_str().unwrap();
+        assert!(nix_expr.contains("builtins.fetchClosure"));
+        assert!(nix_expr.contains("fromStore"));
+        assert!(nix_expr.contains("fromPath = /nix/store/xyz789-hello-2.10"));
+        assert!(
+            nix_expr.contains("inputAddressed = true"),
+            "Nix expression should include inputAddressed = true for input-addressed packages"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fetch_closure_without_store_path() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None, None);
+
+        // nodejs has NULL store_path in test data
+        let (status, json) =
+            get_json(&app, "/api/v1/fetch-closure?attr=nodejs_20&version=20.0.0").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["attr"], "nodejs_20");
+        assert_eq!(json["version"], "20.0.0");
+        assert!(json["store_path"].is_null());
+        assert!(json["nix_expr"].is_null());
+        assert!(json["error"].is_string());
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap()
+                .contains("Store path not available")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fetch_closure_unsupported_system() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None, None);
+
+        let (status, json) = get_json(
+            &app,
+            "/api/v1/fetch-closure?attr=hello&version=2.10&system=aarch64-darwin",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["store_path"].is_null());
+        assert!(json["nix_expr"].is_null());
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap()
+                .contains("only indexed for x86_64-linux")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fetch_closure_not_found() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None, None);
+
+        let (status, json) =
+            get_json(&app, "/api/v1/fetch-closure?attr=nonexistent&version=1.0.0").await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(json["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_closure_custom_cache_url() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None, None);
+
+        let (status, json) = get_json(
+            &app,
+            "/api/v1/fetch-closure?attr=hello&version=2.10&cache_url=https://my-cache.example.com",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let nix_expr = json["nix_expr"].as_str().unwrap();
+        assert!(nix_expr.contains("https://my-cache.example.com"));
     }
 }

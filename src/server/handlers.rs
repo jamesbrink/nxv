@@ -689,12 +689,14 @@ pub async fn get_fetch_closure(
         Some(p) => {
             if let Some(ref store_path) = p.store_path {
                 // Generate fetchClosure expression
+                // Most nixpkgs packages are input-addressed, so we include inputAddressed = true.
+                // This requires users to trust the binary cache (cache.nixos.org by default).
                 let nix_expr = format!(
                     r#"builtins.fetchClosure {{
-  fromStore = "{}";
-  fromPath = "{}";
-}}"#,
-                    cache_url, store_path
+  fromStore = "{cache_url}";
+  fromPath = {store_path};
+  inputAddressed = true;
+}}"#
                 );
 
                 Ok(Json(types::FetchClosureResponse {

@@ -178,12 +178,17 @@ let
   # This gives us the /nix/store/hash-name-version path without building
   # Note: We use a different name for the return value because "outPath" is a special
   # Nix attribute that causes coercion issues when serializing to JSON.
+  # We validate that the path starts with /nix/store/ to filter invalid paths.
   getStorePath = pkg:
     let
+      storePrefix = "/nix/store/";
       result = builtins.tryEval (
         if pkg ? outPath then builtins.toString pkg.outPath else null
       );
-    in if result.success then result.value else null;
+      path = if result.success then result.value else null;
+    in if path != null && builtins.substring 0 11 path == storePrefix
+       then path
+       else null;
 
   # Safely extract package info - each field is independently evaluated
   getPackageInfo = attrPath: pkg:

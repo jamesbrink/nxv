@@ -5,6 +5,7 @@
 pub mod backfill;
 pub mod extractor;
 pub mod git;
+pub mod nix_ffi;
 pub mod publisher;
 
 use crate::bloom::PackageBloomFilter;

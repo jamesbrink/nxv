@@ -28,6 +28,10 @@ rusqlite = { version = "0.38", features = ["bundled", "backup"] }
 # Git (dev/indexer only, feature-gated)
 git2 = { version = "0.20", optional = true }
 
+# Nix FFI bindings (indexer only, feature-gated)
+# Raw bindings - we provide our own high-level wrappers
+nix-bindings = { version = "2.28", optional = true }
+
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -110,7 +114,7 @@ harness = false
 
 [features]
 default = []
-indexer = ["git2", "ctrlc"]  # Enable indexer functionality
+indexer = ["git2", "ctrlc", "nix-bindings"]  # Enable indexer functionality
 
 # Release profile optimizations
 [profile.release]

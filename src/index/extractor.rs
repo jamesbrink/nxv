@@ -1,6 +1,7 @@
 //! Nix package extraction from nixpkgs commits.
 
 use crate::error::{NxvError, Result};
+use crate::index::nix_ffi::NixEvaluator;
 use serde::Deserialize;
 use std::path::Path;
 use std::process::Command;
@@ -135,21 +136,28 @@ pub fn extract_packages_for_attrs<P: AsRef<Path>>(
         attr_names_arg
     );
 
-    // Run nix eval
-    let output = Command::new("nix")
-        .args(["eval", "--json", "--impure", "--expr", &expr])
-        .output()?;
+    // Try FFI first, fall back to subprocess on failure
+    let json_output = match NixEvaluator::new().and_then(|e| e.eval_json(&expr, "<extract>")) {
+        Ok(result) => result,
+        Err(_) => {
+            // Fall back to nix eval subprocess
+            let output = Command::new("nix")
+                .args(["eval", "--json", "--impure", "--expr", &expr])
+                .output()?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(NxvError::NixEval(format!(
-            "nix eval failed: {}",
-            stderr.lines().take(5).collect::<Vec<_>>().join("\n")
-        )));
-    }
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(NxvError::NixEval(format!(
+                    "nix eval failed: {}",
+                    stderr.lines().take(5).collect::<Vec<_>>().join("\n")
+                )));
+            }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let packages: Vec<PackageInfo> = serde_json::from_str(&stdout)?;
+            String::from_utf8_lossy(&output.stdout).to_string()
+        }
+    };
+
+    let packages: Vec<PackageInfo> = serde_json::from_str(&json_output)?;
 
     Ok(packages)
 }
@@ -178,20 +186,28 @@ pub fn extract_attr_positions<P: AsRef<Path>>(
         system
     );
 
-    let output = Command::new("nix")
-        .args(["eval", "--json", "--impure", "--expr", &expr])
-        .output()?;
+    // Try FFI first, fall back to subprocess on failure
+    let json_output = match NixEvaluator::new().and_then(|e| e.eval_json(&expr, "<positions>")) {
+        Ok(result) => result,
+        Err(_) => {
+            // Fall back to nix eval subprocess
+            let output = Command::new("nix")
+                .args(["eval", "--json", "--impure", "--expr", &expr])
+                .output()?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(NxvError::NixEval(format!(
-            "nix eval failed: {}",
-            stderr.lines().take(5).collect::<Vec<_>>().join("\n")
-        )));
-    }
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(NxvError::NixEval(format!(
+                    "nix eval failed: {}",
+                    stderr.lines().take(5).collect::<Vec<_>>().join("\n")
+                )));
+            }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let positions: Vec<AttrPosition> = serde_json::from_str(&stdout)?;
+            String::from_utf8_lossy(&output.stdout).to_string()
+        }
+    };
+
+    let positions: Vec<AttrPosition> = serde_json::from_str(&json_output)?;
 
     Ok(positions)
 }

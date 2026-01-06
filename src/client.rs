@@ -138,6 +138,7 @@ impl ApiClient {
         }
 
         let sort_str = match opts.sort {
+            SortOrder::Relevance => "relevance",
             SortOrder::Date => "date",
             SortOrder::Version => "version",
             SortOrder::Name => "name",

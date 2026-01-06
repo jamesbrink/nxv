@@ -152,7 +152,7 @@ pub struct SearchArgs {
     pub show_store_path: bool,
 
     /// Sort results.
-    #[arg(long, value_enum, default_value_t = SortOrder::Date)]
+    #[arg(long, value_enum, default_value_t = SortOrder::Relevance)]
     pub sort: SortOrder,
 
     /// Reverse sort order.

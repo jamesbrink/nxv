@@ -70,13 +70,13 @@ pub fn print_availability(pkg: &PackageVersion) {
     println!(
         "  {:<16} {} ({})",
         "First seen:".label(),
-        pkg.first_commit_short(),
+        pkg.first_commit_short().commit(),
         pkg.first_commit_date.format("%Y-%m-%d")
     );
     println!(
         "  {:<16} {} ({})",
         "Last seen:".label(),
-        pkg.last_commit_short(),
+        pkg.last_commit_short().commit(),
         pkg.last_commit_date.format("%Y-%m-%d")
     );
     println!();
@@ -85,13 +85,15 @@ pub fn print_availability(pkg: &PackageVersion) {
 /// Print availability in compact format (for history command).
 pub fn print_availability_compact(pkg: &PackageVersion) {
     println!(
-        "First appeared: {} ({})",
-        pkg.first_commit_short(),
+        "{} {} ({})",
+        "First appeared:".label(),
+        pkg.first_commit_short().commit(),
         pkg.first_commit_date.format("%Y-%m-%d")
     );
     println!(
-        "Last seen: {} ({})",
-        pkg.last_commit_short(),
+        "{} {} ({})",
+        "Last seen:".label(),
+        pkg.last_commit_short().commit(),
         pkg.last_commit_date.format("%Y-%m-%d")
     );
     println!();
@@ -190,7 +192,7 @@ pub fn print_usage(pkg: &PackageVersion) {
 
 /// Print single usage example (for history compact view).
 pub fn print_usage_compact(pkg: &PackageVersion) {
-    println!("To use this version:");
+    println!("{}", "To use this version:".label());
     println!("  {}", pkg.nix_run_cmd());
 }
 
@@ -405,7 +407,7 @@ mod tests {
     fn test_print_other_attr_paths_single() {
         let pkg = make_test_package();
         // Should not print anything for single package
-        print_other_attr_paths(&[pkg.clone()], &pkg);
+        print_other_attr_paths(std::slice::from_ref(&pkg), &pkg);
     }
 
     #[test]

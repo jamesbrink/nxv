@@ -586,6 +586,8 @@ fn cmd_pkg_info(cli: &Cli, args: &cli::InfoArgs) -> Result<()> {
 /// // cmd_stats(&cli).unwrap();
 /// ```
 fn cmd_stats(cli: &Cli) -> Result<()> {
+    use theme::Themed;
+
     // Check if using remote API
     let is_remote = std::env::var("NXV_API_URL").is_ok();
 
@@ -612,48 +614,75 @@ fn cmd_stats(cli: &Cli) -> Result<()> {
     let last_indexed_date = backend.get_meta("last_indexed_date")?;
     let index_version = backend.get_meta("index_version")?;
 
-    println!("Index Information");
-    println!("=================");
+    println!("{}", "Index Information".section_header());
 
     if is_remote {
         println!(
-            "API endpoint: {}",
+            "{} {}",
+            "API endpoint:".label(),
             std::env::var("NXV_API_URL").unwrap_or_default()
         );
     } else {
-        println!("Database path: {:?}", cli.db_path);
+        println!("{} {:?}", "Database path:".label(), cli.db_path);
     }
 
     if let Some(version) = index_version {
-        println!("Index version: {}", version);
+        println!("{} {}", "Index version:".label(), version);
     }
 
     if let Some(commit) = last_commit {
-        println!("Last indexed commit: {}", &commit[..7.min(commit.len())]);
+        println!(
+            "{} {}",
+            "Last indexed commit:".label(),
+            (&commit[..7.min(commit.len())]).commit()
+        );
     }
 
     if let Some(date_str) = last_indexed_date {
         // Parse the RFC3339 date and display in a friendly format
         if let Ok(date) = chrono::DateTime::parse_from_rfc3339(&date_str) {
-            println!("Last updated: {}", date.format("%Y-%m-%d %H:%M:%S UTC"));
+            println!(
+                "{} {}",
+                "Last updated:".label(),
+                date.format("%Y-%m-%d %H:%M:%S UTC")
+            );
         } else {
-            println!("Last updated: {}", date_str);
+            println!("{} {}", "Last updated:".label(), date_str);
         }
     }
 
     println!();
-    println!("Statistics");
-    println!("----------");
-    println!("Total version ranges: {}", stats.total_ranges);
-    println!("Unique package names: {}", stats.unique_names);
-    println!("Unique versions: {}", stats.unique_versions);
+    println!("{}", "Statistics".section_header());
+    println!(
+        "{} {}",
+        "Total version ranges:".label(),
+        stats.total_ranges.count()
+    );
+    println!(
+        "{} {}",
+        "Unique package names:".label(),
+        stats.unique_names.count()
+    );
+    println!(
+        "{} {}",
+        "Unique versions:".label(),
+        stats.unique_versions.count()
+    );
 
     if let Some(oldest) = stats.oldest_commit_date {
-        println!("Oldest package date: {}", oldest.format("%Y-%m-%d"));
+        println!(
+            "{} {}",
+            "Oldest package date:".label(),
+            oldest.format("%Y-%m-%d")
+        );
     }
 
     if let Some(newest) = stats.newest_commit_date {
-        println!("Latest package change: {}", newest.format("%Y-%m-%d"));
+        println!(
+            "{} {}",
+            "Latest package change:".label(),
+            newest.format("%Y-%m-%d")
+        );
     }
 
     // Local-only info: file sizes
@@ -662,7 +691,7 @@ fn cmd_stats(cli: &Cli) -> Result<()> {
             && let Ok(metadata) = std::fs::metadata(&cli.db_path)
         {
             let size_mb = metadata.len() as f64 / (1024.0 * 1024.0);
-            println!("Database size: {:.2} MB", size_mb);
+            println!("{} {:.2} MB", "Database size:".label(), size_mb);
         }
 
         // Bloom filter status
@@ -671,9 +700,14 @@ fn cmd_stats(cli: &Cli) -> Result<()> {
             && let Ok(metadata) = std::fs::metadata(&bloom_path)
         {
             let size_kb = metadata.len() as f64 / 1024.0;
-            println!("Bloom filter: present ({:.2} KB)", size_kb);
+            println!(
+                "{} {} ({:.2} KB)",
+                "Bloom filter:".label(),
+                "present".success(),
+                size_kb
+            );
         } else if !bloom_path.exists() {
-            println!("Bloom filter: not found");
+            println!("{} {}", "Bloom filter:".label(), "not found".warning());
         }
     }
 

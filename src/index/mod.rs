@@ -126,7 +126,7 @@ impl Default for IndexerConfig {
             worker_count: None, // Default: use parallel evaluation with one worker per system
             max_memory_mib: 6 * 1024, // 6 GiB
             verbose: false,
-            gc_interval: 5, // GC every 5 checkpoints (500 commits by default)
+            gc_interval: 20, // GC every 20 checkpoints (2000 commits by default)
             gc_min_free_bytes: 10 * 1024 * 1024 * 1024, // 10 GB
         }
     }
@@ -566,8 +566,9 @@ impl EtaTracker {
 
     /// Stops the current commit timer and updates the EMA.
     ///
-    /// Uses outlier rejection: if a sample is more than 3x the median,
-    /// it's given reduced weight to prevent ETA spikes.
+    /// Uses outlier rejection for very fast commits (skipped commits)
+    /// to prevent them from making the ETA too optimistic.
+    /// Slow commits are given full weight since they represent real work.
     fn finish_commit(&mut self) {
         if let Some(start) = self.commit_start.take() {
             let elapsed_secs = start.elapsed().as_secs_f64();
@@ -582,13 +583,12 @@ impl EtaTracker {
             // Calculate median for outlier detection
             let median = self.calculate_median();
 
-            // Determine if this is an outlier and adjust alpha accordingly
+            // Only dampen very fast commits (likely skipped commits)
+            // Slow commits get full weight - they represent real work and
+            // dampening them makes ETA too optimistic
             let effective_alpha = if let Some(med) = median {
-                if elapsed_secs > med * 3.0 {
-                    // Outlier (slow): use much smaller alpha to reduce impact
-                    self.alpha * 0.1
-                } else if elapsed_secs < med * 0.1 {
-                    // Outlier (fast): also reduce impact
+                if elapsed_secs < med * 0.1 {
+                    // Outlier (very fast): reduce impact to avoid ETA being too optimistic
                     self.alpha * 0.3
                 } else {
                     self.alpha
@@ -603,6 +603,15 @@ impl EtaTracker {
                 None => elapsed_secs, // First sample becomes the initial EMA
             });
         }
+    }
+
+    /// Skip the current commit timer without updating the EMA.
+    ///
+    /// Use this for commits that are skipped early (no packages to extract).
+    /// This prevents fast skips from making the ETA too optimistic.
+    fn skip_commit(&mut self) {
+        self.commit_start = None;
+        self.commits_processed += 1;
     }
 
     /// Calculate median of recent durations for outlier detection.
@@ -1201,7 +1210,7 @@ impl Indexer {
                     "pkgs".dimmed(),
                     open_ranges.len().count_pending(),
                     "open".dimmed(),
-                    result.ranges_created.count(),
+                    (result.ranges_created + pending_inserts.len() as u64).count(),
                     "closed".dimmed()
                 ));
             }
@@ -1214,7 +1223,7 @@ impl Indexer {
                 );
                 prev_commit_hash = Some(commit.hash.clone());
                 prev_commit_date = Some(commit.date);
-                eta_tracker.finish_commit();
+                eta_tracker.skip_commit();
                 continue;
             }
 
@@ -1228,7 +1237,7 @@ impl Indexer {
                     );
                     prev_commit_hash = Some(commit.hash.clone());
                     prev_commit_date = Some(commit.date);
-                    eta_tracker.finish_commit();
+                    eta_tracker.skip_commit();
                     continue;
                 }
             };
@@ -1293,7 +1302,7 @@ impl Indexer {
                 result.commits_processed += 1;
                 prev_commit_hash = Some(commit.hash.clone());
                 prev_commit_date = Some(commit.date);
-                eta_tracker.finish_commit();
+                eta_tracker.skip_commit();
                 continue;
             }
 
@@ -1744,7 +1753,7 @@ mod tests {
         let mut tracker = EtaTracker::new(10);
         tracker.set_remaining(10);
 
-        // Add consistent commits to establish baseline
+        // Add consistent commits to establish baseline (~20ms each)
         for _ in 0..15 {
             tracker.start_commit();
             thread::sleep(Duration::from_millis(20));
@@ -1753,18 +1762,38 @@ mod tests {
 
         let ema_before = tracker.ema_secs.unwrap();
 
-        // Add one outlier (very slow)
+        // Very fast commits (skipped) should be dampened to prevent ETA from being too optimistic
+        // These represent skipped commits that didn't do real work
+        for _ in 0..5 {
+            tracker.start_commit();
+            thread::sleep(Duration::from_millis(1)); // Very fast - < 10% of median
+            tracker.finish_commit();
+        }
+
+        let ema_after_fast = tracker.ema_secs.unwrap();
+
+        // EMA should not have dropped dramatically despite fast outliers
+        // (fast outliers get reduced alpha to prevent optimistic ETA)
+        assert!(
+            ema_after_fast > ema_before * 0.5,
+            "EMA dropped too much after fast outliers: before={:.4}, after={:.4}",
+            ema_before,
+            ema_after_fast
+        );
+
+        // Slow commits (real work) should have full weight
         tracker.start_commit();
-        thread::sleep(Duration::from_millis(200));
+        thread::sleep(Duration::from_millis(100)); // Slow - represents real work
         tracker.finish_commit();
 
-        let ema_after = tracker.ema_secs.unwrap();
+        let ema_after_slow = tracker.ema_secs.unwrap();
 
-        // EMA should not have jumped dramatically due to outlier rejection
-        // (outlier gets reduced alpha, so impact is dampened)
+        // EMA should increase noticeably because slow commits aren't dampened
         assert!(
-            ema_after < ema_before * 2.0,
-            "EMA jumped too much after outlier"
+            ema_after_slow > ema_after_fast,
+            "Slow commit should increase EMA: fast={:.4}, slow={:.4}",
+            ema_after_fast,
+            ema_after_slow
         );
     }
 

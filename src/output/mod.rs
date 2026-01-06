@@ -1,5 +1,6 @@
 //! Output formatting for search results.
 
+pub mod components;
 pub mod json;
 pub mod plain;
 pub mod table;

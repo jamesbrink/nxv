@@ -11,6 +11,7 @@ mod output;
 mod paths;
 mod remote;
 mod search;
+mod theme;
 pub mod version;
 
 #[cfg(feature = "indexer")]
@@ -40,10 +41,9 @@ use cli::{Cli, Commands};
 fn main() {
     let cli = Cli::parse();
 
-    // Handle no-color flag
+    // Handle no-color flag - affects both owo_colors and comfy_table
     if cli.no_color {
-        // Disable colors globally - this affects if_supports_color() calls
-        owo_colors::set_override(false);
+        theme::disable_colors();
     }
 
     let result = match &cli.command {
@@ -500,7 +500,7 @@ fn cmd_update(cli: &Cli, args: &cli::UpdateArgs) -> Result<()> {
 /// cmd_pkg_info(&cli, &args).unwrap();
 /// ```
 fn cmd_pkg_info(cli: &Cli, args: &cli::InfoArgs) -> Result<()> {
-    use owo_colors::OwoColorize;
+    use output::components;
 
     // Get backend (local DB or remote API)
     let backend = get_backend_with_prompt(cli)?;
@@ -554,214 +554,16 @@ fn cmd_pkg_info(cli: &Cli, args: &cli::InfoArgs) -> Result<()> {
             // and summarize if there are multiple attribute paths
             let pkg = &packages[0];
 
-            println!(
-                "{}: {} {}",
-                "Package".bold(),
-                pkg.name.cyan(),
-                pkg.version.green()
-            );
-            println!();
-
-            println!("{}", "Details".bold().underline());
-            println!(
-                "  {:<16} {}",
-                "Attribute:".yellow(),
-                pkg.attribute_path.cyan()
-            );
-            println!(
-                "  {:<16} {}",
-                "Description:",
-                pkg.description.as_deref().unwrap_or("-")
-            );
-            println!(
-                "  {:<16} {}",
-                "Homepage:",
-                pkg.homepage.as_deref().unwrap_or("-")
-            );
-            println!(
-                "  {:<16} {}",
-                "License:",
-                pkg.license.as_deref().unwrap_or("-")
-            );
-            println!();
-
-            println!("{}", "Availability".bold().underline());
-            println!(
-                "  {:<16} {} ({})",
-                "First seen:".yellow(),
-                pkg.first_commit_short(),
-                pkg.first_commit_date.format("%Y-%m-%d")
-            );
-            println!(
-                "  {:<16} {} ({})",
-                "Last seen:".yellow(),
-                pkg.last_commit_short(),
-                pkg.last_commit_date.format("%Y-%m-%d")
-            );
-            println!();
-
-            if let Some(ref maintainers) = pkg.maintainers {
-                println!("{}", "Maintainers".bold().underline());
-                // Parse JSON array and display
-                if let Ok(list) = serde_json::from_str::<Vec<String>>(maintainers) {
-                    for m in list {
-                        println!("  • {}", m);
-                    }
-                } else {
-                    println!("  {}", maintainers);
-                }
-                println!();
-            }
-
-            if let Some(ref platforms) = pkg.platforms {
-                println!("{}", "Platforms".bold().underline());
-                if let Ok(list) = serde_json::from_str::<Vec<String>>(platforms) {
-                    // Detect current platform
-                    let current_platform = format!(
-                        "{}-{}",
-                        std::env::consts::ARCH,
-                        if std::env::consts::OS == "macos" {
-                            "darwin"
-                        } else {
-                            std::env::consts::OS
-                        }
-                    );
-
-                    // Helper to format platform with highlighting
-                    let format_platform = |p: &str| -> String {
-                        if p == current_platform {
-                            format!("{}", p.green().bold())
-                        } else {
-                            p.to_string()
-                        }
-                    };
-
-                    // Group by OS
-                    let mut linux: Vec<&str> = Vec::new();
-                    let mut darwin: Vec<&str> = Vec::new();
-                    let mut other: Vec<&str> = Vec::new();
-
-                    for p in &list {
-                        if p.contains("linux") {
-                            linux.push(p);
-                        } else if p.contains("darwin") {
-                            darwin.push(p);
-                        } else {
-                            other.push(p);
-                        }
-                    }
-
-                    if !linux.is_empty() {
-                        let formatted: Vec<_> = linux.iter().map(|p| format_platform(p)).collect();
-                        println!("  Linux:  {}", formatted.join(", "));
-                    }
-                    if !darwin.is_empty() {
-                        let formatted: Vec<_> = darwin.iter().map(|p| format_platform(p)).collect();
-                        println!("  Darwin: {}", formatted.join(", "));
-                    }
-                    if !other.is_empty() {
-                        let formatted: Vec<_> = other.iter().map(|p| format_platform(p)).collect();
-                        println!("  Other:  {}", formatted.join(", "));
-                    }
-                } else {
-                    println!("  {}", platforms);
-                }
-                println!();
-            }
-
-            // Show security warning if package has known vulnerabilities
-            if pkg.is_insecure() {
-                println!("{}", "Security Warning".bold().underline().red());
-                println!(
-                    "  {}",
-                    "This package has known vulnerabilities!".red().bold()
-                );
-                let vulns = pkg.vulnerabilities();
-                for vuln in &vulns {
-                    println!("  {} {}", "•".red(), vuln);
-                }
-                println!();
-            }
-
-            println!("{}", "Usage".bold().underline());
-            println!("  {}", pkg.nix_shell_cmd());
-            println!("  {}", pkg.nix_run_cmd());
-
-            // Show fetchClosure / Binary Cache section if store paths are available
-            if !pkg.store_paths.is_empty() {
-                println!();
-                println!("{}", "Binary Cache (fetchClosure)".bold().underline());
-
-                // Detect current system for highlighting
-                let current_system = format!(
-                    "{}-{}",
-                    std::env::consts::ARCH,
-                    if std::env::consts::OS == "macos" {
-                        "darwin"
-                    } else {
-                        std::env::consts::OS
-                    }
-                );
-
-                // Sort architectures for consistent display, current system first
-                let mut archs: Vec<_> = pkg.store_paths.keys().collect();
-                archs.sort_by(|a, b| {
-                    let a_current = a.as_str() == current_system;
-                    let b_current = b.as_str() == current_system;
-                    b_current.cmp(&a_current).then(a.cmp(b))
-                });
-
-                for arch in archs {
-                    if let Some(store_path) = pkg.store_paths.get(arch.as_str()) {
-                        let is_current = arch.as_str() == current_system;
-                        let arch_label = if is_current {
-                            format!("  {} {}", "▶".green(), arch.green().bold())
-                        } else {
-                            format!("    {}", arch.yellow())
-                        };
-                        println!("{}:", arch_label);
-                        println!("      {}: {}", "Path".yellow(), store_path.cyan());
-                        let expr = format!(
-                            "builtins.fetchClosure {{ fromStore = \"https://cache.nixos.org\"; fromPath = {}; inputAddressed = true; }}",
-                            store_path
-                        );
-                        println!("      {}: {}", "Expr".yellow(), expr.cyan());
-                    }
-                }
-            }
-
-            if pkg.predates_flakes() {
-                println!();
-                println!(
-                    "{}",
-                    "Note: Very old nixpkgs (pre-2020) may not build with modern Nix.".yellow()
-                );
-            }
-
-            // Show other attribute paths if there are multiple (deduplicated)
-            if packages.len() > 1 {
-                use std::collections::HashSet;
-                let mut seen: HashSet<(&str, &str)> = HashSet::new();
-                seen.insert((&pkg.attribute_path, &pkg.version));
-
-                let others: Vec<_> = packages
-                    .iter()
-                    .skip(1)
-                    .filter(|p| seen.insert((&p.attribute_path, &p.version)))
-                    .collect();
-
-                if !others.is_empty() {
-                    println!();
-                    println!("{}", "Other Attribute Paths".bold().underline());
-                    for other_pkg in others {
-                        println!(
-                            "  • {} ({})",
-                            other_pkg.attribute_path.cyan(),
-                            other_pkg.version.green()
-                        );
-                    }
-                }
-            }
+            components::print_package_header(pkg);
+            components::print_details(pkg);
+            components::print_availability(pkg);
+            components::print_maintainers(pkg);
+            components::print_platforms(pkg);
+            components::print_security_warning(pkg);
+            components::print_usage(pkg);
+            components::print_store_paths(pkg);
+            components::print_preflakes_warning(pkg);
+            components::print_other_attr_paths(&packages, pkg);
         }
     }
 
@@ -942,11 +744,21 @@ fn cmd_complete_package(cli: &Cli, args: &cli::CompletePackageArgs) -> Result<()
 /// cmd_history(&cli, &args)?;
 /// ```
 fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
+    use comfy_table::{
+        Cell, ContentArrangement, Table,
+        presets::{ASCII_FULL, UTF8_FULL},
+    };
+    use output::components;
+    use theme::{Semantic, ThemedCell};
+
     // Get backend (local DB or remote API)
     let backend = get_backend_with_prompt(cli)?;
 
     if let Some(ref version) = args.version {
-        // Show when a specific version was available
+        // DEPRECATED: Show when a specific version was available
+        // This is redundant with `nxv info <pkg> <version>` which shows more details
+        components::print_history_deprecation_warning();
+
         // Use prefix search (like info command) to find best matching package
         let packages = backend.search_by_name_version(&args.package, Some(version.as_str()))?;
 
@@ -955,37 +767,10 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
         } else {
             // Use the first (most recent) match
             let pkg = &packages[0];
-            println!("Package: {} {}", pkg.attribute_path, pkg.version);
-            println!();
-            println!(
-                "First appeared: {} ({})",
-                pkg.first_commit_short(),
-                pkg.first_commit_date.format("%Y-%m-%d")
-            );
-            println!(
-                "Last seen: {} ({})",
-                pkg.last_commit_short(),
-                pkg.last_commit_date.format("%Y-%m-%d")
-            );
-            println!();
-
-            // Show security warning if package has known vulnerabilities
-            if pkg.is_insecure() {
-                use owo_colors::OwoColorize;
-                println!("{}", "Security Warning".bold().underline().red());
-                println!(
-                    "  {}",
-                    "This package has known vulnerabilities!".red().bold()
-                );
-                let vulns = pkg.vulnerabilities();
-                for vuln in &vulns {
-                    println!("  {} {}", "•".red(), vuln);
-                }
-                println!();
-            }
-
-            println!("To use this version:");
-            println!("  {}", pkg.nix_run_cmd());
+            components::print_package_header_with_attr(&pkg.attribute_path, &pkg.version);
+            components::print_availability_compact(pkg);
+            components::print_security_warning(pkg);
+            components::print_usage_compact(pkg);
         }
     } else if args.full {
         // Show full details for all versions
@@ -1023,10 +808,6 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
                 }
             }
             cli::OutputFormatArg::Table => {
-                use comfy_table::{
-                    Cell, Color, ContentArrangement, Table, presets::ASCII_FULL, presets::UTF8_FULL,
-                };
-
                 let mut table = Table::new();
                 table
                     .load_preset(if args.ascii { ASCII_FULL } else { UTF8_FULL })
@@ -1041,33 +822,32 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
 
                 for pkg in packages {
                     let desc = pkg.description.as_deref().unwrap_or("-");
-                    // Add warning indicator and use red for insecure packages
                     let version_display = if pkg.is_insecure() {
-                        format!("{} ⚠", pkg.version)
+                        format!("{} \u{26a0}", pkg.version)
                     } else {
                         pkg.version.clone()
                     };
-                    let version_color = if pkg.is_insecure() {
-                        Color::Red
+                    let version_semantic = if pkg.is_insecure() {
+                        Semantic::VersionInsecure
                     } else {
-                        Color::Green
+                        Semantic::Version
                     };
                     table.add_row(vec![
-                        Cell::new(&version_display).fg(version_color),
-                        Cell::new(&pkg.attribute_path).fg(Color::Cyan),
+                        Cell::new(&version_display).themed(version_semantic),
+                        Cell::new(&pkg.attribute_path).themed(Semantic::AttrPath),
                         Cell::new(format!(
                             "{} ({})",
                             pkg.first_commit_short(),
                             pkg.first_commit_date.format("%Y-%m-%d")
                         ))
-                        .fg(Color::Yellow),
+                        .themed(Semantic::Commit),
                         Cell::new(format!(
                             "{} ({})",
                             pkg.last_commit_short(),
                             pkg.last_commit_date.format("%Y-%m-%d")
                         ))
-                        .fg(Color::Yellow),
-                        Cell::new(desc),
+                        .themed(Semantic::Commit),
+                        Cell::new(desc).themed(Semantic::Description),
                     ]);
                 }
 
@@ -1114,10 +894,6 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
                 }
             }
             cli::OutputFormatArg::Table => {
-                use comfy_table::{
-                    Cell, Color, ContentArrangement, Table, presets::ASCII_FULL, presets::UTF8_FULL,
-                };
-
                 let mut table = Table::new();
                 table
                     .load_preset(if args.ascii { ASCII_FULL } else { UTF8_FULL })
@@ -1126,19 +902,19 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
 
                 for (version, first, last, is_insecure) in history {
                     let version_display = if is_insecure {
-                        format!("{} ⚠", version)
+                        format!("{} \u{26a0}", version)
                     } else {
                         version
                     };
-                    let version_color = if is_insecure {
-                        Color::Red
+                    let version_semantic = if is_insecure {
+                        Semantic::VersionInsecure
                     } else {
-                        Color::Green
+                        Semantic::Version
                     };
                     table.add_row(vec![
-                        Cell::new(&version_display).fg(version_color),
-                        Cell::new(first.format("%Y-%m-%d").to_string()).fg(Color::White),
-                        Cell::new(last.format("%Y-%m-%d").to_string()).fg(Color::White),
+                        Cell::new(&version_display).themed(version_semantic),
+                        Cell::new(first.format("%Y-%m-%d").to_string()).themed(Semantic::Date),
+                        Cell::new(last.format("%Y-%m-%d").to_string()).themed(Semantic::Date),
                     ]);
                 }
 

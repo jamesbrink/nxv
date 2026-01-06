@@ -15,8 +15,8 @@ use crate::db::Database;
 use crate::error::Result;
 use crate::index::extractor;
 use crate::index::git::NixpkgsRepo;
+use crate::theme::Themed;
 use indicatif::{ProgressBar, ProgressStyle};
-use owo_colors::OwoColorize;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -285,26 +285,30 @@ fn run_backfill_head<P: AsRef<Path>, Q: AsRef<Path>>(
         result.packages_checked += batch.len();
 
         progress.set_position(result.packages_checked as u64);
+        use owo_colors::OwoColorize;
         progress.set_message(format!(
             "{} {} {} {} {} {} {} {}",
-            result.records_updated.to_string().cyan(),
+            result.records_updated.count(),
             "updated".dimmed(),
-            result.source_paths_filled.to_string().green(),
+            result.source_paths_filled.count_found(),
             "source".dimmed(),
-            result.homepages_filled.to_string().green(),
+            result.homepages_filled.count_found(),
             "home".dimmed(),
-            result.vulnerabilities_filled.to_string().yellow(),
+            result.vulnerabilities_filled.count_pending(),
             "vuln".dimmed()
         ));
     }
 
-    progress.finish_with_message(format!(
-        "{} {} {} {}",
-        "Done!".green().bold(),
-        result.records_updated.to_string().cyan(),
-        "records".dimmed(),
-        "updated".dimmed()
-    ));
+    {
+        use owo_colors::OwoColorize;
+        progress.finish_with_message(format!(
+            "{} {} {} {}",
+            "Done!".success(),
+            result.records_updated.count(),
+            "records".dimmed(),
+            "updated".dimmed()
+        ));
+    }
 
     Ok(result)
 }
@@ -510,26 +514,32 @@ fn run_backfill_historical<P: AsRef<Path>, Q: AsRef<Path>>(
         eta_tracker.finish_commit();
 
         progress.set_position(result.commits_processed as u64);
-        progress.set_message(format!(
-            "{} | {} {} {} {}",
-            eta_tracker.progress_string(total_commits as u64),
-            result.packages_checked.to_string().green(),
-            "pkgs".dimmed(),
-            result.records_updated.to_string().cyan(),
-            "updated".dimmed()
-        ));
+        {
+            use owo_colors::OwoColorize;
+            progress.set_message(format!(
+                "{} | {} {} {} {}",
+                eta_tracker.progress_string(total_commits as u64),
+                result.packages_checked.count_found(),
+                "pkgs".dimmed(),
+                result.records_updated.count(),
+                "updated".dimmed()
+            ));
+        }
     }
 
     // WorktreeSession auto-cleans up on drop
-    progress.finish_with_message(format!(
-        "{} {} {} {} {} {}",
-        "Done!".green().bold(),
-        result.commits_processed.to_string().cyan(),
-        "commits".dimmed(),
-        result.records_updated.to_string().cyan(),
-        "records".dimmed(),
-        "updated".dimmed()
-    ));
+    {
+        use owo_colors::OwoColorize;
+        progress.finish_with_message(format!(
+            "{} {} {} {} {} {}",
+            "Done!".success(),
+            result.commits_processed.count(),
+            "commits".dimmed(),
+            result.records_updated.count(),
+            "records".dimmed(),
+            "updated".dimmed()
+        ));
+    }
 
     Ok(result)
 }

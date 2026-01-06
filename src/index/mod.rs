@@ -67,8 +67,8 @@ fn is_after_store_path_cutoff(date: DateTime<Utc>) -> bool {
     let cutoff = Utc.with_ymd_and_hms(year, month, day, 0, 0, 0).unwrap();
     date >= cutoff
 }
+use crate::theme::Themed;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use owo_colors::OwoColorize;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
@@ -993,14 +993,14 @@ impl Indexer {
                         if let Some(ref pb) = progress_bar {
                             pb.println(format!(
                                 "{} {} open ranges from checkpoint",
-                                "Restored".green(),
-                                checkpoint_ranges.len().to_string().yellow()
+                                "Restored".success(),
+                                checkpoint_ranges.len().count_pending()
                             ));
                         } else {
                             eprintln!(
                                 "{} {} open ranges from checkpoint",
-                                "Restored".green(),
-                                checkpoint_ranges.len().to_string().yellow()
+                                "Restored".success(),
+                                checkpoint_ranges.len().count_pending()
                             );
                         }
                         checkpoint_ranges
@@ -1068,7 +1068,7 @@ impl Indexer {
                 if let Some(ref pb) = progress_bar {
                     pb.println(format!(
                         "{} saving checkpoint...",
-                        "Shutdown requested,".yellow()
+                        "Shutdown requested,".warning()
                     ));
                 }
                 result.was_interrupted = true;
@@ -1097,8 +1097,8 @@ impl Indexer {
                     if let Some(ref pb) = progress_bar {
                         pb.println(format!(
                             "{} {} open ranges to checkpoint",
-                            "Saved".green(),
-                            open_ranges.len().to_string().yellow()
+                            "Saved".success(),
+                            open_ranges.len().count_pending()
                         ));
                     }
                 }
@@ -1108,17 +1108,18 @@ impl Indexer {
 
             // Update progress bar with percentage and smoothed ETA
             if let Some(ref pb) = progress_bar {
+                use owo_colors::OwoColorize;
                 pb.set_position(commit_idx as u64);
                 pb.set_message(format!(
                     "{} | {} {} | {} {} | {} {} {} {}",
                     eta_tracker.progress_string(total_commits as u64),
-                    commit.short_hash.cyan(),
+                    commit.short_hash.commit(),
                     format!("({})", commit.date.format("%Y-%m-%d")).dimmed(),
-                    result.packages_found.to_string().green(),
+                    result.packages_found.count_found(),
                     "pkgs".dimmed(),
-                    open_ranges.len().to_string().yellow(),
+                    open_ranges.len().count_pending(),
                     "open".dimmed(),
-                    result.ranges_created.to_string().cyan(),
+                    result.ranges_created.count(),
                     "closed".dimmed()
                 ));
             }
@@ -1408,14 +1409,15 @@ impl Indexer {
 
         // Finish progress bar
         if let Some(ref pb) = progress_bar {
+            use owo_colors::OwoColorize;
             pb.finish_with_message(format!(
                 "{} | {} {} | {} {} | {} {}",
-                "done".green().bold(),
-                result.commits_processed.to_string().cyan(),
+                "done".success(),
+                result.commits_processed.count(),
                 "commits".dimmed(),
-                result.packages_found.to_string().green(),
+                result.packages_found.count_found(),
                 "pkgs".dimmed(),
-                result.ranges_created.to_string().cyan(),
+                result.ranges_created.count(),
                 "ranges".dimmed()
             ));
         }

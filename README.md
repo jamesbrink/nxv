@@ -303,6 +303,8 @@ nxv index --nixpkgs-path ./nixpkgs --full
 nxv index --nixpkgs-path ./nixpkgs
 ```
 
+**Worker parallelism:** The `--workers` flag controls how many worker subprocesses handle Nix evaluations. Workers are assigned per-system (architecture), so with the default 4 systems (x86_64-linux, aarch64-linux, x86_64-darwin, aarch64-darwin), only 4 workers are used concurrently per commit. Setting `--workers` higher than your system count provides no benefit.
+
 ### Backfilling Metadata
 
 Update missing fields without full rebuild:

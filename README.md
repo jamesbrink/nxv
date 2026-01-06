@@ -577,4 +577,4 @@ nxv takes a different approach: it indexes every commit locally, giving you a co
 
 ## License
 
-MIT
+[MIT](LICENSE)

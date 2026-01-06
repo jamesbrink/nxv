@@ -50,6 +50,7 @@ impl Read for PipeFd {
             match nix::unistd::read(self.fd.as_raw_fd(), buf) {
                 Ok(n) => return Ok(n),
                 Err(nix::errno::Errno::EINTR) => continue, // Retry on interrupt
+                // Convert nix::errno::Errno to std::io::Error via raw OS error code
                 Err(e) => return Err(io::Error::from_raw_os_error(e as i32)),
             }
         }
@@ -62,6 +63,7 @@ impl Write for PipeFd {
             match nix::unistd::write(&self.fd, buf) {
                 Ok(n) => return Ok(n),
                 Err(nix::errno::Errno::EINTR) => continue, // Retry on interrupt
+                // Convert nix::errno::Errno to std::io::Error via raw OS error code
                 Err(e) => return Err(io::Error::from_raw_os_error(e as i32)),
             }
         }

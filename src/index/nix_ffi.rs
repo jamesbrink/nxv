@@ -129,9 +129,19 @@ extern "C" fn string_callback(
     n: std::os::raw::c_uint,
     user_data: *mut std::os::raw::c_void,
 ) {
+    // Defensive null checks - these should never happen per the C API contract,
+    // but we check anyway to prevent undefined behavior if the contract is violated.
+    if user_data.is_null() || start.is_null() {
+        return;
+    }
+
     let result = user_data.cast::<Option<String>>();
+    // SAFETY: `start` is non-null (checked above) and the Nix C API guarantees
+    // it points to valid memory for `n` bytes.
     let slice = unsafe { std::slice::from_raw_parts(start.cast::<u8>(), n as usize) };
     if let Ok(s) = std::str::from_utf8(slice) {
+        // SAFETY: `result` is non-null (checked above) and points to a valid
+        // `Option<String>` per the documented preconditions.
         unsafe { *result = Some(s.to_string()) };
     }
 }

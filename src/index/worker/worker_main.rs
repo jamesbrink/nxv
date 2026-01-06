@@ -164,7 +164,16 @@ pub fn run_worker_main() -> ! {
     }
 
     // Create IPC channels from stdin/stdout
-    // Safety: file descriptors 0 and 1 are always valid for stdin/stdout
+    //
+    // SAFETY: File descriptors 0 (stdin) and 1 (stdout) are valid because:
+    // 1. This worker process is spawned by spawn_worker() which explicitly sets
+    //    stdin(Stdio::piped()) and stdout(Stdio::piped())
+    // 2. The parent process (pool) holds the other end of these pipes
+    // 3. We take ownership here - these FDs will be closed on Drop
+    //
+    // If this function is ever called outside the worker subprocess context
+    // (e.g., directly from the main process), these FDs may not be pipes
+    // and IPC will fail with appropriate errors.
     let stdin_fd = unsafe { PipeFd::from_raw(0) };
     let stdout_fd = unsafe { PipeFd::from_raw(1) };
 

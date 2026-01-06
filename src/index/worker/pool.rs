@@ -12,6 +12,7 @@ use crate::error::{NxvError, Result};
 use crate::index::extractor::{AttrPosition, PackageInfo};
 use std::path::Path;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// Configuration for the worker pool.
@@ -389,6 +390,8 @@ impl Worker {
 pub struct WorkerPool {
     workers: Vec<Mutex<Worker>>,
     config: WorkerPoolConfig,
+    /// Round-robin counter for worker selection when all are busy.
+    next_worker: AtomicUsize,
 }
 
 impl WorkerPool {
@@ -406,13 +409,17 @@ impl WorkerPool {
 
         // Wait for all workers to be ready
         for (id, worker) in workers.iter().enumerate() {
-            let mut w = worker.lock().unwrap();
+            let mut w = worker.lock().expect("worker mutex poisoned during init");
             w.wait_for_ready().map_err(|e| {
                 NxvError::Worker(format!("Worker {} failed to initialize: {}", id, e))
             })?;
         }
 
-        Ok(Self { workers, config })
+        Ok(Self {
+            workers,
+            config,
+            next_worker: AtomicUsize::new(0),
+        })
     }
 
     /// Get the number of workers in the pool.
@@ -430,16 +437,16 @@ impl WorkerPool {
         repo_path: &Path,
         attrs: &[String],
     ) -> Result<Vec<PackageInfo>> {
-        // Find an available worker (simple round-robin for now)
-        // In practice, workers are used by different threads via extract_parallel
+        // Find an available worker using try_lock
         for worker in &self.workers {
             if let Ok(mut w) = worker.try_lock() {
                 return w.extract(system, repo_path, attrs);
             }
         }
 
-        // All workers busy - wait for the first one
-        let mut w = self.workers[0].lock().unwrap();
+        // All workers busy - use round-robin to distribute wait fairly
+        let idx = self.next_worker.fetch_add(1, Ordering::Relaxed) % self.workers.len();
+        let mut w = self.workers[idx].lock().expect("worker mutex poisoned");
         w.extract(system, repo_path, attrs)
     }
 
@@ -468,7 +475,7 @@ impl WorkerPool {
                     let attrs = attrs.to_vec();
 
                     s.spawn(move || {
-                        let mut w = worker.lock().unwrap();
+                        let mut w = worker.lock().expect("worker mutex poisoned");
                         w.extract(&system, &repo_path, &attrs)
                     })
                 })
@@ -489,15 +496,16 @@ impl WorkerPool {
     /// Uses a worker subprocess to avoid memory accumulation in the parent process.
     /// The worker will restart if it exceeds the memory threshold.
     pub fn extract_positions(&self, system: &str, repo_path: &Path) -> Result<Vec<AttrPosition>> {
-        // Find an available worker
+        // Find an available worker using try_lock
         for worker in &self.workers {
             if let Ok(mut w) = worker.try_lock() {
                 return w.extract_positions(system, repo_path);
             }
         }
 
-        // All workers busy - wait for the first one
-        let mut w = self.workers[0].lock().unwrap();
+        // All workers busy - use round-robin to distribute wait fairly
+        let idx = self.next_worker.fetch_add(1, Ordering::Relaxed) % self.workers.len();
+        let mut w = self.workers[idx].lock().expect("worker mutex poisoned");
         w.extract_positions(system, repo_path)
     }
 

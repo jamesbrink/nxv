@@ -1045,8 +1045,20 @@ impl Indexer {
         let session = WorktreeSession::new(repo, &first_commit.hash)?;
         let worktree_path = session.path();
 
-        let mut file_attr_map = build_file_attr_map(worktree_path, systems, worker_pool.as_ref())?;
-        let mut mapping_commit = first_commit.hash.clone();
+        // Build initial file-to-attribute map, handling failure gracefully
+        // If this fails (e.g., Nix eval error on first commit), start with empty map
+        // and try to rebuild on first commit that changes top-level files
+        let (mut file_attr_map, mut mapping_commit) =
+            match build_file_attr_map(worktree_path, systems, worker_pool.as_ref()) {
+                Ok(map) => (map, first_commit.hash.clone()),
+                Err(e) => {
+                    eprintln!(
+                        "Warning: Initial file-to-attribute map failed ({}), using empty map",
+                        e
+                    );
+                    (HashMap::new(), String::new())
+                }
+            };
 
         // Helper to print warnings without disrupting progress bar
         let warn = |pb: &Option<ProgressBar>, msg: String| {
@@ -1152,7 +1164,9 @@ impl Indexer {
             };
 
             // Check if we need to refresh the file map
-            if should_refresh_file_map(&changed_paths)
+            // Also try to rebuild if map is empty (e.g., initial extraction failed)
+            let need_refresh = file_attr_map.is_empty() || should_refresh_file_map(&changed_paths);
+            if need_refresh
                 && mapping_commit != commit.hash
                 && let Ok(map) = build_file_attr_map(worktree_path, systems, worker_pool.as_ref())
             {

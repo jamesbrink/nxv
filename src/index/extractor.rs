@@ -170,7 +170,7 @@ pub fn extract_attr_positions<P: AsRef<Path>>(
 
     // Build an expression that imports and calls the positions file
     let expr = format!(
-        "import {} {{ nixpkgsPath = {}; system = \"{}\"; }}",
+        "import {} {{ nixpkgsPath = \"{}\"; system = \"{}\"; }}",
         nix_file.display(),
         repo_path_str,
         system

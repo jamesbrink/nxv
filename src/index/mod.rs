@@ -96,6 +96,8 @@ pub struct IndexerConfig {
     pub worker_count: Option<usize>,
     /// Memory threshold (MiB) before worker restart.
     pub max_memory_mib: usize,
+    /// Show verbose output including extraction warnings.
+    pub verbose: bool,
 }
 
 impl Default for IndexerConfig {
@@ -114,6 +116,7 @@ impl Default for IndexerConfig {
             max_commits: None,
             worker_count: None, // Default: use parallel evaluation with one worker per system
             max_memory_mib: 6 * 1024, // 6 GiB
+            verbose: false,
         }
     }
 }
@@ -1248,13 +1251,15 @@ impl Indexer {
                             error = %e,
                             "Extraction failed for system"
                         );
-                        warn(
-                            &progress_bar,
-                            format!(
-                                "Extraction failed at {} ({}): {}",
-                                &commit.short_hash, system, e
-                            ),
-                        );
+                        if self.config.verbose {
+                            warn(
+                                &progress_bar,
+                                format!(
+                                    "Extraction failed at {} ({}): {}",
+                                    &commit.short_hash, system, e
+                                ),
+                            );
+                        }
                         continue;
                     }
                 };
@@ -1843,6 +1848,7 @@ mod tests {
             max_commits: None,
             worker_count: Some(1), // Sequential for tests
             max_memory_mib: 6 * 1024,
+            verbose: false,
         };
         let _indexer = Indexer::new(config);
 
@@ -1875,6 +1881,7 @@ mod tests {
             max_commits: None,
             worker_count: Some(1), // Sequential for tests
             max_memory_mib: 6 * 1024,
+            verbose: false,
         };
         let _indexer = Indexer::new(config);
 

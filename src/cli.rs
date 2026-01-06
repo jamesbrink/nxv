@@ -356,6 +356,10 @@ pub struct IndexArgs {
     #[arg(long, default_value_t = 6144)]
     pub max_memory: usize,
 
+    /// Show verbose output including extraction warnings.
+    #[arg(long, short = 'v')]
+    pub verbose: bool,
+
     /// Internal flag for worker subprocess mode (hidden from help).
     #[arg(long, hide = true)]
     pub internal_worker: bool,

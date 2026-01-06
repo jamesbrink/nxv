@@ -180,40 +180,27 @@ let
   # Nix attribute that causes coercion issues when serializing to JSON.
   #
   # Store path format: /nix/store/<32-char-hash>-<name>
-  # The hash is base32 encoded (chars: 0-9, a-z excluding e,o,t,u)
-  # We validate both the prefix and the hash format to catch invalid paths early.
+  # We validate the prefix, length, and hyphen separator.
   getStorePath = pkg:
     let
       storePrefix = "/nix/store/";
       storePrefixLen = 11;
       hashLen = 32;
-      # Base32 alphabet used by Nix (lowercase, no e/o/t/u)
-      base32Chars = "0123456789abcdfghijklmnpqrsvwxyz";
+      minLen = storePrefixLen + hashLen + 1; # prefix + hash + hyphen
 
       result = builtins.tryEval (
         if pkg ? outPath then builtins.toString pkg.outPath else null
       );
       path = if result.success then result.value else null;
 
-      # Extract the hash portion (32 chars after /nix/store/)
-      hash = if path != null && builtins.stringLength path > (storePrefixLen + hashLen)
-             then builtins.substring storePrefixLen hashLen path
-             else null;
-
-      # Validate hash contains only valid base32 characters
-      isValidHash = hash != null &&
-        builtins.stringLength hash == hashLen &&
-        builtins.all (c: builtins.elem c (builtins.stringToCharacters base32Chars))
-                     (builtins.stringToCharacters hash);
-
       # Check that hash is followed by a hyphen (separator before name)
       hasHyphenAfterHash = path != null &&
-        builtins.stringLength path > (storePrefixLen + hashLen) &&
+        builtins.stringLength path > minLen &&
         builtins.substring (storePrefixLen + hashLen) 1 path == "-";
 
     in if path != null
+          && builtins.stringLength path > minLen
           && builtins.substring 0 storePrefixLen path == storePrefix
-          && isValidHash
           && hasHyphenAfterHash
        then path
        else null;

@@ -1287,6 +1287,7 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
         max_commits: args.max_commits,
         worker_count: args.workers,
         max_memory_mib: args.max_memory,
+        verbose: args.verbose,
     };
 
     let indexer = Indexer::new(config);

@@ -168,12 +168,14 @@ impl NixEvaluator {
 
             init_nix_library(ctx)?;
 
-            // Use dummy:// store to prevent any store writes.
+            // Use a temporary local store to isolate derivations from the system store.
             // This avoids triggering auto-optimise-store hard-linking operations that can
-            // corrupt the store when filesystem limits are hit. The dummy store cannot be
-            // written to, so derivation instantiation (outPath) will fail gracefully.
-            // Our extract.nix uses tryEval to handle this, returning null for store paths.
-            let store_uri = CString::new("dummy://").unwrap();
+            // corrupt the store when filesystem limits are hit. The temp store:
+            // - Allows evaluation to work (store backend is functional)
+            // - Writes derivations to temp store instead of real /nix/store
+            // - Doesn't inherit daemon's auto-optimise-store setting (fresh store)
+            let store_uri =
+                CString::new(format!("local?root={}", super::gc::TEMP_EVAL_STORE_PATH)).unwrap();
             let store = nix_store_open(ctx, store_uri.as_ptr(), ptr::null_mut());
             if store.is_null() {
                 let msg = get_error_message(ctx).unwrap_or_else(|| "Failed to open store".into());

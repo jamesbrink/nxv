@@ -744,6 +744,9 @@ impl Indexer {
         // Clean up orphaned worktrees from previous crashed runs
         repo.prune_worktrees()?;
 
+        // Clean up temp eval store from previous runs
+        gc::cleanup_temp_eval_store();
+
         // Check store health before starting
         if !gc::verify_store() {
             eprintln!(
@@ -822,6 +825,9 @@ impl Indexer {
 
         // Clean up orphaned worktrees from previous crashed runs
         repo.prune_worktrees()?;
+
+        // Clean up temp eval store from previous runs
+        gc::cleanup_temp_eval_store();
 
         // Check store health before starting
         if !gc::verify_store() {
@@ -1475,6 +1481,9 @@ impl Indexer {
                         pb.set_message("Running garbage collection...".to_string());
                     }
 
+                    // Clean up temp eval store to free disk space
+                    gc::cleanup_temp_eval_store();
+
                     if let Some(duration) = gc::run_garbage_collection() {
                         if let Some(ref pb) = progress_bar {
                             pb.println(format!(
@@ -1535,6 +1544,10 @@ impl Indexer {
         }
 
         // WorktreeSession auto-cleans on drop - no need to restore HEAD
+
+        // Clean up temp eval store on exit
+        gc::cleanup_temp_eval_store();
+
         Ok(result)
     }
 }

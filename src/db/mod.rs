@@ -110,10 +110,10 @@ impl Database {
         })?;
 
         if db_version > SCHEMA_VERSION {
-            return Err(NxvError::CorruptIndex(format!(
-                "database schema version {} is newer than supported version {}",
-                db_version, SCHEMA_VERSION
-            )));
+            return Err(NxvError::IndexTooNew {
+                index_version: db_version,
+                supported_version: SCHEMA_VERSION,
+            });
         }
 
         Ok(())

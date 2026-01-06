@@ -15,6 +15,14 @@ pub enum NxvError {
     #[error("Index is corrupted: {0}. Run 'nxv update --force' to re-download.")]
     CorruptIndex(String),
 
+    #[error(
+        "Index requires a newer version of nxv (schema v{index_version}, nxv supports v{supported_version}). Please upgrade nxv."
+    )]
+    IndexTooNew {
+        index_version: u32,
+        supported_version: u32,
+    },
+
     #[error("Network error: {0}")]
     Network(#[from] reqwest::Error),
 
@@ -88,6 +96,18 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("missing table"));
         assert!(msg.contains("--force"));
+    }
+
+    #[test]
+    fn test_index_too_new_error_message() {
+        let err = NxvError::IndexTooNew {
+            index_version: 10,
+            supported_version: 6,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("v10"));
+        assert!(msg.contains("v6"));
+        assert!(msg.contains("upgrade nxv"));
     }
 
     #[test]

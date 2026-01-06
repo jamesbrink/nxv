@@ -2,7 +2,7 @@
 //!
 //! Messages are JSON-serialized and newline-delimited.
 
-use crate::index::extractor::PackageInfo;
+use crate::index::extractor::{AttrPosition, PackageInfo};
 use serde::{Deserialize, Serialize};
 
 /// Request from parent to worker.
@@ -20,6 +20,15 @@ pub enum WorkRequest {
         attrs: Vec<String>,
     },
 
+    /// Extract attribute positions for file-to-attribute mapping.
+    #[serde(rename = "extract_positions")]
+    ExtractPositions {
+        /// Target system (e.g., "x86_64-linux")
+        system: String,
+        /// Path to nixpkgs checkout
+        repo_path: String,
+    },
+
     /// Graceful shutdown request.
     #[serde(rename = "exit")]
     Exit,
@@ -34,6 +43,13 @@ pub enum WorkResponse {
     Result {
         /// Extracted packages
         packages: Vec<PackageInfo>,
+    },
+
+    /// Successful positions extraction result.
+    #[serde(rename = "positions_result")]
+    PositionsResult {
+        /// Extracted attribute positions
+        positions: Vec<AttrPosition>,
     },
 
     /// Extraction error.
@@ -66,6 +82,14 @@ impl WorkRequest {
         }
     }
 
+    /// Create a positions extraction request.
+    pub fn extract_positions(system: impl Into<String>, repo_path: impl Into<String>) -> Self {
+        Self::ExtractPositions {
+            system: system.into(),
+            repo_path: repo_path.into(),
+        }
+    }
+
     /// Serialize to JSON line (with newline).
     pub fn to_line(&self) -> String {
         let mut json = serde_json::to_string(self).expect("WorkRequest serialization failed");
@@ -83,6 +107,11 @@ impl WorkResponse {
     /// Create a successful result response.
     pub fn result(packages: Vec<PackageInfo>) -> Self {
         Self::Result { packages }
+    }
+
+    /// Create a successful positions result response.
+    pub fn positions_result(positions: Vec<AttrPosition>) -> Self {
+        Self::PositionsResult { positions }
     }
 
     /// Create an error response.

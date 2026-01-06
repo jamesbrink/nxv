@@ -9,7 +9,7 @@ use super::protocol::{WorkRequest, WorkResponse};
 use super::signals::{TerminationReason, WorkerFailure, analyze_wait_status};
 use super::spawn::{WorkerConfig, spawn_worker};
 use crate::error::{NxvError, Result};
-use crate::index::extractor::PackageInfo;
+use crate::index::extractor::{AttrPosition, PackageInfo};
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -136,9 +136,9 @@ impl Worker {
                 self.handle_restart()?;
                 return self.extract(system, repo_path, attrs);
             }
-            Some(WorkResponse::Ready) => {
+            Some(WorkResponse::Ready) | Some(WorkResponse::PositionsResult { .. }) => {
                 return Err(NxvError::Worker(format!(
-                    "Worker {} sent Ready instead of result",
+                    "Worker {} sent unexpected response instead of result",
                     self.id
                 )));
             }
@@ -180,6 +180,112 @@ impl Worker {
                 Ok(packages)
             }
         }
+    }
+
+    /// Send a positions extraction request and wait for the result.
+    fn extract_positions(&mut self, system: &str, repo_path: &Path) -> Result<Vec<AttrPosition>> {
+        self.ensure_ready()?;
+
+        let proc = self
+            .proc
+            .as_mut()
+            .ok_or_else(|| NxvError::Worker(format!("Worker {} not available", self.id)))?;
+
+        // Send request
+        let request =
+            WorkRequest::extract_positions(system, repo_path.to_string_lossy().to_string());
+        proc.send(&request)?;
+
+        // Receive result
+        let response = proc.recv()?;
+        let positions = match response {
+            Some(WorkResponse::PositionsResult { positions }) => positions,
+            Some(WorkResponse::Error { message }) => {
+                // Consume Ready signal and return error
+                return self.finish_request_and_error_positions(format!(
+                    "Worker {} positions extraction error: {}",
+                    self.id, message
+                ));
+            }
+            Some(WorkResponse::Restart) => {
+                // Worker requested restart - respawn and retry
+                self.handle_restart()?;
+                return self.extract_positions(system, repo_path);
+            }
+            Some(WorkResponse::Ready) => {
+                return Err(NxvError::Worker(format!(
+                    "Worker {} sent Ready instead of result",
+                    self.id
+                )));
+            }
+            Some(other) => {
+                return Err(NxvError::Worker(format!(
+                    "Worker {} sent unexpected response: {:?}",
+                    self.id, other
+                )));
+            }
+            None => {
+                // Worker died - check why and maybe retry
+                return Err(self.handle_death("during positions extraction")?);
+            }
+        };
+
+        // Wait for Ready or Restart signal
+        self.wait_for_ready_signal_positions(positions)
+    }
+
+    /// Wait for Ready/Restart signal after receiving positions result.
+    fn wait_for_ready_signal_positions(
+        &mut self,
+        positions: Vec<AttrPosition>,
+    ) -> Result<Vec<AttrPosition>> {
+        let proc = self
+            .proc
+            .as_mut()
+            .ok_or_else(|| NxvError::Worker(format!("Worker {} not available", self.id)))?;
+
+        match proc.recv()? {
+            Some(WorkResponse::Ready) => {
+                self.jobs_completed += 1;
+                Ok(positions)
+            }
+            Some(WorkResponse::Restart) => {
+                self.jobs_completed += 1;
+                self.handle_restart()?;
+                Ok(positions)
+            }
+            Some(other) => Err(NxvError::Worker(format!(
+                "Worker {} sent unexpected response: {:?}",
+                self.id, other
+            ))),
+            None => {
+                // Worker died after sending result - that's ok, we got the data
+                self.jobs_completed += 1;
+                self.proc = None; // Will respawn on next request
+                Ok(positions)
+            }
+        }
+    }
+
+    /// Consume Ready signal after an error for positions extraction.
+    fn finish_request_and_error_positions(
+        &mut self,
+        error_msg: String,
+    ) -> Result<Vec<AttrPosition>> {
+        // Worker sends Ready/Restart after Error too - consume it
+        if let Some(proc) = self.proc.as_mut() {
+            match proc.recv() {
+                Ok(Some(WorkResponse::Ready)) => {}
+                Ok(Some(WorkResponse::Restart)) => {
+                    let _ = self.handle_restart();
+                }
+                _ => {
+                    // Worker died or sent unexpected response - mark for respawn
+                    self.proc = None;
+                }
+            }
+        }
+        Err(NxvError::Worker(error_msg))
     }
 
     /// Consume Ready signal after an error, then return the error.
@@ -376,6 +482,23 @@ impl WorkerPool {
                 })
                 .collect()
         })
+    }
+
+    /// Extract attribute positions for file-to-attribute mapping.
+    ///
+    /// Uses a worker subprocess to avoid memory accumulation in the parent process.
+    /// The worker will restart if it exceeds the memory threshold.
+    pub fn extract_positions(&self, system: &str, repo_path: &Path) -> Result<Vec<AttrPosition>> {
+        // Find an available worker
+        for worker in &self.workers {
+            if let Ok(mut w) = worker.try_lock() {
+                return w.extract_positions(system, repo_path);
+            }
+        }
+
+        // All workers busy - wait for the first one
+        let mut w = self.workers[0].lock().unwrap();
+        w.extract_positions(system, repo_path)
     }
 
     /// Shutdown all workers gracefully.

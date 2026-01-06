@@ -33,7 +33,7 @@ pub struct PackageInfo {
 }
 
 /// Attribute position information for mapping attribute names to files.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AttrPosition {
     pub attr_path: String,

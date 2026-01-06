@@ -64,6 +64,16 @@ fn handle_extract(system: &str, repo_path: &str, attrs: &[String]) -> WorkRespon
     }
 }
 
+/// Process a positions extraction request.
+fn handle_extract_positions(system: &str, repo_path: &str) -> WorkResponse {
+    let path = Path::new(repo_path);
+
+    match extractor::extract_attr_positions(path, system) {
+        Ok(positions) => WorkResponse::positions_result(positions),
+        Err(e) => WorkResponse::error(format!("{}", e)),
+    }
+}
+
 /// Worker main loop.
 ///
 /// Reads requests from stdin, processes them, and writes responses to stdout.
@@ -109,6 +119,22 @@ fn worker_loop(reader: &mut LineReader, writer: &mut LineWriter) -> io::Result<(
                 writer.write_line(&response.to_line())?;
 
                 // Check memory after extraction
+                if is_over_memory_threshold() {
+                    // Request restart
+                    writer.write_line(&WorkResponse::Restart.to_line())?;
+                    return Ok(());
+                }
+
+                // Signal ready for next request
+                writer.write_line(&WorkResponse::Ready.to_line())?;
+            }
+
+            WorkRequest::ExtractPositions { system, repo_path } => {
+                // Process positions extraction
+                let response = handle_extract_positions(&system, &repo_path);
+                writer.write_line(&response.to_line())?;
+
+                // Check memory after extraction (positions can be memory-intensive)
                 if is_over_memory_threshold() {
                     // Request restart
                     writer.write_line(&WorkResponse::Restart.to_line())?;

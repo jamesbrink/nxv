@@ -1042,7 +1042,7 @@ impl Indexer {
         let session = WorktreeSession::new(repo, &first_commit.hash)?;
         let worktree_path = session.path();
 
-        let mut file_attr_map = build_file_attr_map(worktree_path, systems)?;
+        let mut file_attr_map = build_file_attr_map(worktree_path, systems, worker_pool.as_ref())?;
         let mut mapping_commit = first_commit.hash.clone();
 
         // Helper to print warnings without disrupting progress bar
@@ -1150,7 +1150,7 @@ impl Indexer {
             // Check if we need to refresh the file map
             if should_refresh_file_map(&changed_paths)
                 && mapping_commit != commit.hash
-                && let Ok(map) = build_file_attr_map(worktree_path, systems)
+                && let Ok(map) = build_file_attr_map(worktree_path, systems, worker_pool.as_ref())
             {
                 file_attr_map = map;
                 mapping_commit = commit.hash.clone();
@@ -1423,11 +1423,19 @@ impl Indexer {
 fn build_file_attr_map(
     repo_path: &Path,
     systems: &[String],
+    worker_pool: Option<&worker::WorkerPool>,
 ) -> Result<HashMap<String, Vec<String>>> {
     let system = systems
         .first()
         .ok_or_else(|| NxvError::NixEval("No systems configured".to_string()))?;
-    let positions = extractor::extract_attr_positions(repo_path, system)?;
+
+    // Use worker pool if available to avoid memory accumulation in parent process
+    let positions = if let Some(pool) = worker_pool {
+        pool.extract_positions(system, repo_path)?
+    } else {
+        extractor::extract_attr_positions(repo_path, system)?
+    };
+
     let mut map: HashMap<String, Vec<String>> = HashMap::new();
 
     for position in positions {

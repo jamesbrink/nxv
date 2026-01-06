@@ -31,12 +31,24 @@ static PARENT_INIT: Once = Once::new();
 /// Initialize parent process state before spawning any workers.
 ///
 /// This sets environment variables that affect forked/spawned children.
+///
+/// # Safety Notes
+///
+/// This function uses `std::env::set_var` which is marked unsafe in Rust 1.66+
+/// because modifying environment variables in a multi-threaded program can cause
+/// data races if another thread is reading the environment concurrently.
+///
+/// This usage is safe because:
+/// 1. `Once::call_once()` guarantees this code runs exactly once
+/// 2. This is called during process initialization in `spawn_worker()`, before
+///    any worker threads exist
+/// 3. The indexer is single-threaded at the point where workers are first spawned
 fn init_parent() {
     PARENT_INIT.call_once(|| {
         // Disable Boehm GC in children to prevent fork compatibility issues.
         // The Nix evaluator uses Boehm GC, which can have issues with fork().
-        // Safety: This is called once at startup before any worker threads,
-        // and setting GC_DONT_GC is safe as it only affects the GC behavior.
+        //
+        // SAFETY: See function-level documentation for thread safety justification.
         unsafe {
             std::env::set_var("GC_DONT_GC", "1");
         }

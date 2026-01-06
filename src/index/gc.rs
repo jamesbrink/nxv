@@ -127,12 +127,7 @@ pub fn get_store_usage_bytes() -> Option<u64> {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     // Skip header line, parse second line
-    stdout
-        .lines()
-        .nth(1)?
-        .trim()
-        .parse()
-        .ok()
+    stdout.lines().nth(1)?.trim().parse().ok()
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -167,12 +162,7 @@ pub fn get_store_available_bytes() -> Option<u64> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout
-        .lines()
-        .nth(1)?
-        .trim()
-        .parse()
-        .ok()
+    stdout.lines().nth(1)?.trim().parse().ok()
 }
 
 #[cfg(not(target_os = "linux"))]

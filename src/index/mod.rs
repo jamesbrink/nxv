@@ -759,7 +759,10 @@ impl Indexer {
                 "Warning:".warning()
             );
             if let Some(duration) = gc::run_garbage_collection() {
-                eprintln!("Garbage collection completed in {:.1}s", duration.as_secs_f64());
+                eprintln!(
+                    "Garbage collection completed in {:.1}s",
+                    duration.as_secs_f64()
+                );
             }
         }
 
@@ -835,7 +838,10 @@ impl Indexer {
                 "Warning:".warning()
             );
             if let Some(duration) = gc::run_garbage_collection() {
-                eprintln!("Garbage collection completed in {:.1}s", duration.as_secs_f64());
+                eprintln!(
+                    "Garbage collection completed in {:.1}s",
+                    duration.as_secs_f64()
+                );
             }
         }
 

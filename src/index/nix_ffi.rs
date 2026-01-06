@@ -43,8 +43,8 @@ use nix_bindings::{
     nix_c_context_create, nix_c_context_free, nix_clear_err, nix_err_NIX_OK, nix_err_msg,
     nix_eval_state_build, nix_eval_state_builder_free, nix_eval_state_builder_load,
     nix_eval_state_builder_new, nix_expr_eval_from_string, nix_get_string, nix_get_type,
-    nix_libexpr_init, nix_libstore_init, nix_libutil_init, nix_setting_set, nix_state_free,
-    nix_store_free, nix_store_open, nix_value_force,
+    nix_libexpr_init, nix_libstore_init_no_load_config, nix_libutil_init, nix_setting_set,
+    nix_state_free, nix_store_free, nix_store_open, nix_value_force,
 };
 
 /// Global initialization for the Nix library.
@@ -67,7 +67,11 @@ fn init_nix_library(ctx: *mut nix_c_context) -> Result<()> {
             // Ignore errors - might already be set
             let _ = nix_setting_set(ctx, key.as_ptr(), value.as_ptr());
 
-            if nix_libstore_init(ctx) != nix_err_NIX_OK {
+            // Use nix_libstore_init_no_load_config to avoid loading system Nix config.
+            // This prevents auto-optimise-store from being enabled, which causes store
+            // corruption when filesystem limits (disk space, EXT4 htree) are hit during
+            // the hard-linking operations that auto-optimise-store triggers.
+            if nix_libstore_init_no_load_config(ctx) != nix_err_NIX_OK {
                 init_result = Err(NxvError::NixEval("Failed to initialize libstore".into()));
                 return;
             }
@@ -164,7 +168,13 @@ impl NixEvaluator {
 
             init_nix_library(ctx)?;
 
-            let store = nix_store_open(ctx, ptr::null(), ptr::null_mut());
+            // Use dummy:// store to prevent any store writes.
+            // This avoids triggering auto-optimise-store hard-linking operations that can
+            // corrupt the store when filesystem limits are hit. The dummy store cannot be
+            // written to, so derivation instantiation (outPath) will fail gracefully.
+            // Our extract.nix uses tryEval to handle this, returning null for store paths.
+            let store_uri = CString::new("dummy://").unwrap();
+            let store = nix_store_open(ctx, store_uri.as_ptr(), ptr::null_mut());
             if store.is_null() {
                 let msg = get_error_message(ctx).unwrap_or_else(|| "Failed to open store".into());
                 nix_c_context_free(ctx);

@@ -96,9 +96,12 @@ pub fn spawn_worker(config: &WorkerConfig) -> Result<Proc> {
     cmd.env("OBJC_DISABLE_INITIALIZE_FORK_SAFETY", "YES");
 
     // Nix configuration for evaluation
+    // CRITICAL: auto-optimise-store = false prevents store corruption when
+    // filesystem limits (disk space or EXT4 htree) are hit during indexing.
+    // Without this, the deduplication hard-linking can fail mid-operation.
     cmd.env(
         "NIX_CONFIG",
-        "accept-flake-config = true\nallow-import-from-derivation = true",
+        "accept-flake-config = true\nallow-import-from-derivation = true\nauto-optimise-store = false",
     );
 
     let child = cmd

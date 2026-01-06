@@ -192,6 +192,36 @@ impl NixpkgsRepo {
         Ok(Self { repo, path })
     }
 
+    /// Prune orphaned worktrees from previous crashed indexer runs.
+    ///
+    /// This cleans up worktrees in `/tmp/.tmp*/` that were left behind when
+    /// the indexer was killed or crashed without proper cleanup.
+    ///
+    /// Should be called at the start of indexing to reclaim disk space and
+    /// prevent worktree name conflicts.
+    pub fn prune_worktrees(&self) -> Result<()> {
+        let output = Command::new("git")
+            .current_dir(&self.path)
+            .args(["worktree", "prune"])
+            .output()
+            .map_err(|e| {
+                NxvError::Git(git2::Error::from_str(&format!(
+                    "Failed to run git worktree prune: {}",
+                    e
+                )))
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::warn!(
+                stderr = %stderr,
+                "git worktree prune failed (non-fatal)"
+            );
+        }
+
+        Ok(())
+    }
+
     /// Get all commits on the current branch in chronological order (oldest first).
     ///
     /// Uses first-parent traversal to avoid merge commit explosion.

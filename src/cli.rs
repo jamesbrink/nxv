@@ -360,6 +360,17 @@ pub struct IndexArgs {
     #[arg(long, short = 'v')]
     pub verbose: bool,
 
+    /// Number of checkpoints between garbage collection runs.
+    /// Set to 0 to disable automatic garbage collection.
+    /// Default: 5 (GC every 500 commits with default checkpoint_interval of 100)
+    #[arg(long, default_value_t = 5)]
+    pub gc_interval: usize,
+
+    /// Minimum free disk space (GB) before triggering emergency GC.
+    /// If available space falls below this, GC runs at next checkpoint.
+    #[arg(long, default_value_t = 10)]
+    pub gc_min_free_gb: u64,
+
     /// Internal flag for worker subprocess mode (hidden from help).
     #[arg(long, hide = true)]
     pub internal_worker: bool,

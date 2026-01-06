@@ -4,6 +4,7 @@
 
 pub mod backfill;
 pub mod extractor;
+pub mod gc;
 pub mod git;
 pub mod nix_ffi;
 pub mod publisher;
@@ -98,6 +99,14 @@ pub struct IndexerConfig {
     pub max_memory_mib: usize,
     /// Show verbose output including extraction warnings.
     pub verbose: bool,
+    /// Number of checkpoints between garbage collection runs.
+    /// Set to 0 to disable automatic garbage collection.
+    /// Default: 5 (GC every 500 commits with default checkpoint_interval of 100)
+    pub gc_interval: usize,
+    /// Minimum available disk space (bytes) before triggering GC.
+    /// If available space falls below this, GC runs at next checkpoint.
+    /// Default: 10 GB
+    pub gc_min_free_bytes: u64,
 }
 
 impl Default for IndexerConfig {
@@ -117,6 +126,8 @@ impl Default for IndexerConfig {
             worker_count: None, // Default: use parallel evaluation with one worker per system
             max_memory_mib: 6 * 1024, // 6 GiB
             verbose: false,
+            gc_interval: 5, // GC every 5 checkpoints (500 commits by default)
+            gc_min_free_bytes: 10 * 1024 * 1024 * 1024, // 10 GB
         }
     }
 }
@@ -729,6 +740,29 @@ impl Indexer {
         db_path: Q,
     ) -> Result<IndexResult> {
         let repo = NixpkgsRepo::open(&nixpkgs_path)?;
+
+        // Clean up orphaned worktrees from previous crashed runs
+        repo.prune_worktrees()?;
+
+        // Check store health before starting
+        if !gc::verify_store() {
+            eprintln!(
+                "{} Nix store verification failed. Run 'nix-store --verify --repair' to fix.",
+                "Warning:".warning()
+            );
+        }
+
+        // Check available disk space
+        if gc::is_store_low_on_space(self.config.gc_min_free_bytes) {
+            eprintln!(
+                "{} Low disk space detected. Running garbage collection...",
+                "Warning:".warning()
+            );
+            if let Some(duration) = gc::run_garbage_collection() {
+                eprintln!("Garbage collection completed in {:.1}s", duration.as_secs_f64());
+            }
+        }
+
         let mut db = Database::open(&db_path)?;
 
         // Get indexable commits touching package paths
@@ -782,6 +816,29 @@ impl Indexer {
         db_path: Q,
     ) -> Result<IndexResult> {
         let repo = NixpkgsRepo::open(&nixpkgs_path)?;
+
+        // Clean up orphaned worktrees from previous crashed runs
+        repo.prune_worktrees()?;
+
+        // Check store health before starting
+        if !gc::verify_store() {
+            eprintln!(
+                "{} Nix store verification failed. Run 'nix-store --verify --repair' to fix.",
+                "Warning:".warning()
+            );
+        }
+
+        // Check available disk space
+        if gc::is_store_low_on_space(self.config.gc_min_free_bytes) {
+            eprintln!(
+                "{} Low disk space detected. Running garbage collection...",
+                "Warning:".warning()
+            );
+            if let Some(duration) = gc::run_garbage_collection() {
+                eprintln!("Garbage collection completed in {:.1}s", duration.as_secs_f64());
+            }
+        }
+
         let mut db = Database::open(&db_path)?;
 
         // Check for last indexed commit
@@ -1035,6 +1092,7 @@ impl Indexer {
         let mut prev_commit_hash: Option<String> = resume_from.map(String::from);
         let mut prev_commit_date: Option<DateTime<Utc>> = None;
         let mut pending_inserts: Vec<PackageVersion> = Vec::new();
+        let mut checkpoints_since_gc: usize = 0;
 
         // Build the initial file-to-attribute map
         let first_commit = commits
@@ -1392,6 +1450,40 @@ impl Indexer {
                     db.save_checkpoint_ranges(&checkpoint_ranges)?;
 
                     db.checkpoint()?;
+                }
+
+                // Garbage collection: run periodically or when disk is low
+                checkpoints_since_gc += 1;
+                let should_gc = if self.config.gc_interval > 0 {
+                    // Periodic GC based on checkpoint count
+                    checkpoints_since_gc >= self.config.gc_interval
+                        // Or emergency GC if disk space is critically low
+                        || gc::is_store_low_on_space(self.config.gc_min_free_bytes)
+                } else {
+                    // GC disabled, but still run if critically low on disk
+                    gc::is_store_low_on_space(self.config.gc_min_free_bytes / 2)
+                };
+
+                if should_gc {
+                    if let Some(ref pb) = progress_bar {
+                        pb.set_message("Running garbage collection...".to_string());
+                    }
+
+                    if let Some(duration) = gc::run_garbage_collection() {
+                        if let Some(ref pb) = progress_bar {
+                            pb.println(format!(
+                                "{} garbage collection in {:.1}s",
+                                "Completed".success(),
+                                duration.as_secs_f64()
+                            ));
+                        }
+                    } else if let Some(ref pb) = progress_bar {
+                        pb.println(format!(
+                            "{} garbage collection (GC command failed)",
+                            "Skipped".warning()
+                        ));
+                    }
+                    checkpoints_since_gc = 0;
                 }
             }
         }
@@ -1865,6 +1957,8 @@ mod tests {
             worker_count: Some(1), // Sequential for tests
             max_memory_mib: 6 * 1024,
             verbose: false,
+            gc_interval: 0, // Disable GC for tests
+            gc_min_free_bytes: 0,
         };
         let _indexer = Indexer::new(config);
 
@@ -1898,6 +1992,8 @@ mod tests {
             worker_count: Some(1), // Sequential for tests
             max_memory_mib: 6 * 1024,
             verbose: false,
+            gc_interval: 0, // Disable GC for tests
+            gc_min_free_bytes: 0,
         };
         let _indexer = Indexer::new(config);
 

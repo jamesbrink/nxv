@@ -1098,6 +1098,8 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
         worker_count: args.workers,
         max_memory_mib: args.max_memory,
         verbose: args.verbose,
+        gc_interval: args.gc_interval,
+        gc_min_free_bytes: args.gc_min_free_gb * 1024 * 1024 * 1024,
     };
 
     let indexer = Indexer::new(config);

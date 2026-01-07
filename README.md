@@ -41,7 +41,7 @@ Or visit **<https://nxv.urandom.io>** to search in your browser.
 - **Version history** — See when each version was introduced and when it was superseded
 - **Multiple interfaces** — CLI tool, HTTP API server with web UI, or query via remote API
 - **NixOS module** — Run as a systemd service with automatic index updates
-- **Lightweight** — ~7MB static binary, ~100MB compressed index
+- **Lightweight** — ~7MB static binary, ~28MB compressed index (slim) or ~1.3GB (full history)
 
 ## How It Works
 
@@ -60,7 +60,7 @@ Or visit **<https://nxv.urandom.io>** to search in your browser.
 ```
 
 The indexer walks nixpkgs commits (from 2017+), runs `nix eval` to extract package metadata, and stores version ranges in SQLite.
-Users download a pre-built compressed index (~100MB) and query it locally or via the API server.
+Users download a pre-built compressed index (~28MB slim, or ~1.3GB full history) and query it locally or via the API server.
 
 ## Installation
 
@@ -150,9 +150,11 @@ nix run nixpkgs/e4a45f9#python
 ### Index Management
 
 ```bash
-nxv update           # Download/update the index
-nxv update --force   # Force full re-download
-nxv stats            # Show index statistics
+nxv update              # Download/update slim index (default)
+nxv update index:slim   # Explicit slim variant
+nxv update index:full   # Download full history variant
+nxv update --force      # Force full re-download
+nxv stats               # Show index statistics
 ```
 
 ## API Server
@@ -326,9 +328,10 @@ Generate distribution-ready artifacts with the `publish` command:
 nxv publish --output ./publish --url-prefix https://your-server.com/nxv
 
 # Files created:
-#   publish/index.db.zst   - Compressed SQLite database (~100MB)
-#   publish/bloom.bin      - Bloom filter for fast lookups (~26KB)
-#   publish/manifest.json  - Manifest with URLs and checksums
+#   publish/index.db.zst       - Slim database (~28MB) - one row per (attr, version)
+#   publish/index-full.db.zst  - Full history (~1.3GB) - all version ranges
+#   publish/bloom.bin          - Bloom filter for fast lookups (~96KB)
+#   publish/manifest.json      - Manifest with URLs and checksums
 ```
 
 The `--url-prefix` sets the base URL that will appear in the manifest. This should match where you'll host the files.

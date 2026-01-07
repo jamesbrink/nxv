@@ -11,8 +11,8 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Memory threshold configuration from CLI (in MiB).
-/// Default: 6 GiB. Uses atomic for safe concurrent access.
-static MAX_MEMORY_MIB: AtomicUsize = AtomicUsize::new(6 * 1024);
+/// Default: 2 GiB per worker. Uses atomic for safe concurrent access.
+static MAX_MEMORY_MIB: AtomicUsize = AtomicUsize::new(2 * 1024);
 
 /// Set the memory threshold for worker restart.
 ///

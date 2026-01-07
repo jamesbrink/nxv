@@ -31,7 +31,7 @@ impl Default for WorkerPoolConfig {
     fn default() -> Self {
         Self {
             worker_count: 4,
-            max_memory_mib: 6 * 1024,          // 6 GiB
+            max_memory_mib: 2 * 1024,          // 2 GiB per worker
             timeout: Duration::from_secs(300), // 5 minutes
         }
     }
@@ -566,7 +566,7 @@ mod tests {
     fn test_worker_pool_config_default() {
         let config = WorkerPoolConfig::default();
         assert_eq!(config.worker_count, 4);
-        assert_eq!(config.max_memory_mib, 6 * 1024);
+        assert_eq!(config.max_memory_mib, 2 * 1024);
     }
 
     // Note: Full pool tests require the binary to support --internal-worker.

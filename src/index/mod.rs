@@ -135,7 +135,7 @@ impl Default for IndexerConfig {
             until: None,
             max_commits: None,
             worker_count: None, // Default: use parallel evaluation with one worker per system
-            max_memory_mib: 6 * 1024, // 6 GiB
+            max_memory_mib: 2 * 1024, // 2 GiB per worker
             verbose: false,
             gc_interval: 20, // GC every 20 checkpoints (2000 commits by default)
             gc_min_free_bytes: 10 * 1024 * 1024 * 1024, // 10 GB
@@ -1466,7 +1466,22 @@ impl Indexer {
             };
 
             let total_chunks = chunks.len();
+            let mut chunk_interrupted = false;
             for (chunk_idx, chunk) in chunks.iter().enumerate() {
+                // Check for shutdown between chunks
+                if self.is_shutdown_requested() {
+                    chunk_interrupted = true;
+                    if let Some(ref pb) = progress_bar {
+                        pb.println(format!(
+                            "{} received during chunk {}/{}",
+                            "Shutdown".warning(),
+                            chunk_idx + 1,
+                            total_chunks
+                        ));
+                    }
+                    break;
+                }
+
                 // Show chunk progress for large extractions
                 if total_chunks > 1
                     && let Some(ref pb) = progress_bar
@@ -1551,6 +1566,12 @@ impl Indexer {
                     }
                 }
             } // End of chunk loop
+
+            // If interrupted during chunking, continue to next iteration
+            // where the shutdown check will trigger checkpoint save
+            if chunk_interrupted {
+                continue;
+            }
 
             result.packages_found += aggregates.len() as u64;
 
@@ -2248,7 +2269,7 @@ mod tests {
             until: None,
             max_commits: None,
             worker_count: Some(1), // Sequential for tests
-            max_memory_mib: 6 * 1024,
+            max_memory_mib: 2 * 1024,
             verbose: false,
             gc_interval: 0, // Disable GC for tests
             gc_min_free_bytes: 0,
@@ -2286,7 +2307,7 @@ mod tests {
             until: None,
             max_commits: None,
             worker_count: Some(1), // Sequential for tests
-            max_memory_mib: 6 * 1024,
+            max_memory_mib: 2 * 1024,
             verbose: false,
             gc_interval: 0, // Disable GC for tests
             gc_min_free_bytes: 0,

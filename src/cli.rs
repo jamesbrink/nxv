@@ -415,8 +415,9 @@ pub struct IndexArgs {
     #[arg(long)]
     pub workers: Option<usize>,
 
-    /// Memory threshold (MiB) before worker restart (default: 6144).
-    #[arg(long, default_value_t = 6144)]
+    /// Memory threshold (MiB) before worker restart (default: 2048).
+    /// With 4 workers, total memory can reach ~8GB during peak extraction.
+    #[arg(long, default_value_t = 2048)]
     pub max_memory: usize,
 
     /// Show verbose output including extraction warnings.

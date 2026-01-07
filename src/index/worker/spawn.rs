@@ -20,7 +20,7 @@ pub struct WorkerConfig {
 impl Default for WorkerConfig {
     fn default() -> Self {
         Self {
-            max_memory_mib: 6 * 1024, // 6 GiB
+            max_memory_mib: 2 * 1024, // 2 GiB per worker
         }
     }
 }
@@ -141,7 +141,7 @@ mod tests {
     #[test]
     fn test_worker_config_default() {
         let config = WorkerConfig::default();
-        assert_eq!(config.max_memory_mib, 6 * 1024);
+        assert_eq!(config.max_memory_mib, 2 * 1024);
     }
 
     // Note: spawn_worker requires the binary to support --internal-worker,

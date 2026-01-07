@@ -35,6 +35,16 @@ impl Database {
     /// Open or create a database at the given path.
     #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let path = path.as_ref();
+        if path.exists() && path.is_dir() {
+            let path_str = path.display().to_string();
+            let path_trimmed = path_str.trim_end_matches('/');
+            return Err(NxvError::InvalidPath(format!(
+                "'{}' is a directory, not a file. Expected a path like '{}/index.db'",
+                path.display(),
+                path_trimmed
+            )));
+        }
         let conn = Connection::open(path)?;
 
         // Enable WAL mode for better concurrent performance and durability
@@ -76,6 +86,15 @@ impl Database {
         let path = path.as_ref();
         if !path.exists() {
             return Err(NxvError::NoIndex);
+        }
+        if path.is_dir() {
+            let path_str = path.display().to_string();
+            let path_trimmed = path_str.trim_end_matches('/');
+            return Err(NxvError::InvalidPath(format!(
+                "'{}' is a directory, not a file. Expected a path like '{}/index.db'",
+                path.display(),
+                path_trimmed
+            )));
         }
         let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
 

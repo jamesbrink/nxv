@@ -12,6 +12,9 @@ pub enum NxvError {
     #[error("No index found. Run 'nxv update' to download the package index.")]
     NoIndex,
 
+    #[error("Invalid database path: {0}")]
+    InvalidPath(String),
+
     #[error("Index is corrupted: {0}. Run 'nxv update --force' to re-download.")]
     CorruptIndex(String),
 

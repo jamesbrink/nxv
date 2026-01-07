@@ -537,18 +537,27 @@ pub fn generate_slim_db<P: AsRef<Path>, Q: AsRef<Path>>(
     )?;
 
     if show_progress {
-        eprintln!("  Consolidating {} unique package versions...", total_pairs);
+        eprintln!(
+            "  Consolidating {} unique package versions from {} rows...",
+            total_pairs,
+            full_conn
+                .query_row("SELECT COUNT(*) FROM package_versions", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap_or(0)
+        );
     }
 
-    let pb = if show_progress {
-        let pb = ProgressBar::new(total_pairs as u64);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
-                .unwrap()
-                .progress_chars("=>-"),
+    // Show spinner during the slow query phase
+    let query_spinner = if show_progress {
+        let sp = ProgressBar::new_spinner();
+        sp.set_style(
+            ProgressStyle::default_spinner()
+                .template("{spinner:.green} {msg}")
+                .unwrap(),
         );
-        Some(pb)
+        sp.set_message("Executing consolidation query (this may take a while)...");
+        sp.enable_steady_tick(std::time::Duration::from_millis(100));
+        Some(sp)
     } else {
         None
     };
@@ -642,8 +651,29 @@ pub fn generate_slim_db<P: AsRef<Path>, Q: AsRef<Path>>(
         ))
     })?;
 
+    // Progress bar for insert phase (created after first row arrives)
+    let mut pb: Option<ProgressBar> = None;
+    let mut query_spinner = query_spinner;
+
     let mut count = 0u64;
     for row in rows {
+        // On first row, stop spinner and start progress bar
+        if count == 0 {
+            if let Some(sp) = query_spinner.take() {
+                sp.finish_and_clear();
+            }
+            if show_progress {
+                let new_pb = ProgressBar::new(total_pairs as u64);
+                new_pb.set_style(
+                    ProgressStyle::default_bar()
+                        .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
+                        .unwrap()
+                        .progress_chars("=>-"),
+                );
+                pb = Some(new_pb);
+            }
+        }
+
         let (
             name,
             version,

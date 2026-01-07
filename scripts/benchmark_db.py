@@ -7,6 +7,7 @@ Compares package_versions (full) vs package_latest (materialized view) tables.
 Includes cold cache (first query) vs warm cache metrics.
 """
 
+import os
 import sqlite3
 import time
 import statistics
@@ -43,11 +44,15 @@ class DatabaseInfo:
 
 
 def get_db_path() -> Path:
+    # Check NXV_DB_PATH environment variable first
+    env_path = os.environ.get("NXV_DB_PATH")
+    if env_path:
+        return Path(env_path)
     if DEFAULT_DB_PATH.exists():
         return DEFAULT_DB_PATH
     if LINUX_DB_PATH.exists():
         return LINUX_DB_PATH
-    raise FileNotFoundError("No nxv database found")
+    raise FileNotFoundError("No nxv database found. Set NXV_DB_PATH or run 'nxv update'")
 
 
 def drop_os_caches():

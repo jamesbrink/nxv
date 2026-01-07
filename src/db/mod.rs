@@ -15,7 +15,7 @@ const DEFAULT_BUSY_TIMEOUT_SECS: u64 = 5;
 
 /// Current schema version.
 #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
-const SCHEMA_VERSION: u32 = 6;
+const SCHEMA_VERSION: u32 = 7;
 
 /// Supported systems for store paths.
 pub const STORE_PATH_SYSTEMS: [&str; 4] = [
@@ -37,11 +37,14 @@ impl Database {
         let conn = Connection::open(path)?;
 
         // Enable WAL mode for better concurrent performance and durability
+        // Set larger cache for better performance with large indexes
         conn.execute_batch(
             r#"
             PRAGMA journal_mode = WAL;
             PRAGMA synchronous = NORMAL;
             PRAGMA wal_autocheckpoint = 1000;
+            PRAGMA cache_size = -64000;
+            PRAGMA temp_store = MEMORY;
             "#,
         )?;
 
@@ -77,6 +80,15 @@ impl Database {
         // Set busy timeout to prevent indefinite blocking on database locks.
         // This is critical for preventing thread pool exhaustion under load.
         conn.busy_timeout(Duration::from_secs(DEFAULT_BUSY_TIMEOUT_SECS))?;
+
+        // Performance optimizations for read-only queries
+        conn.execute_batch(
+            r#"
+            PRAGMA cache_size = -64000;
+            PRAGMA temp_store = MEMORY;
+            PRAGMA case_sensitive_like = ON;
+            "#,
+        )?;
 
         let db = Self { conn };
 
@@ -178,6 +190,15 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_packages_attr ON package_versions(attribute_path);
             CREATE INDEX IF NOT EXISTS idx_packages_first_date ON package_versions(first_commit_date DESC);
             CREATE INDEX IF NOT EXISTS idx_packages_last_date ON package_versions(last_commit_date DESC);
+
+            -- Covering indexes for optimized search queries (added in v7)
+            -- These allow ORDER BY to use the index directly without a separate sort
+            CREATE INDEX IF NOT EXISTS idx_attr_date_covering ON package_versions(
+                attribute_path, last_commit_date DESC, name, version
+            );
+            CREATE INDEX IF NOT EXISTS idx_name_attr_date_covering ON package_versions(
+                name, attribute_path, last_commit_date DESC
+            );
 
             -- Checkpoint table for persisting open ranges across restarts
             CREATE TABLE IF NOT EXISTS checkpoint_open_ranges (
@@ -454,6 +475,27 @@ impl Database {
                     )?;
                 }
             }
+        }
+
+        if current_version < 7 {
+            // Migration v6 -> v7: Add covering indexes for optimized search queries
+            // These indexes allow ORDER BY to use the index directly without a separate sort step
+            self.conn.execute_batch(
+                r#"
+                -- Covering index for attribute_path searches with date ordering
+                CREATE INDEX IF NOT EXISTS idx_attr_date_covering ON package_versions(
+                    attribute_path, last_commit_date DESC, name, version
+                );
+
+                -- Covering index for name-based searches with attribute_path filtering
+                CREATE INDEX IF NOT EXISTS idx_name_attr_date_covering ON package_versions(
+                    name, attribute_path, last_commit_date DESC
+                );
+
+                -- Update query planner statistics for optimal index selection
+                ANALYZE;
+                "#,
+            )?;
         }
 
         if current_version < SCHEMA_VERSION {

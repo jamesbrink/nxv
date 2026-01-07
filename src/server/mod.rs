@@ -101,10 +101,7 @@ pub fn init_tracing() {
         .unwrap_or(false);
 
     // Build the env filter with sensible defaults
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        // Default: info for nxv and tower_http, warn for everything else
-        EnvFilter::new("nxv=info,tower_http=info,warn")
-    });
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     // Use try_init() to avoid panicking if a subscriber is already set
     // (e.g., in tests or if run_server is called multiple times)

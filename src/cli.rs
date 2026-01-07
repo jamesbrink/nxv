@@ -183,9 +183,52 @@ impl SearchArgs {
     }
 }
 
+/// Index variant for download.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IndexVariant {
+    /// Slim index with one row per (attr_path, version) - fast queries, smaller download.
+    #[default]
+    Slim,
+    /// Full history index with all version ranges - complete history, larger download.
+    Full,
+}
+
+impl std::str::FromStr for IndexVariant {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        // Support both "index:slim" and just "slim" (case-insensitive)
+        let lower = s.to_lowercase();
+        let variant = lower.strip_prefix("index:").unwrap_or(&lower);
+        match variant {
+            "slim" | "default" => Ok(IndexVariant::Slim),
+            "full" | "full-history" => Ok(IndexVariant::Full),
+            _ => Err(format!(
+                "unknown index variant '{}'. Valid variants: index:slim, index:full",
+                s
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for IndexVariant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IndexVariant::Slim => write!(f, "index:slim"),
+            IndexVariant::Full => write!(f, "index:full"),
+        }
+    }
+}
+
 /// Arguments for the update command.
 #[derive(Parser, Debug)]
 pub struct UpdateArgs {
+    /// Index variant to download (index:slim or index:full).
+    /// - index:slim (default): One row per package version, fast queries
+    /// - index:full: Complete version history with all commit ranges
+    #[arg(default_value = "index:slim")]
+    pub variant: IndexVariant,
+
     /// Force full re-download of the index.
     #[arg(short, long)]
     pub force: bool,
@@ -501,6 +544,10 @@ pub struct PublishArgs {
     /// Can also be set via NXV_SECRET_KEY environment variable.
     #[arg(long, env = "NXV_SECRET_KEY", required_if_eq("sign", "true"))]
     pub secret_key: Option<String>,
+
+    /// Zstd compression level (1-22, default 19). Lower = faster, higher = smaller.
+    #[arg(long, default_value_t = 19, value_parser = clap::value_parser!(i32).range(1..=22))]
+    pub compression_level: i32,
 }
 
 /// Arguments for the keygen command (feature-gated).
@@ -690,6 +737,108 @@ mod tests {
         match args.command {
             Commands::Update(update) => {
                 assert_eq!(update.public_key, Some("/path/to/key.pub".to_string()));
+            }
+            _ => panic!("Expected Update command"),
+        }
+    }
+
+    #[test]
+    fn test_update_variant_slim() {
+        let args = Cli::try_parse_from(["nxv", "update", "index:slim"]).unwrap();
+        match args.command {
+            Commands::Update(update) => {
+                assert_eq!(update.variant, IndexVariant::Slim);
+            }
+            _ => panic!("Expected Update command"),
+        }
+    }
+
+    #[test]
+    fn test_update_variant_full() {
+        let args = Cli::try_parse_from(["nxv", "update", "index:full"]).unwrap();
+        match args.command {
+            Commands::Update(update) => {
+                assert_eq!(update.variant, IndexVariant::Full);
+            }
+            _ => panic!("Expected Update command"),
+        }
+    }
+
+    #[test]
+    fn test_update_default_variant() {
+        // Default should be slim
+        let args = Cli::try_parse_from(["nxv", "update"]).unwrap();
+        match args.command {
+            Commands::Update(update) => {
+                assert_eq!(update.variant, IndexVariant::Slim);
+            }
+            _ => panic!("Expected Update command"),
+        }
+    }
+
+    #[test]
+    fn test_index_variant_from_str() {
+        // Test parsing with "index:" prefix
+        assert_eq!(
+            "index:slim".parse::<IndexVariant>().unwrap(),
+            IndexVariant::Slim
+        );
+        assert_eq!(
+            "index:full".parse::<IndexVariant>().unwrap(),
+            IndexVariant::Full
+        );
+
+        // Test parsing without prefix
+        assert_eq!("slim".parse::<IndexVariant>().unwrap(), IndexVariant::Slim);
+        assert_eq!("full".parse::<IndexVariant>().unwrap(), IndexVariant::Full);
+
+        // Test case insensitivity
+        assert_eq!("SLIM".parse::<IndexVariant>().unwrap(), IndexVariant::Slim);
+        assert_eq!(
+            "INDEX:FULL".parse::<IndexVariant>().unwrap(),
+            IndexVariant::Full
+        );
+        assert_eq!(
+            "Index:Slim".parse::<IndexVariant>().unwrap(),
+            IndexVariant::Slim
+        );
+
+        // Test aliases
+        assert_eq!(
+            "default".parse::<IndexVariant>().unwrap(),
+            IndexVariant::Slim
+        );
+        assert_eq!(
+            "full-history".parse::<IndexVariant>().unwrap(),
+            IndexVariant::Full
+        );
+    }
+
+    #[test]
+    fn test_index_variant_from_str_error() {
+        // Test invalid variant
+        let result = "invalid".parse::<IndexVariant>();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("unknown index variant"));
+
+        let result = "index:unknown".parse::<IndexVariant>();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_index_variant_display() {
+        assert_eq!(IndexVariant::Slim.to_string(), "index:slim");
+        assert_eq!(IndexVariant::Full.to_string(), "index:full");
+    }
+
+    #[test]
+    fn test_update_variant_with_force() {
+        // Variant and force can be combined
+        let args = Cli::try_parse_from(["nxv", "update", "index:full", "--force"]).unwrap();
+        match args.command {
+            Commands::Update(update) => {
+                assert_eq!(update.variant, IndexVariant::Full);
+                assert!(update.force);
             }
             _ => panic!("Expected Update command"),
         }

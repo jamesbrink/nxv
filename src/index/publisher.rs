@@ -21,6 +21,7 @@ const COMPRESSION_LEVEL: i32 = 19;
 
 /// Default file names for published artifacts.
 pub const INDEX_DB_NAME: &str = "index.db.zst";
+pub const INDEX_FULL_DB_NAME: &str = "index-full.db.zst";
 pub const BLOOM_FILTER_NAME: &str = "bloom.bin";
 pub const MANIFEST_NAME: &str = "manifest.json";
 pub const MANIFEST_SIG_NAME: &str = "manifest.json.minisig";
@@ -435,11 +436,305 @@ fn file_sha256_with_progress<P: AsRef<Path>>(path: P, show_progress: bool) -> Re
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+/// Generate a slim database from the full database.
+///
+/// The slim database has one row per (attribute_path, version) pair,
+/// consolidating all version ranges into a single row with:
+/// - first_commit: earliest first_commit across all ranges
+/// - last_commit: latest last_commit across all ranges
+///
+/// This reduces a ~6M row database to ~200K rows while preserving
+/// all unique package versions.
+pub fn generate_slim_db<P: AsRef<Path>, Q: AsRef<Path>>(
+    full_db_path: P,
+    slim_db_path: Q,
+    show_progress: bool,
+) -> Result<()> {
+    use rusqlite::Connection;
+
+    let full_db_path = full_db_path.as_ref();
+    let slim_db_path = slim_db_path.as_ref();
+
+    if show_progress {
+        eprintln!("  Generating slim database from full index...");
+    }
+
+    // Remove existing slim db if present
+    if slim_db_path.exists() {
+        fs::remove_file(slim_db_path)?;
+    }
+
+    // Open full database read-only
+    let full_conn =
+        Connection::open_with_flags(full_db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+
+    // Create new slim database
+    let slim_conn = Connection::open(slim_db_path)?;
+
+    // Set up slim database with same schema
+    slim_conn.execute_batch(
+        r#"
+        PRAGMA journal_mode = WAL;
+        PRAGMA synchronous = NORMAL;
+        PRAGMA cache_size = -64000;
+        PRAGMA temp_store = MEMORY;
+
+        CREATE TABLE meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+
+        CREATE TABLE package_versions (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            version TEXT NOT NULL,
+            first_commit_hash TEXT NOT NULL,
+            first_commit_date INTEGER NOT NULL,
+            last_commit_hash TEXT NOT NULL,
+            last_commit_date INTEGER NOT NULL,
+            attribute_path TEXT NOT NULL,
+            description TEXT,
+            license TEXT,
+            homepage TEXT,
+            maintainers TEXT,
+            platforms TEXT,
+            source_path TEXT,
+            known_vulnerabilities TEXT,
+            store_path_x86_64_linux TEXT,
+            store_path_aarch64_linux TEXT,
+            store_path_x86_64_darwin TEXT,
+            store_path_aarch64_darwin TEXT,
+            UNIQUE(attribute_path, version)
+        );
+        "#,
+    )?;
+
+    // Copy meta table
+    let mut meta_stmt = full_conn.prepare("SELECT key, value FROM meta")?;
+    let meta_rows = meta_stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+
+    for row in meta_rows {
+        let (key, value) = row?;
+        slim_conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?, ?)",
+            rusqlite::params![key, value],
+        )?;
+    }
+
+    // Mark this as a slim database
+    slim_conn.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('db_variant', 'slim')",
+        [],
+    )?;
+
+    // Count total unique (attr, version) pairs for progress
+    let total_pairs: i64 = full_conn.query_row(
+        "SELECT COUNT(*) FROM (SELECT DISTINCT attribute_path, version FROM package_versions)",
+        [],
+        |row| row.get(0),
+    )?;
+
+    if show_progress {
+        eprintln!("  Consolidating {} unique package versions...", total_pairs);
+    }
+
+    let pb = if show_progress {
+        let pb = ProgressBar::new(total_pairs as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
+                .unwrap()
+                .progress_chars("=>-"),
+        );
+        Some(pb)
+    } else {
+        None
+    };
+
+    // Query consolidated data from full database
+    // For each (attribute_path, version), get:
+    // - MIN(first_commit_date) and its corresponding hash
+    // - MAX(last_commit_date) and its corresponding hash
+    // - Most recent metadata (from the row with latest last_commit_date)
+    let mut stmt = full_conn.prepare(
+        r#"
+        WITH ranked AS (
+            SELECT *,
+                ROW_NUMBER() OVER (
+                    PARTITION BY attribute_path, version
+                    ORDER BY last_commit_date DESC
+                ) as rn
+            FROM package_versions
+        ),
+        first_commits AS (
+            SELECT attribute_path, version,
+                   first_commit_hash, first_commit_date
+            FROM package_versions pv
+            WHERE first_commit_date = (
+                SELECT MIN(first_commit_date)
+                FROM package_versions
+                WHERE attribute_path = pv.attribute_path AND version = pv.version
+            )
+            GROUP BY attribute_path, version
+        )
+        SELECT
+            r.name,
+            r.version,
+            fc.first_commit_hash,
+            fc.first_commit_date,
+            r.last_commit_hash,
+            r.last_commit_date,
+            r.attribute_path,
+            r.description,
+            r.license,
+            r.homepage,
+            r.maintainers,
+            r.platforms,
+            r.source_path,
+            r.known_vulnerabilities,
+            r.store_path_x86_64_linux,
+            r.store_path_aarch64_linux,
+            r.store_path_x86_64_darwin,
+            r.store_path_aarch64_darwin
+        FROM ranked r
+        JOIN first_commits fc ON r.attribute_path = fc.attribute_path AND r.version = fc.version
+        WHERE r.rn = 1
+        ORDER BY r.attribute_path, r.version
+        "#,
+    )?;
+
+    // Insert into slim database in batches
+    let mut insert_stmt = slim_conn.prepare(
+        r#"
+        INSERT INTO package_versions (
+            name, version, first_commit_hash, first_commit_date,
+            last_commit_hash, last_commit_date, attribute_path,
+            description, license, homepage, maintainers, platforms,
+            source_path, known_vulnerabilities,
+            store_path_x86_64_linux, store_path_aarch64_linux,
+            store_path_x86_64_darwin, store_path_aarch64_darwin
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "#,
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, i64>(5)?,
+            row.get::<_, String>(6)?,
+            row.get::<_, Option<String>>(7)?,
+            row.get::<_, Option<String>>(8)?,
+            row.get::<_, Option<String>>(9)?,
+            row.get::<_, Option<String>>(10)?,
+            row.get::<_, Option<String>>(11)?,
+            row.get::<_, Option<String>>(12)?,
+            row.get::<_, Option<String>>(13)?,
+            row.get::<_, Option<String>>(14)?,
+            row.get::<_, Option<String>>(15)?,
+            row.get::<_, Option<String>>(16)?,
+            row.get::<_, Option<String>>(17)?,
+        ))
+    })?;
+
+    let mut count = 0u64;
+    for row in rows {
+        let (
+            name,
+            version,
+            first_hash,
+            first_date,
+            last_hash,
+            last_date,
+            attr_path,
+            desc,
+            license,
+            homepage,
+            maintainers,
+            platforms,
+            source_path,
+            vulns,
+            sp_x86_linux,
+            sp_aarch64_linux,
+            sp_x86_darwin,
+            sp_aarch64_darwin,
+        ) = row?;
+
+        insert_stmt.execute(rusqlite::params![
+            name,
+            version,
+            first_hash,
+            first_date,
+            last_hash,
+            last_date,
+            attr_path,
+            desc,
+            license,
+            homepage,
+            maintainers,
+            platforms,
+            source_path,
+            vulns,
+            sp_x86_linux,
+            sp_aarch64_linux,
+            sp_x86_darwin,
+            sp_aarch64_darwin,
+        ])?;
+
+        count += 1;
+        if let Some(ref pb) = pb {
+            pb.set_position(count);
+        }
+    }
+
+    if let Some(pb) = pb {
+        pb.finish_and_clear();
+    }
+
+    // Create indexes on slim database
+    if show_progress {
+        eprintln!("  Creating indexes...");
+    }
+
+    slim_conn.execute_batch(
+        r#"
+        CREATE INDEX idx_packages_name ON package_versions(name);
+        CREATE INDEX idx_packages_attr ON package_versions(attribute_path);
+        CREATE INDEX idx_packages_last_date ON package_versions(last_commit_date DESC);
+        CREATE INDEX idx_attr_date_covering ON package_versions(
+            attribute_path, last_commit_date DESC, name, version
+        );
+
+        -- Checkpoint WAL to main file
+        PRAGMA wal_checkpoint(TRUNCATE);
+        "#,
+    )?;
+
+    if show_progress {
+        let slim_size = fs::metadata(slim_db_path)?.len();
+        let full_size = fs::metadata(full_db_path)?.len();
+        eprintln!(
+            "  Slim database: {} ({} rows, {:.1}x smaller)",
+            format_bytes(slim_size),
+            count,
+            full_size as f64 / slim_size as f64
+        );
+    }
+
+    Ok(())
+}
+
 /// Generate a compressed full index for distribution.
 ///
 /// Creates:
 /// - `index.db.zst` - Compressed database
 /// - Returns the IndexFile with hash and size info
+#[allow(dead_code)] // Used in tests
 pub fn generate_full_index<P: AsRef<Path>, Q: AsRef<Path>>(
     db_path: P,
     output_dir: Q,
@@ -654,6 +949,7 @@ pub fn generate_delta_pack<P: AsRef<Path>, Q: AsRef<Path>>(
 pub fn generate_manifest<P: AsRef<Path>>(
     output_dir: P,
     full_index: IndexFile,
+    full_history_index: Option<IndexFile>,
     latest_commit: &str,
     deltas: Vec<DeltaFile>,
     bloom_filter: IndexFile,
@@ -666,6 +962,7 @@ pub fn generate_manifest<P: AsRef<Path>>(
         latest_commit: latest_commit.to_string(),
         latest_commit_date: Utc::now().to_rfc3339(),
         full_index,
+        full_history_index,
         deltas,
         bloom_filter,
     };
@@ -757,7 +1054,8 @@ pub fn generate_bloom_filter<P: AsRef<Path>, Q: AsRef<Path>>(
 /// Generate all publishable artifacts for an index.
 ///
 /// Creates:
-/// - `index.db.zst` - Compressed database
+/// - `index.db.zst` - Compressed slim database (one row per attr+version)
+/// - `index-full.db.zst` - Compressed full database (all version ranges)
 /// - `bloom.bin` - Bloom filter for fast lookups
 /// - `manifest.json` - Manifest with URLs and checksums
 /// - `manifest.json.minisig` - Signature file (if secret_key is provided)
@@ -769,31 +1067,67 @@ pub fn publish_index<P: AsRef<Path>, Q: AsRef<Path>>(
     url_prefix: Option<&str>,
     show_progress: bool,
     secret_key: Option<&str>,
+    compression_level: i32,
 ) -> Result<()> {
     let db_path = db_path.as_ref();
     let output_dir = output_dir.as_ref();
 
     fs::create_dir_all(output_dir)?;
 
+    // Step 1: Generate and compress the full history database
     if show_progress {
-        eprintln!("Generating compressed index...");
+        eprintln!("Generating compressed full history index...");
     }
-    let (full_index, last_commit) =
-        generate_full_index(db_path, output_dir, url_prefix, show_progress)?;
+    let (full_history_index, last_commit) = generate_full_history_index(
+        db_path,
+        output_dir,
+        url_prefix,
+        show_progress,
+        compression_level,
+    )?;
 
+    // Step 2: Generate slim database from full database
+    if show_progress {
+        eprintln!();
+        eprintln!("Generating slim index...");
+    }
+    let slim_db_path = output_dir.join("slim-temp.db");
+    generate_slim_db(db_path, &slim_db_path, show_progress)?;
+
+    // Step 3: Compress slim database
+    if show_progress {
+        eprintln!("  Compressing slim database...");
+    }
+    let slim_index = generate_slim_index(
+        &slim_db_path,
+        output_dir,
+        url_prefix,
+        show_progress,
+        compression_level,
+    )?;
+
+    // Clean up temp slim db
+    let _ = fs::remove_file(&slim_db_path);
+    // Also remove WAL/SHM files if they exist
+    let _ = fs::remove_file(slim_db_path.with_extension("db-wal"));
+    let _ = fs::remove_file(slim_db_path.with_extension("db-shm"));
+
+    // Step 4: Generate bloom filter from full database (has all attr paths)
     if show_progress {
         eprintln!();
         eprintln!("Generating bloom filter...");
     }
     let bloom_filter = generate_bloom_filter(db_path, output_dir, url_prefix, show_progress)?;
 
+    // Step 5: Write manifest
     if show_progress {
         eprintln!();
         eprintln!("Writing manifest...");
     }
     generate_manifest(
         output_dir,
-        full_index.clone(),
+        slim_index.clone(),
+        Some(full_history_index.clone()),
         &last_commit,
         vec![],
         bloom_filter.clone(),
@@ -822,9 +1156,14 @@ pub fn publish_index<P: AsRef<Path>, Q: AsRef<Path>>(
         eprintln!();
         eprintln!("Published artifacts to: {}", output_dir.display());
         eprintln!(
-            "  - {} ({})",
+            "  - {} (slim, {})",
             INDEX_DB_NAME,
-            format_bytes(full_index.size_bytes)
+            format_bytes(slim_index.size_bytes)
+        );
+        eprintln!(
+            "  - {} (full history, {})",
+            INDEX_FULL_DB_NAME,
+            format_bytes(full_history_index.size_bytes)
         );
         eprintln!(
             "  - {} ({})",
@@ -840,6 +1179,120 @@ pub fn publish_index<P: AsRef<Path>, Q: AsRef<Path>>(
     }
 
     Ok(())
+}
+
+/// Generate a compressed slim index for distribution.
+fn generate_slim_index<P: AsRef<Path>, Q: AsRef<Path>>(
+    slim_db_path: P,
+    output_dir: Q,
+    url_prefix: Option<&str>,
+    show_progress: bool,
+    compression_level: i32,
+) -> Result<IndexFile> {
+    let slim_db_path = slim_db_path.as_ref();
+    let output_dir = output_dir.as_ref();
+    let compressed_path = output_dir.join(INDEX_DB_NAME);
+
+    let input_size = fs::metadata(slim_db_path)?.len();
+
+    // Compress the database with progress
+    compress_zstd_with_progress(
+        slim_db_path,
+        &compressed_path,
+        compression_level,
+        show_progress,
+    )?;
+
+    // Calculate hash of compressed file
+    let sha256 = file_sha256_with_progress(&compressed_path, false)?;
+    let size = fs::metadata(&compressed_path)?.len();
+
+    if show_progress {
+        let ratio = (size as f64 / input_size as f64) * 100.0;
+        eprintln!(
+            "  Compressed: {} → {} ({:.1}% of original)",
+            format_bytes(input_size),
+            format_bytes(size),
+            ratio
+        );
+    }
+
+    let url = match url_prefix {
+        Some(prefix) => format!("{}/{}", prefix.trim_end_matches('/'), INDEX_DB_NAME),
+        None => INDEX_DB_NAME.to_string(),
+    };
+
+    Ok(IndexFile {
+        url,
+        size_bytes: size,
+        sha256,
+    })
+}
+
+/// Generate a compressed full history index for distribution.
+fn generate_full_history_index<P: AsRef<Path>, Q: AsRef<Path>>(
+    db_path: P,
+    output_dir: Q,
+    url_prefix: Option<&str>,
+    show_progress: bool,
+    compression_level: i32,
+) -> Result<(IndexFile, String)> {
+    let db_path = db_path.as_ref();
+    let output_dir = output_dir.as_ref();
+
+    let compressed_path = output_dir.join(INDEX_FULL_DB_NAME);
+
+    // Get database info and update last_indexed_date to publish time
+    let db = Database::open(db_path)?;
+    let last_commit = db.get_meta("last_indexed_commit")?.unwrap_or_default();
+    // Set the indexed date to now (publish time) so it matches the manifest
+    db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
+    // Mark as full database variant
+    db.set_meta("db_variant", "full")?;
+    // Flush WAL to ensure the meta update is in the main DB file before compression
+    db.checkpoint()?;
+    let input_size = fs::metadata(db_path)?.len();
+
+    if show_progress {
+        eprintln!(
+            "  Compressing database ({}) with zstd level {}...",
+            format_bytes(input_size),
+            compression_level
+        );
+    }
+
+    // Compress the database with progress
+    compress_zstd_with_progress(db_path, &compressed_path, compression_level, show_progress)?;
+
+    // Calculate hash of compressed file
+    if show_progress {
+        eprintln!("  Calculating checksum...");
+    }
+    let sha256 = file_sha256_with_progress(&compressed_path, show_progress)?;
+    let size = fs::metadata(&compressed_path)?.len();
+
+    if show_progress {
+        let ratio = (size as f64 / input_size as f64) * 100.0;
+        eprintln!(
+            "  Compressed: {} → {} ({:.1}% of original)",
+            format_bytes(input_size),
+            format_bytes(size),
+            ratio
+        );
+    }
+
+    let url = match url_prefix {
+        Some(prefix) => format!("{}/{}", prefix.trim_end_matches('/'), INDEX_FULL_DB_NAME),
+        None => INDEX_FULL_DB_NAME.to_string(),
+    };
+
+    let index_file = IndexFile {
+        url,
+        size_bytes: size,
+        sha256,
+    };
+
+    Ok((index_file, last_commit))
 }
 
 /// Helper to quote a string for SQL (used by `generate_delta_pack`).
@@ -883,6 +1336,12 @@ mod tests {
                 homepage TEXT,
                 maintainers TEXT,
                 platforms TEXT,
+                source_path TEXT,
+                known_vulnerabilities TEXT,
+                store_path_x86_64_linux TEXT,
+                store_path_aarch64_linux TEXT,
+                store_path_x86_64_darwin TEXT,
+                store_path_aarch64_darwin TEXT,
                 UNIQUE(attribute_path, version, first_commit_hash)
             );
             CREATE INDEX idx_packages_name ON package_versions(name);
@@ -936,6 +1395,185 @@ mod tests {
     }
 
     #[test]
+    fn test_generate_slim_db() {
+        use rusqlite::Connection;
+
+        let dir = tempdir().unwrap();
+        let full_db_path = dir.path().join("full.db");
+        let slim_db_path = dir.path().join("slim.db");
+
+        // Create a test database with multiple rows for same (attr, version)
+        let conn = Connection::open(&full_db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE package_versions (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                version TEXT NOT NULL,
+                first_commit_hash TEXT NOT NULL,
+                first_commit_date INTEGER NOT NULL,
+                last_commit_hash TEXT NOT NULL,
+                last_commit_date INTEGER NOT NULL,
+                attribute_path TEXT NOT NULL,
+                description TEXT,
+                license TEXT,
+                homepage TEXT,
+                maintainers TEXT,
+                platforms TEXT,
+                source_path TEXT,
+                known_vulnerabilities TEXT,
+                store_path_x86_64_linux TEXT,
+                store_path_aarch64_linux TEXT,
+                store_path_x86_64_darwin TEXT,
+                store_path_aarch64_darwin TEXT,
+                UNIQUE(attribute_path, version, first_commit_hash)
+            );
+
+            INSERT INTO meta (key, value) VALUES ('last_indexed_commit', 'test123');
+
+            -- Multiple ranges for same (attr, version) - should be consolidated
+            INSERT INTO package_versions
+                (name, version, first_commit_hash, first_commit_date,
+                 last_commit_hash, last_commit_date, attribute_path, description)
+            VALUES
+                ('python', '3.11.0', 'aaa', 1000, 'bbb', 1100, 'python311', 'Python 3.11'),
+                ('python', '3.11.0', 'ccc', 1200, 'ddd', 1300, 'python311', 'Python 3.11 updated'),
+                ('python', '3.11.0', 'eee', 1400, 'fff', 1500, 'python311', 'Python 3.11 latest'),
+                -- Different version
+                ('python', '3.10.0', 'ggg', 900, 'hhh', 950, 'python310', 'Python 3.10'),
+                -- Different package
+                ('nodejs', '20.0.0', 'iii', 1000, 'jjj', 1100, 'nodejs_20', 'Node.js');
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        // Generate slim database
+        generate_slim_db(&full_db_path, &slim_db_path, false).unwrap();
+
+        // Verify slim database
+        let slim_conn = Connection::open(&slim_db_path).unwrap();
+
+        // Should have 3 rows (python311, python310, nodejs_20)
+        let count: i64 = slim_conn
+            .query_row("SELECT COUNT(*) FROM package_versions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            count, 3,
+            "Should consolidate to 3 unique (attr, version) pairs"
+        );
+
+        // Verify python311 was consolidated correctly
+        let (first_date, last_date, description): (i64, i64, String) = slim_conn
+            .query_row(
+                "SELECT first_commit_date, last_commit_date, description FROM package_versions WHERE attribute_path = 'python311'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+
+        assert_eq!(first_date, 1000, "first_commit_date should be MIN");
+        assert_eq!(last_date, 1500, "last_commit_date should be MAX");
+        assert_eq!(
+            description, "Python 3.11 latest",
+            "description should be from most recent row"
+        );
+
+        // Verify meta was copied
+        let commit: String = slim_conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'last_indexed_commit'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(commit, "test123");
+
+        // Verify db_variant was set
+        let variant: String = slim_conn
+            .query_row("SELECT value FROM meta WHERE key = 'db_variant'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(variant, "slim");
+    }
+
+    #[test]
+    fn test_generate_slim_db_preserves_unique_versions() {
+        use rusqlite::Connection;
+
+        let dir = tempdir().unwrap();
+        let full_db_path = dir.path().join("full.db");
+        let slim_db_path = dir.path().join("slim.db");
+
+        // Create database with same package, different versions
+        let conn = Connection::open(&full_db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE package_versions (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                version TEXT NOT NULL,
+                first_commit_hash TEXT NOT NULL,
+                first_commit_date INTEGER NOT NULL,
+                last_commit_hash TEXT NOT NULL,
+                last_commit_date INTEGER NOT NULL,
+                attribute_path TEXT NOT NULL,
+                description TEXT,
+                license TEXT,
+                homepage TEXT,
+                maintainers TEXT,
+                platforms TEXT,
+                source_path TEXT,
+                known_vulnerabilities TEXT,
+                store_path_x86_64_linux TEXT,
+                store_path_aarch64_linux TEXT,
+                store_path_x86_64_darwin TEXT,
+                store_path_aarch64_darwin TEXT,
+                UNIQUE(attribute_path, version, first_commit_hash)
+            );
+
+            INSERT INTO meta (key, value) VALUES ('last_indexed_commit', 'test');
+
+            -- Same attr_path, different versions - should ALL be preserved
+            INSERT INTO package_versions
+                (name, version, first_commit_hash, first_commit_date,
+                 last_commit_hash, last_commit_date, attribute_path)
+            VALUES
+                ('python', '3.9.0', 'a', 100, 'b', 200, 'python3'),
+                ('python', '3.10.0', 'c', 300, 'd', 400, 'python3'),
+                ('python', '3.11.0', 'e', 500, 'f', 600, 'python3'),
+                ('python', '3.12.0', 'g', 700, 'h', 800, 'python3');
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        generate_slim_db(&full_db_path, &slim_db_path, false).unwrap();
+
+        let slim_conn = Connection::open(&slim_db_path).unwrap();
+
+        // All 4 versions should be preserved
+        let count: i64 = slim_conn
+            .query_row("SELECT COUNT(*) FROM package_versions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 4, "All unique versions should be preserved");
+
+        // Verify each version exists
+        let versions: Vec<String> = slim_conn
+            .prepare("SELECT version FROM package_versions ORDER BY version")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(versions, vec!["3.10.0", "3.11.0", "3.12.0", "3.9.0"]);
+    }
+
+    #[test]
     fn test_generate_bloom_filter() {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("test.db");
@@ -976,7 +1614,15 @@ mod tests {
             size_bytes: 500,
         };
 
-        generate_manifest(output_dir, full_index, "latest123", vec![], bloom_filter).unwrap();
+        generate_manifest(
+            output_dir,
+            full_index,
+            None,
+            "latest123",
+            vec![],
+            bloom_filter,
+        )
+        .unwrap();
 
         let manifest_path = output_dir.join("manifest.json");
         assert!(manifest_path.exists());
@@ -1154,11 +1800,18 @@ mod tests {
 
         create_test_db(&db_path);
 
-        // Publish without signing
-        publish_index(&db_path, &output_dir, None, false, None).unwrap();
+        // Publish without signing (use low compression for fast tests)
+        publish_index(&db_path, &output_dir, None, false, None, 1).unwrap();
 
         // Verify all artifacts except signature
-        assert!(output_dir.join(INDEX_DB_NAME).exists());
+        assert!(
+            output_dir.join(INDEX_DB_NAME).exists(),
+            "slim index should exist"
+        );
+        assert!(
+            output_dir.join(INDEX_FULL_DB_NAME).exists(),
+            "full history index should exist"
+        );
         assert!(output_dir.join(BLOOM_FILTER_NAME).exists());
         assert!(output_dir.join(MANIFEST_NAME).exists());
         assert!(!output_dir.join(MANIFEST_SIG_NAME).exists());

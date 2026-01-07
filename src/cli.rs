@@ -371,6 +371,26 @@ pub struct IndexArgs {
     #[arg(long)]
     pub full: bool,
 
+    /// Build a slim index (one row per attr+version, no range tracking).
+    /// This is faster and produces a smaller database, but loses information
+    /// about when versions appeared/disappeared in non-contiguous ranges.
+    #[arg(long)]
+    pub slim: bool,
+
+    /// Sample commits at intervals instead of processing every commit.
+    /// Format: <number><unit> where unit is 'w' (weeks) or 'm' (months).
+    /// Examples: "1w" (weekly), "2w" (biweekly), "1m" (monthly).
+    /// Reduces accuracy but dramatically speeds up indexing.
+    #[arg(long, value_parser = parse_sample_interval)]
+    pub sample_interval: Option<std::time::Duration>,
+
+    /// Traverse commits in reverse order (newest to oldest).
+    /// Useful when modern nixpkgs evaluates more reliably than old commits.
+    /// With --sample-interval: captures all packages from HEAD, then finds historical dates.
+    /// With --since/--until: processes the date range in reverse chronological order.
+    #[arg(long)]
+    pub reverse: bool,
+
     /// Commits between checkpoints.
     #[arg(long, default_value_t = 100)]
     pub checkpoint_interval: usize,
@@ -417,6 +437,38 @@ pub struct IndexArgs {
     /// Internal flag for worker subprocess mode (hidden from help).
     #[arg(long, hide = true)]
     pub internal_worker: bool,
+}
+
+/// Parse a sample interval string like "1w", "2w", "1m" into a Duration.
+#[cfg(feature = "indexer")]
+fn parse_sample_interval(s: &str) -> std::result::Result<std::time::Duration, String> {
+    let s = s.trim().to_lowercase();
+    if s.is_empty() {
+        return Err("empty interval".to_string());
+    }
+
+    let (num_str, unit) = s.split_at(s.len() - 1);
+    let num: u64 = num_str
+        .parse()
+        .map_err(|_| format!("invalid number in interval: '{}'", num_str))?;
+
+    if num == 0 {
+        return Err("interval must be > 0".to_string());
+    }
+
+    let seconds = match unit {
+        "w" => num * 7 * 24 * 60 * 60,  // weeks
+        "m" => num * 30 * 24 * 60 * 60, // months (approx 30 days)
+        "d" => num * 24 * 60 * 60,      // days
+        _ => {
+            return Err(format!(
+                "unknown unit '{}'. Use 'd' (days), 'w' (weeks), or 'm' (months)",
+                unit
+            ));
+        }
+    };
+
+    Ok(std::time::Duration::from_secs(seconds))
 }
 
 /// Fields that can be backfilled from nixpkgs.
@@ -975,5 +1027,285 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("secret-key"));
+    }
+
+    #[cfg(feature = "indexer")]
+    #[test]
+    fn test_index_slim_flag() {
+        let args =
+            Cli::try_parse_from(["nxv", "index", "--nixpkgs-path", "./nixpkgs", "--slim"]).unwrap();
+        match args.command {
+            Commands::Index(index) => {
+                assert!(index.slim);
+            }
+            _ => panic!("Expected Index command"),
+        }
+    }
+
+    #[cfg(feature = "indexer")]
+    #[test]
+    fn test_index_sample_interval_weeks() {
+        let args = Cli::try_parse_from([
+            "nxv",
+            "index",
+            "--nixpkgs-path",
+            "./nixpkgs",
+            "--sample-interval",
+            "2w",
+        ])
+        .unwrap();
+        match args.command {
+            Commands::Index(index) => {
+                let interval = index.sample_interval.unwrap();
+                // 2 weeks = 2 * 7 * 24 * 60 * 60 = 1209600 seconds
+                assert_eq!(interval.as_secs(), 2 * 7 * 24 * 60 * 60);
+            }
+            _ => panic!("Expected Index command"),
+        }
+    }
+
+    #[cfg(feature = "indexer")]
+    #[test]
+    fn test_index_sample_interval_months() {
+        let args = Cli::try_parse_from([
+            "nxv",
+            "index",
+            "--nixpkgs-path",
+            "./nixpkgs",
+            "--sample-interval",
+            "1m",
+        ])
+        .unwrap();
+        match args.command {
+            Commands::Index(index) => {
+                let interval = index.sample_interval.unwrap();
+                // 1 month = 30 * 24 * 60 * 60 = 2592000 seconds
+                assert_eq!(interval.as_secs(), 30 * 24 * 60 * 60);
+            }
+            _ => panic!("Expected Index command"),
+        }
+    }
+
+    #[cfg(feature = "indexer")]
+    #[test]
+    fn test_index_sample_interval_days() {
+        let args = Cli::try_parse_from([
+            "nxv",
+            "index",
+            "--nixpkgs-path",
+            "./nixpkgs",
+            "--sample-interval",
+            "3d",
+        ])
+        .unwrap();
+        match args.command {
+            Commands::Index(index) => {
+                let interval = index.sample_interval.unwrap();
+                // 3 days = 3 * 24 * 60 * 60 = 259200 seconds
+                assert_eq!(interval.as_secs(), 3 * 24 * 60 * 60);
+            }
+            _ => panic!("Expected Index command"),
+        }
+    }
+
+    #[cfg(feature = "indexer")]
+    #[test]
+    fn test_index_sample_interval_invalid() {
+        // Invalid unit
+        let result = Cli::try_parse_from([
+            "nxv",
+            "index",
+            "--nixpkgs-path",
+            "./nixpkgs",
+            "--sample-interval",
+            "2x",
+        ]);
+        assert!(result.is_err());
+
+        // Zero interval
+        let result = Cli::try_parse_from([
+            "nxv",
+            "index",
+            "--nixpkgs-path",
+            "./nixpkgs",
+            "--sample-interval",
+            "0w",
+        ]);
+        assert!(result.is_err());
+
+        // Missing number
+        let result = Cli::try_parse_from([
+            "nxv",
+            "index",
+            "--nixpkgs-path",
+            "./nixpkgs",
+            "--sample-interval",
+            "w",
+        ]);
+        assert!(result.is_err());
+    }
+
+    #[cfg(feature = "indexer")]
+    #[test]
+    fn test_index_slim_and_sample_interval_combined() {
+        let args = Cli::try_parse_from([
+            "nxv",
+            "index",
+            "--nixpkgs-path",
+            "./nixpkgs",
+            "--slim",
+            "--sample-interval",
+            "2w",
+        ])
+        .unwrap();
+        match args.command {
+            Commands::Index(index) => {
+                assert!(index.slim);
+                assert!(index.sample_interval.is_some());
+                assert_eq!(
+                    index.sample_interval.unwrap().as_secs(),
+                    2 * 7 * 24 * 60 * 60
+                );
+            }
+            _ => panic!("Expected Index command"),
+        }
+    }
+
+    #[cfg(feature = "indexer")]
+    #[test]
+    fn test_parse_sample_interval_function() {
+        // Test the parse function directly
+        assert_eq!(
+            parse_sample_interval("1w").unwrap().as_secs(),
+            7 * 24 * 60 * 60
+        );
+        assert_eq!(
+            parse_sample_interval("2W").unwrap().as_secs(), // case insensitive
+            2 * 7 * 24 * 60 * 60
+        );
+        assert_eq!(
+            parse_sample_interval("1m").unwrap().as_secs(),
+            30 * 24 * 60 * 60
+        );
+        assert_eq!(
+            parse_sample_interval("7d").unwrap().as_secs(),
+            7 * 24 * 60 * 60
+        );
+
+        // Error cases
+        assert!(parse_sample_interval("").is_err());
+        assert!(parse_sample_interval("0w").is_err());
+        assert!(parse_sample_interval("abc").is_err());
+        assert!(parse_sample_interval("1x").is_err());
+    }
+
+    #[cfg(feature = "indexer")]
+    #[test]
+    fn test_index_reverse_flag() {
+        let args =
+            Cli::try_parse_from(["nxv", "index", "--nixpkgs-path", "./nixpkgs", "--reverse"])
+                .unwrap();
+        match args.command {
+            Commands::Index(index) => {
+                assert!(index.reverse);
+            }
+            _ => panic!("Expected Index command"),
+        }
+    }
+
+    #[cfg(feature = "indexer")]
+    #[test]
+    fn test_index_reverse_default_false() {
+        let args = Cli::try_parse_from(["nxv", "index", "--nixpkgs-path", "./nixpkgs"]).unwrap();
+        match args.command {
+            Commands::Index(index) => {
+                assert!(!index.reverse);
+            }
+            _ => panic!("Expected Index command"),
+        }
+    }
+
+    #[cfg(feature = "indexer")]
+    #[test]
+    fn test_index_reverse_with_sample_interval() {
+        let args = Cli::try_parse_from([
+            "nxv",
+            "index",
+            "--nixpkgs-path",
+            "./nixpkgs",
+            "--reverse",
+            "--sample-interval",
+            "2w",
+        ])
+        .unwrap();
+        match args.command {
+            Commands::Index(index) => {
+                assert!(index.reverse);
+                assert!(index.sample_interval.is_some());
+                assert_eq!(
+                    index.sample_interval.unwrap().as_secs(),
+                    2 * 7 * 24 * 60 * 60
+                );
+            }
+            _ => panic!("Expected Index command"),
+        }
+    }
+
+    #[cfg(feature = "indexer")]
+    #[test]
+    fn test_index_reverse_with_date_range() {
+        let args = Cli::try_parse_from([
+            "nxv",
+            "index",
+            "--nixpkgs-path",
+            "./nixpkgs",
+            "--reverse",
+            "--since",
+            "2020-01-01",
+            "--until",
+            "2024-01-01",
+        ])
+        .unwrap();
+        match args.command {
+            Commands::Index(index) => {
+                assert!(index.reverse);
+                assert_eq!(index.since.as_deref(), Some("2020-01-01"));
+                assert_eq!(index.until.as_deref(), Some("2024-01-01"));
+            }
+            _ => panic!("Expected Index command"),
+        }
+    }
+
+    #[cfg(feature = "indexer")]
+    #[test]
+    fn test_index_all_options_combined() {
+        let args = Cli::try_parse_from([
+            "nxv",
+            "index",
+            "--nixpkgs-path",
+            "./nixpkgs",
+            "--slim",
+            "--reverse",
+            "--sample-interval",
+            "1w",
+            "--since",
+            "2023-01-01",
+            "--until",
+            "2024-01-01",
+            "--workers",
+            "4",
+        ])
+        .unwrap();
+        match args.command {
+            Commands::Index(index) => {
+                assert!(index.slim);
+                assert!(index.reverse);
+                assert!(index.sample_interval.is_some());
+                assert_eq!(index.since.as_deref(), Some("2023-01-01"));
+                assert_eq!(index.until.as_deref(), Some("2024-01-01"));
+                assert_eq!(index.workers, Some(4));
+            }
+            _ => panic!("Expected Index command"),
+        }
     }
 }

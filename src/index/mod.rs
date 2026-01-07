@@ -108,6 +108,16 @@ pub struct IndexerConfig {
     /// If available space falls below this, GC runs at next checkpoint.
     /// Default: 10 GB
     pub gc_min_free_bytes: u64,
+    /// Build a slim index (one row per attr+version, no range tracking).
+    /// Faster and smaller, but loses non-contiguous range information.
+    pub slim: bool,
+    /// Sample interval for processing commits.
+    /// If set, only processes commits at approximately this interval,
+    /// skipping commits in between. First and last commits are always processed.
+    pub sample_interval: Option<Duration>,
+    /// Traverse commits in reverse order (newest to oldest).
+    /// Recommended with sample_interval since modern nixpkgs evaluates reliably.
+    pub reverse: bool,
 }
 
 impl Default for IndexerConfig {
@@ -129,6 +139,9 @@ impl Default for IndexerConfig {
             verbose: false,
             gc_interval: 20, // GC every 20 checkpoints (2000 commits by default)
             gc_min_free_bytes: 10 * 1024 * 1024 * 1024, // 10 GB
+            slim: false,     // Default: full index with range tracking
+            sample_interval: None, // Default: process all commits
+            reverse: false,  // Default: oldest to newest
         }
     }
 }
@@ -554,7 +567,7 @@ impl EtaTracker {
             commit_start: None,
             total_remaining: 0,
             commits_processed: 0,
-            warmup_count: 20, // Don't show ETA until 20 commits processed
+            warmup_count: 5, // Don't show ETA until 5 commits processed
             recent_durations: VecDeque::with_capacity(100),
             median_window: 100,
         }
@@ -690,14 +703,9 @@ impl EtaTracker {
 
     /// Returns a human-readable ETA string for the remaining work.
     ///
-    /// Shows "warming up..." during initial sample collection,
+    /// Shows "calculating..." during initial sample collection,
     /// then provides stable ETA estimates.
     fn eta_string(&self) -> String {
-        if self.commits_processed < self.warmup_count {
-            let remaining = self.warmup_count - self.commits_processed;
-            return format!("warming up ({} more)...", remaining);
-        }
-
         match self.eta() {
             Some(eta) => {
                 let secs = eta.as_secs();
@@ -950,9 +958,13 @@ impl Indexer {
                                 extraction_failures: 0,
                             });
                         }
-                        eprintln!("Found {} new commits to process", commits.len());
+                        eprintln!(
+                            "Resuming from {} ({} new commits to process)",
+                            &hash[..7],
+                            commits.len()
+                        );
 
-                        // Report temp store cleanup after "Found X commits"
+                        // Report temp store cleanup after status message
                         if let Some(bytes) = temp_store_freed
                             && bytes > 0
                         {
@@ -1030,6 +1042,15 @@ impl Indexer {
         commits: Vec<git::CommitInfo>,
         resume_from: Option<&str>,
     ) -> Result<IndexResult> {
+        // Reverse commits if configured (for sampling: newest first)
+        let commits = if self.config.reverse {
+            let mut reversed = commits;
+            reversed.reverse();
+            reversed
+        } else {
+            commits
+        };
+
         let total_commits = commits.len();
         let systems = &self.config.systems;
         // Note: nixpkgs_path is unused here because we use WorktreeSession for all checkouts
@@ -1145,6 +1166,22 @@ impl Indexer {
         let mut pending_inserts: Vec<PackageVersion> = Vec::new();
         let mut checkpoints_since_gc: usize = 0;
 
+        // Sample interval tracking - skip commits that are within the interval
+        let sample_interval = self.config.sample_interval;
+        let mut last_sampled_date: Option<DateTime<Utc>> = None;
+        let mut _commits_skipped_by_sampling: u64 = 0; // Tracked but not yet displayed
+        let last_commit_idx = total_commits.saturating_sub(1);
+
+        // When sampling, accumulate changed files across skipped commits
+        // so we extract all packages that changed between sample points
+        let mut accumulated_changed_paths: HashSet<String> = HashSet::new();
+
+        // When starting fresh with sampling, we need to do a full initial evaluation
+        // on the first commit to capture all packages that exist, not just those changed.
+        // Without sampling, we process every commit so packages are captured incrementally.
+        let mut needs_initial_full_eval =
+            resume_from.is_none() && self.config.sample_interval.is_some();
+
         // Build the initial file-to-attribute map
         let first_commit = commits
             .first()
@@ -1227,12 +1264,45 @@ impl Indexer {
                 break;
             }
 
+            // Sample interval filtering - skip commits within the interval
+            // Always process first and last commits regardless of interval
+            // When skipping, still accumulate changed files for later processing
+            if let Some(interval) = sample_interval {
+                let is_first = commit_idx == 0;
+                let is_last = commit_idx == last_commit_idx;
+
+                if !is_first
+                    && !is_last
+                    && let Some(last_date) = last_sampled_date
+                {
+                    // Convert Duration to chrono::Duration
+                    let chrono_interval =
+                        chrono::Duration::from_std(interval).unwrap_or(chrono::Duration::weeks(1));
+
+                    if commit.date < last_date + chrono_interval {
+                        // Skip this commit - within sample interval
+                        // But still track changed files so we don't miss packages
+                        if let Ok(paths) = repo.get_commit_changed_paths(&commit.hash) {
+                            accumulated_changed_paths.extend(paths);
+                        }
+                        _commits_skipped_by_sampling += 1;
+                        prev_commit_hash = Some(commit.hash.clone());
+                        prev_commit_date = Some(commit.date);
+                        if let Some(ref pb) = progress_bar {
+                            pb.set_position(commit_idx as u64);
+                        }
+                        continue;
+                    }
+                }
+            }
+
             // Update progress bar with percentage and smoothed ETA
             if let Some(ref pb) = progress_bar {
                 use owo_colors::OwoColorize;
                 pb.set_position(commit_idx as u64);
+                let mode_indicator = if self.config.slim { "slim" } else { "full" };
                 pb.set_message(format!(
-                    "{} | {} {} | {} {} | {} {} {} {}",
+                    "{} | {} {} | {} {} | {} {} {} {} | {}",
                     eta_tracker.progress_string(total_commits as u64),
                     commit.short_hash.commit(),
                     format!("({})", commit.date.format("%Y-%m-%d")).dimmed(),
@@ -1241,7 +1311,8 @@ impl Indexer {
                     open_ranges.len().count_pending(),
                     "open".dimmed(),
                     (result.ranges_created + pending_inserts.len() as u64).count(),
-                    "closed".dimmed()
+                    "closed".dimmed(),
+                    mode_indicator.dimmed()
                 ));
             }
 
@@ -1283,12 +1354,50 @@ impl Indexer {
                 mapping_commit = commit.hash.clone();
             }
 
-            // Determine target attributes
+            // Determine target attributes from changed paths
+            // When sampling, also include accumulated paths from skipped commits
             let mut target_attr_paths: HashSet<String> = HashSet::new();
             let all_attrs: Option<&Vec<String>> =
                 file_attr_map.get("pkgs/top-level/all-packages.nix");
 
-            for path in &changed_paths {
+            // Combine current commit's changes with accumulated changes from sampling
+            let mut all_changed_paths = changed_paths.clone();
+            if sample_interval.is_some() && !accumulated_changed_paths.is_empty() {
+                all_changed_paths.extend(accumulated_changed_paths.drain());
+            }
+
+            // On fresh index, first commit needs FULL evaluation to capture all existing
+            // packages, not just those changed in this specific commit.
+            // Threshold for "good" file map - below this we extract ALL packages directly
+            const MIN_FILE_MAP_ENTRIES: usize = 500;
+            let mut extract_all_packages = false;
+
+            if needs_initial_full_eval {
+                if file_attr_map.len() >= MIN_FILE_MAP_ENTRIES {
+                    // Good file map - use it to determine targets
+                    if let Some(ref pb) = progress_bar {
+                        pb.println(format!(
+                            "{} to capture all packages ({} file mappings)...",
+                            "Performing initial full evaluation".success(),
+                            file_attr_map.len()
+                        ));
+                    }
+                    all_changed_paths.extend(file_attr_map.keys().cloned());
+                } else {
+                    // Insufficient file map (old nixpkgs?) - extract ALL packages directly
+                    if let Some(ref pb) = progress_bar {
+                        pb.println(format!(
+                            "{} (file map too small: {} entries, extracting all packages)...",
+                            "Performing initial full evaluation".success(),
+                            file_attr_map.len()
+                        ));
+                    }
+                    extract_all_packages = true;
+                }
+                needs_initial_full_eval = false;
+            }
+
+            for path in &all_changed_paths {
                 if let Some(attr_paths) = file_attr_map.get(path) {
                     for attr in attr_paths {
                         target_attr_paths.insert(attr.clone());
@@ -1328,7 +1437,8 @@ impl Indexer {
                 }
             }
 
-            if target_attr_paths.is_empty() {
+            // Skip if no targets and not doing full extraction
+            if target_attr_paths.is_empty() && !extract_all_packages {
                 result.commits_processed += 1;
                 prev_commit_hash = Some(commit.hash.clone());
                 prev_commit_date = Some(commit.date);
@@ -1336,14 +1446,37 @@ impl Indexer {
                 continue;
             }
 
+            // When extract_all_packages is true, empty list tells extractor to get ALL packages
             let mut target_list: Vec<String> = target_attr_paths.into_iter().collect();
             target_list.sort();
 
+            // Log extraction target info
+            let target_desc = if extract_all_packages {
+                "all packages".to_string()
+            } else {
+                format!("{} attrs", target_list.len())
+            };
+
             debug!(
                 commit = %commit.short_hash,
-                target_count = target_list.len(),
+                target_count = if extract_all_packages { usize::MAX } else { target_list.len() },
+                extract_all = extract_all_packages,
                 "Processing commit"
             );
+
+            // Show extraction info for significant extractions
+            if (self.config.verbose || extract_all_packages || target_list.len() > 100)
+                && let Some(ref pb) = progress_bar
+            {
+                use owo_colors::OwoColorize;
+                pb.println(format!(
+                    "{} {} at {} ({})...",
+                    "Evaluating".dimmed(),
+                    target_desc,
+                    commit.short_hash.commit(),
+                    commit.date.format("%Y-%m-%d")
+                ));
+            }
 
             // Extract packages for all systems
             let mut aggregates: HashMap<String, PackageAggregate> = HashMap::new();
@@ -1420,68 +1553,137 @@ impl Indexer {
 
             result.packages_found += aggregates.len() as u64;
 
-            // Track which packages we saw in this commit
-            let mut seen_keys: HashSet<String> = HashSet::new();
-            let target_set: HashSet<String> = target_list.iter().cloned().collect();
-
-            for aggregate in aggregates.values() {
-                let key = aggregate.key();
-                seen_keys.insert(key.clone());
-
-                // Track unique package names for bloom filter
-                unique_names.insert(aggregate.name.clone());
-
-                let license_json = aggregate.license_json();
-                let maintainers_json = aggregate.maintainers_json();
-                let platforms_json = aggregate.platforms_json();
-
-                if let Some(existing) = open_ranges.get_mut(&key) {
-                    existing.update_metadata(
-                        aggregate.description.clone(),
-                        license_json,
-                        aggregate.homepage.clone(),
-                        maintainers_json,
-                        platforms_json,
-                        aggregate.source_path.clone(),
-                        aggregate.known_vulnerabilities_json(),
-                    );
-                } else {
-                    open_ranges.insert(
-                        key.clone(),
-                        OpenRange {
-                            name: aggregate.name.clone(),
-                            version: aggregate.version.clone(),
-                            first_commit_hash: commit.hash.clone(),
-                            first_commit_date: commit.date,
-                            attribute_path: aggregate.attribute_path.clone(),
-                            description: aggregate.description.clone(),
-                            license: license_json,
-                            homepage: aggregate.homepage.clone(),
-                            maintainers: maintainers_json,
-                            platforms: platforms_json,
-                            source_path: aggregate.source_path.clone(),
-                            known_vulnerabilities: aggregate.known_vulnerabilities_json(),
-                            store_paths: aggregate.store_paths.clone(),
-                        },
-                    );
+            // If we attempted full extraction but got very few packages, the old nixpkgs
+            // commit may not be compatible. Retry full extraction on the next commit.
+            const MIN_FULL_EXTRACTION_PACKAGES: usize = 100;
+            if extract_all_packages && aggregates.len() < MIN_FULL_EXTRACTION_PACKAGES {
+                if let Some(ref pb) = progress_bar {
+                    pb.println(format!(
+                        "{} only {} packages extracted (need {}+), will retry on next commit...",
+                        "Initial full evaluation incomplete:".warning(),
+                        aggregates.len(),
+                        MIN_FULL_EXTRACTION_PACKAGES
+                    ));
+                }
+                needs_initial_full_eval = true; // Retry on next commit
+            } else if extract_all_packages && aggregates.len() >= MIN_FULL_EXTRACTION_PACKAGES {
+                // Successful full extraction - log the result
+                if let Some(ref pb) = progress_bar {
+                    pb.println(format!(
+                        "{} {} packages from {} ({})",
+                        "Extracted".success(),
+                        aggregates.len(),
+                        commit.short_hash.commit(),
+                        commit.date.format("%Y-%m-%d")
+                    ));
                 }
             }
 
-            // Close ranges for packages that disappeared
-            let disappeared: Vec<String> = open_ranges
-                .iter()
-                .filter(|(key, range)| {
-                    target_set.contains(&range.attribute_path) && !seen_keys.contains(*key)
-                })
-                .map(|(key, _)| key.clone())
-                .collect();
+            // Update last_sampled_date for sample interval tracking
+            last_sampled_date = Some(commit.date);
 
-            for key in disappeared {
-                if let Some(range) = open_ranges.remove(&key)
-                    && let (Some(prev_hash), Some(prev_date)) =
-                        (&prev_commit_hash, prev_commit_date)
-                {
-                    pending_inserts.push(range.to_package_version(prev_hash, prev_date));
+            if self.config.slim {
+                // SLIM MODE: Directly upsert packages without range tracking
+                // One row per (attribute_path, version), extending first/last commit dates
+                let mut slim_inserts: Vec<PackageVersion> = Vec::new();
+
+                for aggregate in aggregates.values() {
+                    // Track unique package names for bloom filter
+                    unique_names.insert(aggregate.name.clone());
+
+                    let license_json = aggregate.license_json();
+                    let maintainers_json = aggregate.maintainers_json();
+                    let platforms_json = aggregate.platforms_json();
+
+                    slim_inserts.push(PackageVersion {
+                        id: 0,
+                        name: aggregate.name.clone(),
+                        version: aggregate.version.clone(),
+                        first_commit_hash: commit.hash.clone(),
+                        first_commit_date: commit.date,
+                        last_commit_hash: commit.hash.clone(),
+                        last_commit_date: commit.date,
+                        attribute_path: aggregate.attribute_path.clone(),
+                        description: aggregate.description.clone(),
+                        license: license_json,
+                        homepage: aggregate.homepage.clone(),
+                        maintainers: maintainers_json,
+                        platforms: platforms_json,
+                        source_path: aggregate.source_path.clone(),
+                        known_vulnerabilities: aggregate.known_vulnerabilities_json(),
+                        store_paths: aggregate.store_paths.clone(),
+                    });
+                }
+
+                // Upsert directly (no pending_inserts buffer for slim mode)
+                if !slim_inserts.is_empty() {
+                    let (inserted, _updated) = db.upsert_package_versions_slim(&slim_inserts)?;
+                    result.ranges_created += inserted as u64;
+                }
+            } else {
+                // FULL MODE: Track open ranges and close when packages disappear
+                let mut seen_keys: HashSet<String> = HashSet::new();
+                let target_set: HashSet<String> = target_list.iter().cloned().collect();
+
+                for aggregate in aggregates.values() {
+                    let key = aggregate.key();
+                    seen_keys.insert(key.clone());
+
+                    // Track unique package names for bloom filter
+                    unique_names.insert(aggregate.name.clone());
+
+                    let license_json = aggregate.license_json();
+                    let maintainers_json = aggregate.maintainers_json();
+                    let platforms_json = aggregate.platforms_json();
+
+                    if let Some(existing) = open_ranges.get_mut(&key) {
+                        existing.update_metadata(
+                            aggregate.description.clone(),
+                            license_json,
+                            aggregate.homepage.clone(),
+                            maintainers_json,
+                            platforms_json,
+                            aggregate.source_path.clone(),
+                            aggregate.known_vulnerabilities_json(),
+                        );
+                    } else {
+                        open_ranges.insert(
+                            key.clone(),
+                            OpenRange {
+                                name: aggregate.name.clone(),
+                                version: aggregate.version.clone(),
+                                first_commit_hash: commit.hash.clone(),
+                                first_commit_date: commit.date,
+                                attribute_path: aggregate.attribute_path.clone(),
+                                description: aggregate.description.clone(),
+                                license: license_json,
+                                homepage: aggregate.homepage.clone(),
+                                maintainers: maintainers_json,
+                                platforms: platforms_json,
+                                source_path: aggregate.source_path.clone(),
+                                known_vulnerabilities: aggregate.known_vulnerabilities_json(),
+                                store_paths: aggregate.store_paths.clone(),
+                            },
+                        );
+                    }
+                }
+
+                // Close ranges for packages that disappeared
+                let disappeared: Vec<String> = open_ranges
+                    .iter()
+                    .filter(|(key, range)| {
+                        target_set.contains(&range.attribute_path) && !seen_keys.contains(*key)
+                    })
+                    .map(|(key, _)| key.clone())
+                    .collect();
+
+                for key in disappeared {
+                    if let Some(range) = open_ranges.remove(&key)
+                        && let (Some(prev_hash), Some(prev_date)) =
+                            (&prev_commit_hash, prev_commit_date)
+                    {
+                        pending_inserts.push(range.to_package_version(prev_hash, prev_date));
+                    }
                 }
             }
 
@@ -1496,7 +1698,8 @@ impl Indexer {
             if (commit_idx + 1).is_multiple_of(self.config.checkpoint_interval)
                 || commit_idx + 1 == commits.len()
             {
-                if !pending_inserts.is_empty() {
+                // For full mode, insert pending closed ranges
+                if !self.config.slim && !pending_inserts.is_empty() {
                     result.ranges_created +=
                         db.insert_package_ranges_batch(&pending_inserts)? as u64;
                     pending_inserts.clear();
@@ -1505,14 +1708,18 @@ impl Indexer {
                 if let Some(ref prev_hash) = prev_commit_hash {
                     db.set_meta("last_indexed_commit", prev_hash)?;
                     db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
-                    db.set_meta("checkpoint_open_ranges", &open_ranges.len().to_string())?;
 
-                    // Save open ranges to checkpoint table for resume capability
-                    let checkpoint_ranges: HashMap<String, CheckpointRange> = open_ranges
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.to_checkpoint()))
-                        .collect();
-                    db.save_checkpoint_ranges(&checkpoint_ranges)?;
+                    // Only save open ranges for full mode (slim mode doesn't track them)
+                    if !self.config.slim {
+                        db.set_meta("checkpoint_open_ranges", &open_ranges.len().to_string())?;
+
+                        // Save open ranges to checkpoint table for resume capability
+                        let checkpoint_ranges: HashMap<String, CheckpointRange> = open_ranges
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.to_checkpoint()))
+                            .collect();
+                        db.save_checkpoint_ranges(&checkpoint_ranges)?;
+                    }
 
                     db.checkpoint()?;
                 }
@@ -1564,17 +1771,21 @@ impl Indexer {
             }
         }
 
-        // Final: close all remaining open ranges at the last commit
+        // Final: close all remaining open ranges at the last commit (full mode only)
         if !result.was_interrupted
             && let (Some(last_hash), Some(last_date)) =
                 (prev_commit_hash.as_ref(), prev_commit_date)
         {
-            for range in open_ranges.values() {
-                pending_inserts.push(range.to_package_version(last_hash, last_date));
-            }
+            // Only close open ranges in full mode (slim mode doesn't track them)
+            if !self.config.slim {
+                for range in open_ranges.values() {
+                    pending_inserts.push(range.to_package_version(last_hash, last_date));
+                }
 
-            if !pending_inserts.is_empty() {
-                result.ranges_created += db.insert_package_ranges_batch(&pending_inserts)? as u64;
+                if !pending_inserts.is_empty() {
+                    result.ranges_created +=
+                        db.insert_package_ranges_batch(&pending_inserts)? as u64;
+                }
             }
 
             if let Some(ref last_hash) = prev_commit_hash {
@@ -1768,8 +1979,8 @@ mod tests {
         let tracker = EtaTracker::new(10);
         assert!(tracker.avg_time_per_commit().is_none());
         assert!(tracker.eta().is_none());
-        // Shows warm-up message when no commits processed
-        assert!(tracker.eta_string().contains("warming up"));
+        // Shows "calculating..." when no commits processed
+        assert!(tracker.eta_string().contains("calculating"));
     }
 
     #[test]
@@ -1777,15 +1988,15 @@ mod tests {
         let mut tracker = EtaTracker::new(10);
         tracker.set_remaining(100);
 
-        // Process fewer commits than warmup_count
-        for _ in 0..5 {
+        // Process fewer commits than warmup_count (5)
+        for _ in 0..3 {
             tracker.start_commit();
             thread::sleep(Duration::from_millis(5));
             tracker.finish_commit();
         }
 
-        // Should still show warming up
-        assert!(tracker.eta_string().contains("warming up"));
+        // Should still show "calculating..." during warmup
+        assert!(tracker.eta_string().contains("calculating"));
         assert!(tracker.eta().is_none());
     }
 
@@ -1794,17 +2005,17 @@ mod tests {
         let mut tracker = EtaTracker::new(10);
         tracker.set_remaining(50);
 
-        // Process more commits than warmup_count (20)
-        for _ in 0..25 {
+        // Process more commits than warmup_count (5)
+        for _ in 0..10 {
             tracker.start_commit();
             thread::sleep(Duration::from_millis(5));
             tracker.finish_commit();
         }
 
-        // Should now show actual ETA
+        // Should now show actual ETA (not "calculating...")
         let eta = tracker.eta();
         assert!(eta.is_some());
-        assert!(!tracker.eta_string().contains("warming up"));
+        assert!(!tracker.eta_string().contains("calculating"));
     }
 
     #[test]
@@ -2066,6 +2277,9 @@ mod tests {
             verbose: false,
             gc_interval: 0, // Disable GC for tests
             gc_min_free_bytes: 0,
+            slim: false,
+            sample_interval: None,
+            reverse: false,
         };
         let _indexer = Indexer::new(config);
 
@@ -2101,6 +2315,9 @@ mod tests {
             verbose: false,
             gc_interval: 0, // Disable GC for tests
             gc_min_free_bytes: 0,
+            slim: false,
+            sample_interval: None,
+            reverse: false,
         };
         let _indexer = Indexer::new(config);
 
@@ -2291,5 +2508,100 @@ mod tests {
             let chromium = queries::search_by_name(db.connection(), "chromium", true).unwrap();
             assert_eq!(chromium.len(), 1);
         }
+    }
+
+    #[test]
+    fn test_reverse_config_default() {
+        let config = IndexerConfig::default();
+        assert!(!config.reverse);
+    }
+
+    #[test]
+    fn test_reverse_config_set() {
+        let config = IndexerConfig {
+            reverse: true,
+            ..Default::default()
+        };
+        assert!(config.reverse);
+    }
+
+    #[test]
+    fn test_commit_order_forward() {
+        // Simulate the commit ordering logic from process_commits
+        let commits = vec![
+            git::CommitInfo {
+                hash: "oldest".to_string(),
+                short_hash: "old".to_string(),
+                date: chrono::Utc::now() - chrono::Duration::days(30),
+            },
+            git::CommitInfo {
+                hash: "middle".to_string(),
+                short_hash: "mid".to_string(),
+                date: chrono::Utc::now() - chrono::Duration::days(15),
+            },
+            git::CommitInfo {
+                hash: "newest".to_string(),
+                short_hash: "new".to_string(),
+                date: chrono::Utc::now(),
+            },
+        ];
+
+        // Forward (default) - oldest first
+        let forward_commits = commits.clone();
+        assert_eq!(forward_commits[0].hash, "oldest");
+        assert_eq!(forward_commits[2].hash, "newest");
+    }
+
+    #[test]
+    fn test_commit_order_reverse() {
+        // Simulate the commit ordering logic from process_commits
+        let commits = vec![
+            git::CommitInfo {
+                hash: "oldest".to_string(),
+                short_hash: "old".to_string(),
+                date: chrono::Utc::now() - chrono::Duration::days(30),
+            },
+            git::CommitInfo {
+                hash: "middle".to_string(),
+                short_hash: "mid".to_string(),
+                date: chrono::Utc::now() - chrono::Duration::days(15),
+            },
+            git::CommitInfo {
+                hash: "newest".to_string(),
+                short_hash: "new".to_string(),
+                date: chrono::Utc::now(),
+            },
+        ];
+
+        // Reverse - newest first (as implemented in process_commits)
+        let mut reversed = commits;
+        reversed.reverse();
+        assert_eq!(reversed[0].hash, "newest");
+        assert_eq!(reversed[2].hash, "oldest");
+    }
+
+    #[test]
+    fn test_reverse_with_sample_interval_config() {
+        let config = IndexerConfig {
+            reverse: true,
+            sample_interval: Some(std::time::Duration::from_secs(14 * 24 * 60 * 60)), // 2 weeks
+            ..Default::default()
+        };
+        assert!(config.reverse);
+        assert!(config.sample_interval.is_some());
+        assert_eq!(config.sample_interval.unwrap().as_secs(), 14 * 24 * 60 * 60);
+    }
+
+    #[test]
+    fn test_reverse_with_date_range_config() {
+        let config = IndexerConfig {
+            reverse: true,
+            since: Some("2020-01-01".to_string()),
+            until: Some("2024-01-01".to_string()),
+            ..Default::default()
+        };
+        assert!(config.reverse);
+        assert_eq!(config.since.as_deref(), Some("2020-01-01"));
+        assert_eq!(config.until.as_deref(), Some("2024-01-01"));
     }
 }

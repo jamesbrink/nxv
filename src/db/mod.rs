@@ -625,6 +625,135 @@ impl Database {
         Ok(inserted)
     }
 
+    /// Upserts multiple package version records for slim indexing mode.
+    ///
+    /// For each package, this either:
+    /// - Inserts a new row if (attribute_path, version) doesn't exist
+    /// - Updates the existing row to extend the range if it does exist
+    ///
+    /// This method is used in slim mode where we want one row per (attr, version)
+    /// instead of tracking full version ranges.
+    ///
+    /// # Returns
+    ///
+    /// A tuple of (inserted, updated) counts.
+    #[cfg(feature = "indexer")]
+    #[instrument(skip(self, packages), fields(batch_size = packages.len()))]
+    pub fn upsert_package_versions_slim(
+        &mut self,
+        packages: &[PackageVersion],
+    ) -> Result<(usize, usize)> {
+        let tx = self.conn.transaction()?;
+        let mut inserted = 0;
+        let mut updated = 0;
+
+        {
+            // First, try to update existing rows (matching on attribute_path + version only)
+            let mut update_stmt = tx.prepare_cached(
+                r#"
+                UPDATE package_versions SET
+                    -- Extend last_commit if this commit is newer
+                    last_commit_hash = CASE
+                        WHEN ?1 > last_commit_date THEN ?2 ELSE last_commit_hash
+                    END,
+                    last_commit_date = CASE
+                        WHEN ?1 > last_commit_date THEN ?1 ELSE last_commit_date
+                    END,
+                    -- Extend first_commit if this commit is older
+                    first_commit_hash = CASE
+                        WHEN ?3 < first_commit_date THEN ?4 ELSE first_commit_hash
+                    END,
+                    first_commit_date = CASE
+                        WHEN ?3 < first_commit_date THEN ?3 ELSE first_commit_date
+                    END,
+                    -- Update metadata (prefer non-null values)
+                    description = COALESCE(?5, description),
+                    license = COALESCE(?6, license),
+                    homepage = COALESCE(?7, homepage),
+                    maintainers = COALESCE(?8, maintainers),
+                    platforms = COALESCE(?9, platforms),
+                    source_path = COALESCE(?10, source_path),
+                    known_vulnerabilities = COALESCE(?11, known_vulnerabilities),
+                    store_path_x86_64_linux = COALESCE(?12, store_path_x86_64_linux),
+                    store_path_aarch64_linux = COALESCE(?13, store_path_aarch64_linux),
+                    store_path_x86_64_darwin = COALESCE(?14, store_path_x86_64_darwin),
+                    store_path_aarch64_darwin = COALESCE(?15, store_path_aarch64_darwin)
+                WHERE attribute_path = ?16 AND version = ?17
+                "#,
+            )?;
+
+            let mut insert_stmt = tx.prepare_cached(
+                r#"
+                INSERT INTO package_versions
+                    (name, version, first_commit_hash, first_commit_date,
+                     last_commit_hash, last_commit_date, attribute_path,
+                     description, license, homepage, maintainers, platforms, source_path,
+                     known_vulnerabilities,
+                     store_path_x86_64_linux, store_path_aarch64_linux,
+                     store_path_x86_64_darwin, store_path_aarch64_darwin)
+                SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM package_versions
+                    WHERE attribute_path = ?7 AND version = ?2
+                )
+                "#,
+            )?;
+
+            for pkg in packages {
+                // Try update first
+                let update_changes = update_stmt.execute(rusqlite::params![
+                    pkg.last_commit_date.timestamp(),      // ?1
+                    pkg.last_commit_hash,                  // ?2
+                    pkg.first_commit_date.timestamp(),     // ?3
+                    pkg.first_commit_hash,                 // ?4
+                    pkg.description,                       // ?5
+                    pkg.license,                           // ?6
+                    pkg.homepage,                          // ?7
+                    pkg.maintainers,                       // ?8
+                    pkg.platforms,                         // ?9
+                    pkg.source_path,                       // ?10
+                    pkg.known_vulnerabilities,             // ?11
+                    pkg.store_paths.get("x86_64-linux"),   // ?12
+                    pkg.store_paths.get("aarch64-linux"),  // ?13
+                    pkg.store_paths.get("x86_64-darwin"),  // ?14
+                    pkg.store_paths.get("aarch64-darwin"), // ?15
+                    pkg.attribute_path,                    // ?16
+                    pkg.version,                           // ?17
+                ])?;
+
+                if update_changes > 0 {
+                    updated += update_changes;
+                } else {
+                    // No existing row, insert new one
+                    let insert_changes = insert_stmt.execute(rusqlite::params![
+                        pkg.name,
+                        pkg.version,
+                        pkg.first_commit_hash,
+                        pkg.first_commit_date.timestamp(),
+                        pkg.last_commit_hash,
+                        pkg.last_commit_date.timestamp(),
+                        pkg.attribute_path,
+                        pkg.description,
+                        pkg.license,
+                        pkg.homepage,
+                        pkg.maintainers,
+                        pkg.platforms,
+                        pkg.source_path,
+                        pkg.known_vulnerabilities,
+                        pkg.store_paths.get("x86_64-linux"),
+                        pkg.store_paths.get("aarch64-linux"),
+                        pkg.store_paths.get("x86_64-darwin"),
+                        pkg.store_paths.get("aarch64-darwin"),
+                    ])?;
+                    inserted += insert_changes;
+                }
+            }
+        }
+
+        tx.commit()?;
+        Ok((inserted, updated))
+    }
+
     /// Save checkpoint open ranges to the database.
     ///
     /// This persists the current open ranges so they can be restored on resume.

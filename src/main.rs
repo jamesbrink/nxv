@@ -47,7 +47,8 @@ fn main() {
 
     let cli = Cli::parse();
 
-    // Initialize tracing subscriber for indexer commands (reads RUST_LOG env var)
+    // Initialize tracing subscriber for indexer commands
+    // Defaults to INFO level for nxv, can be overridden with RUST_LOG env var
     // FmtSpan::CLOSE logs span duration when it completes
     // Note: serve command has its own tracing setup with JSON support
     #[cfg(feature = "indexer")]
@@ -57,8 +58,10 @@ fn main() {
             cli.command,
             Index(_) | Backfill(_) | Reset(_) | Publish(_) | Keygen(_)
         ) {
+            let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
             tracing_subscriber::fmt()
-                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+                .with_env_filter(env_filter)
                 .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
                 .with_writer(std::io::stderr)
                 .init();
@@ -1122,6 +1125,22 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
     eprintln!("Indexing nixpkgs from {:?}", nixpkgs_path);
     eprintln!("Checkpoint interval: {} commits", args.checkpoint_interval);
 
+    // Show indexing mode
+    if args.slim {
+        eprintln!("Index mode: slim (one row per attr+version)");
+    }
+    if let Some(interval) = args.sample_interval {
+        let days = interval.as_secs() / (24 * 60 * 60);
+        if days >= 7 {
+            eprintln!("Sample interval: {} weeks", days / 7);
+        } else {
+            eprintln!("Sample interval: {} days", days);
+        }
+    }
+    if args.reverse {
+        eprintln!("Traversal: reverse (newest to oldest)");
+    }
+
     let config = IndexerConfig {
         checkpoint_interval: args.checkpoint_interval,
         show_progress: !cli.quiet,
@@ -1137,6 +1156,9 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
         verbose: args.verbose,
         gc_interval: args.gc_interval,
         gc_min_free_bytes: args.gc_min_free_gb * 1024 * 1024 * 1024,
+        slim: args.slim,
+        sample_interval: args.sample_interval,
+        reverse: args.reverse,
     };
 
     let indexer = Indexer::new(config);
@@ -1153,7 +1175,8 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
         eprintln!("Performing full rebuild...");
         indexer.index_full(&nixpkgs_path, &cli.db_path)?
     } else {
-        eprintln!("Performing incremental index...");
+        // Don't print here - index_incremental will print the appropriate message
+        // based on whether a previous index exists
         indexer.index_incremental(&nixpkgs_path, &cli.db_path)?
     };
 

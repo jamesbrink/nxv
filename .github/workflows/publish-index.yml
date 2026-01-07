@@ -162,9 +162,33 @@ jobs:
           echo "Clone complete. Commit count in clone:"
           git -C nixpkgs rev-list --count HEAD
 
+      - name: Get stats before indexing
+        if: ${{ steps.clone-strategy.outputs.strategy != 'skip' }}
+        id: stats-before
+        run: |
+          # Capture unique package count before indexing
+          PACKAGES_BEFORE=$(./target/release/nxv stats 2>/dev/null | grep "Unique package names" | awk '{print $4}' || echo "0")
+          echo "packages_before=${PACKAGES_BEFORE}" >> $GITHUB_OUTPUT
+          echo "Packages before: ${PACKAGES_BEFORE}"
+
       - name: Run indexer
         if: ${{ steps.clone-strategy.outputs.strategy != 'skip' }}
         run: ./target/release/nxv index --nixpkgs-path ./nixpkgs
+
+      - name: Get stats after indexing
+        if: ${{ steps.clone-strategy.outputs.strategy != 'skip' }}
+        id: stats-after
+        run: |
+          # Capture unique package count after indexing
+          PACKAGES_AFTER=$(./target/release/nxv stats 2>/dev/null | grep "Unique package names" | awk '{print $4}' || echo "0")
+          echo "packages_after=${PACKAGES_AFTER}" >> $GITHUB_OUTPUT
+          echo "Packages after: ${PACKAGES_AFTER}"
+
+          # Calculate new packages
+          PACKAGES_BEFORE="${{ steps.stats-before.outputs.packages_before }}"
+          NEW_PACKAGES=$((PACKAGES_AFTER - PACKAGES_BEFORE))
+          echo "new_packages=${NEW_PACKAGES}" >> $GITHUB_OUTPUT
+          echo "New packages: ${NEW_PACKAGES}"
 
       - name: Generate publishable artifacts
         if: ${{ steps.clone-strategy.outputs.strategy != 'skip' }}
@@ -214,10 +238,13 @@ jobs:
           echo "## Index Update Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- **Clone depth:** ${{ steps.clone-strategy.outputs.depth }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **New packages:** ${{ steps.stats-after.outputs.new_packages }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Total packages:** ${{ steps.stats-after.outputs.packages_after }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Index size:** $(du -h publish/index.db.zst | cut -f1)" >> $GITHUB_STEP_SUMMARY
           echo "- **Bloom filter size:** $(du -h publish/bloom.bin 2>/dev/null | cut -f1 || echo 'N/A')" >> $GITHUB_STEP_SUMMARY
           echo "- **Release:** [$INDEX_RELEASE_TAG](https://github.com/${{ github.repository }}/releases/tag/$INDEX_RELEASE_TAG)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo '```json' >> $GITHUB_STEP_SUMMARY
           cat publish/manifest.json >> $GITHUB_STEP_SUMMARY
+          echo '' >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY

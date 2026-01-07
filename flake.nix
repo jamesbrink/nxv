@@ -385,6 +385,7 @@
             pkgs.miniserve  # Simple HTTP server for frontend dev
             pkgs.nodePackages.prettier  # HTML/JS/CSS formatter
             pkgs.k6  # Load testing tool
+            pkgs.python3  # For benchmark scripts
             # For indexer feature with nix-bindings
             pkgs.clang
             pkgs.llvmPackages.libclang

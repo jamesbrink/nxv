@@ -93,6 +93,9 @@ semver = "1.0"
 # Temporary files
 tempfile = "3.24"
 
+# Unix system calls (SIGPIPE handling)
+libc = "0.2"
+
 [dev-dependencies]
 assert_cmd = "2.1"
 predicates = "3.1"

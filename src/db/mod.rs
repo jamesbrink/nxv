@@ -8,6 +8,7 @@ use queries::PackageVersion;
 use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
 use std::time::Duration;
+use tracing::instrument;
 
 /// Default timeout for SQLite busy handler (in seconds).
 /// When the database is locked, SQLite will retry for this duration before returning SQLITE_BUSY.
@@ -57,6 +58,7 @@ impl Database {
     /// Checkpoint the WAL to ensure data is flushed to disk.
     /// Call this at regular intervals during long-running operations.
     #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
+    #[instrument(skip(self))]
     pub fn checkpoint(&self) -> Result<()> {
         self.conn
             .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
@@ -522,6 +524,7 @@ impl Database {
 
     /// Set a metadata value.
     #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
+    #[instrument(skip(self, value))]
     pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
@@ -555,6 +558,7 @@ impl Database {
     /// # }
     /// ```
     #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
+    #[instrument(skip(self, packages), fields(batch_size = packages.len()))]
     pub fn insert_package_ranges_batch(&mut self, packages: &[PackageVersion]) -> Result<usize> {
         let tx = self.conn.transaction()?;
         let mut inserted = 0;
@@ -607,6 +611,7 @@ impl Database {
     /// This persists the current open ranges so they can be restored on resume.
     /// Called during periodic checkpoints and graceful shutdown.
     #[cfg(feature = "indexer")]
+    #[instrument(skip(self, ranges), fields(range_count = ranges.len()))]
     pub fn save_checkpoint_ranges(
         &mut self,
         ranges: &std::collections::HashMap<String, crate::index::CheckpointRange>,
@@ -661,6 +666,7 @@ impl Database {
     ///
     /// Returns the previously saved open ranges for resuming indexing.
     #[cfg(feature = "indexer")]
+    #[instrument(skip(self))]
     pub fn load_checkpoint_ranges(
         &self,
     ) -> Result<std::collections::HashMap<String, crate::index::CheckpointRange>> {
@@ -730,6 +736,7 @@ impl Database {
     ///
     /// Called when indexing completes successfully.
     #[cfg(feature = "indexer")]
+    #[instrument(skip(self))]
     pub fn clear_checkpoint_ranges(&self) -> Result<()> {
         self.conn
             .execute("DELETE FROM checkpoint_open_ranges", [])?;

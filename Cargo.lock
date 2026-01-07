@@ -1690,6 +1690,7 @@ dependencies = [
  "git2",
  "http-body-util",
  "indicatif",
+ "libc",
  "minisign",
  "mockito",
  "nix 0.29.0",

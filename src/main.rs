@@ -39,6 +39,20 @@ use cli::{Cli, Commands};
 /// nxv::main();
 /// ```
 fn main() {
+    // Ignore SIGPIPE to prevent crashes when piped to programs that exit early (e.g., tee, head)
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
+
+    // Initialize tracing subscriber (reads RUST_LOG env var)
+    // FmtSpan::CLOSE logs span duration when it completes
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
+        .with_writer(std::io::stderr)
+        .init();
+
     let cli = Cli::parse();
 
     // Handle no-color flag - affects both owo_colors and comfy_table

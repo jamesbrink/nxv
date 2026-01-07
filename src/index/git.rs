@@ -5,6 +5,7 @@ use chrono::{DateTime, TimeZone, Utc};
 use git2::{Oid, Repository, Sort};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use tracing::instrument;
 
 /// The earliest commit date we support for indexing.
 /// Before this date, nixpkgs had a different structure that doesn't work
@@ -139,6 +140,7 @@ impl WorktreeSession {
     /// This is fast because it doesn't create a new worktree, just
     /// updates the existing one. Uses `git checkout -f` which forces
     /// the checkout and discards any local changes.
+    #[instrument(skip(self))]
     pub fn checkout(&self, commit_hash: &str) -> Result<()> {
         // Force checkout - no need for git clean since nix eval doesn't modify files
         let output = Command::new("git")
@@ -371,6 +373,7 @@ impl NixpkgsRepo {
 
     /// Get changed paths for a commit (including rename sources and destinations).
     /// For merge commits, compares against first parent only to get actual PR changes.
+    #[instrument(skip(self))]
     pub fn get_commit_changed_paths(&self, commit_hash: &str) -> Result<Vec<String>> {
         // For merge commits, compare against first parent (^1) to get just the PR changes.
         // For regular commits, this also works correctly.

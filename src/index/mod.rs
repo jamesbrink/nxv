@@ -75,6 +75,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+use tracing::{debug, info_span, instrument};
 
 /// Configuration for the indexer.
 #[derive(Debug, Clone)]
@@ -999,6 +1000,7 @@ impl Indexer {
     /// let result = indexer.process_commits(&mut db, "/path/to/nixpkgs", &repo, commits, None).unwrap();
     /// println!("Indexed {} commits", result.commits_processed);
     /// ```
+    #[instrument(skip(self, db, nixpkgs_path, repo, commits, resume_from), fields(total_commits = commits.len()))]
     fn process_commits<P: AsRef<Path>>(
         &self,
         db: &mut Database,
@@ -1316,11 +1318,24 @@ impl Indexer {
             let mut target_list: Vec<String> = target_attr_paths.into_iter().collect();
             target_list.sort();
 
+            debug!(
+                commit = %commit.short_hash,
+                target_count = target_list.len(),
+                "Processing commit"
+            );
+
             // Extract packages for all systems
             let mut aggregates: HashMap<String, PackageAggregate> = HashMap::new();
 
             // Use parallel evaluation if worker pool is available, otherwise sequential
-            let extraction_results: Vec<(String, Result<Vec<extractor::PackageInfo>>)> =
+            let extraction_results: Vec<(String, Result<Vec<extractor::PackageInfo>>)> = {
+                let _extract_span = info_span!(
+                    "extract_packages",
+                    targets = target_list.len(),
+                    systems = systems.len()
+                )
+                .entered();
+
                 if let Some(ref pool) = worker_pool {
                     // Parallel extraction using worker pool
                     let results = pool.extract_parallel(worktree_path, systems, &target_list);
@@ -1338,7 +1353,8 @@ impl Indexer {
                             (system.clone(), result)
                         })
                         .collect()
-                };
+                }
+            };
 
             // Process results from all systems
             for (system, packages_result) in extraction_results {

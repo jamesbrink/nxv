@@ -14,6 +14,7 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+use tracing::instrument;
 
 /// Configuration for the worker pool.
 #[derive(Debug, Clone)]
@@ -454,6 +455,7 @@ impl WorkerPool {
     ///
     /// Each system is assigned to a different worker. If there are more systems
     /// than workers, some workers will process multiple systems sequentially.
+    #[instrument(skip(self, repo_path, attrs), fields(systems = systems.len(), attrs = attrs.len()))]
     pub fn extract_parallel(
         &self,
         repo_path: &Path,
@@ -495,6 +497,7 @@ impl WorkerPool {
     ///
     /// Uses a worker subprocess to avoid memory accumulation in the parent process.
     /// The worker will restart if it exceeds the memory threshold.
+    #[instrument(skip(self, repo_path))]
     pub fn extract_positions(&self, system: &str, repo_path: &Path) -> Result<Vec<AttrPosition>> {
         // Find an available worker using try_lock
         for worker in &self.workers {

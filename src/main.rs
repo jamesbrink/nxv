@@ -613,6 +613,7 @@ fn cmd_stats(cli: &Cli) -> Result<()> {
     let last_commit = backend.get_meta("last_indexed_commit")?;
     let last_indexed_date = backend.get_meta("last_indexed_date")?;
     let index_version = backend.get_meta("index_version")?;
+    let schema_version = backend.get_meta("schema_version")?;
 
     println!("{}", "Index Information".section_header());
 
@@ -628,6 +629,10 @@ fn cmd_stats(cli: &Cli) -> Result<()> {
 
     if let Some(version) = index_version {
         println!("{} {}", "Index version:".label(), version);
+    }
+
+    if let Some(version) = schema_version {
+        println!("{} {}", "Schema version:".label(), version);
     }
 
     if let Some(commit) = last_commit {

@@ -217,6 +217,14 @@ pub fn verify_store() -> bool {
 /// Path to the temporary eval store used by the indexer.
 /// This store isolates derivations from the system store to avoid
 /// triggering auto-optimise-store corruption.
+///
+/// On macOS, we use `/private/tmp` instead of `/tmp` because `/tmp` is a
+/// symlink to `/private/tmp`, and Nix refuses to create stores in paths
+/// containing symlinks.
+#[cfg(target_os = "macos")]
+pub const TEMP_EVAL_STORE_PATH: &str = "/private/tmp/nxv-eval-store";
+
+#[cfg(not(target_os = "macos"))]
 pub const TEMP_EVAL_STORE_PATH: &str = "/tmp/nxv-eval-store";
 
 /// Clean up the temporary eval store directory.
@@ -346,7 +354,11 @@ mod tests {
 
     #[test]
     fn test_temp_eval_store_path_constant() {
-        // Verify the constant is set correctly
+        // Verify the constant is set correctly for the current platform
+        #[cfg(target_os = "macos")]
+        assert_eq!(TEMP_EVAL_STORE_PATH, "/private/tmp/nxv-eval-store");
+
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(TEMP_EVAL_STORE_PATH, "/tmp/nxv-eval-store");
     }
 }

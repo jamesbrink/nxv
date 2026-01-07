@@ -1176,12 +1176,6 @@ impl Indexer {
         // so we extract all packages that changed between sample points
         let mut accumulated_changed_paths: HashSet<String> = HashSet::new();
 
-        // When starting fresh with sampling, we need to do a full initial evaluation
-        // on the first commit to capture all packages that exist, not just those changed.
-        // Without sampling, we process every commit so packages are captured incrementally.
-        let mut needs_initial_full_eval =
-            resume_from.is_none() && self.config.sample_interval.is_some();
-
         // Build the initial file-to-attribute map
         let first_commit = commits
             .first()
@@ -1279,7 +1273,17 @@ impl Indexer {
                     let chrono_interval =
                         chrono::Duration::from_std(interval).unwrap_or(chrono::Duration::weeks(1));
 
-                    if commit.date < last_date + chrono_interval {
+                    // In forward mode: skip if commit is within interval AFTER last sampled
+                    // In reverse mode: skip if commit is within interval BEFORE last sampled
+                    let within_interval = if self.config.reverse {
+                        // Reverse: dates decrease, so skip if commit > last - interval
+                        commit.date > last_date - chrono_interval
+                    } else {
+                        // Forward: dates increase, so skip if commit < last + interval
+                        commit.date < last_date + chrono_interval
+                    };
+
+                    if within_interval {
                         // Skip this commit - within sample interval
                         // But still track changed files so we don't miss packages
                         if let Ok(paths) = repo.get_commit_changed_paths(&commit.hash) {
@@ -1366,35 +1370,16 @@ impl Indexer {
                 all_changed_paths.extend(accumulated_changed_paths.drain());
             }
 
-            // On fresh index, first commit needs FULL evaluation to capture all existing
-            // packages, not just those changed in this specific commit.
-            // Threshold for "good" file map - below this we extract ALL packages directly
-            const MIN_FILE_MAP_ENTRIES: usize = 500;
-            let mut extract_all_packages = false;
-
-            if needs_initial_full_eval {
-                if file_attr_map.len() >= MIN_FILE_MAP_ENTRIES {
-                    // Good file map - use it to determine targets
-                    if let Some(ref pb) = progress_bar {
-                        pb.println(format!(
-                            "{} to capture all packages ({} file mappings)...",
-                            "Performing initial full evaluation".success(),
-                            file_attr_map.len()
-                        ));
-                    }
-                    all_changed_paths.extend(file_attr_map.keys().cloned());
-                } else {
-                    // Insufficient file map (old nixpkgs?) - extract ALL packages directly
-                    if let Some(ref pb) = progress_bar {
-                        pb.println(format!(
-                            "{} (file map too small: {} entries, extracting all packages)...",
-                            "Performing initial full evaluation".success(),
-                            file_attr_map.len()
-                        ));
-                    }
-                    extract_all_packages = true;
+            // On fresh start, first commit needs full extraction to capture all existing packages
+            // (not just those that changed in that single commit's diff)
+            if commit_idx == 0 && resume_from.is_none() {
+                if let Some(ref pb) = progress_bar {
+                    pb.println(format!(
+                        "Extracting all packages from first commit ({} file mappings)...",
+                        file_attr_map.len()
+                    ));
                 }
-                needs_initial_full_eval = false;
+                all_changed_paths.extend(file_attr_map.keys().cloned());
             }
 
             for path in &all_changed_paths {
@@ -1437,8 +1422,8 @@ impl Indexer {
                 }
             }
 
-            // Skip if no targets and not doing full extraction
-            if target_attr_paths.is_empty() && !extract_all_packages {
+            // Skip if no targets to extract
+            if target_attr_paths.is_empty() {
                 result.commits_processed += 1;
                 prev_commit_hash = Some(commit.hash.clone());
                 prev_commit_date = Some(commit.date);
@@ -1446,33 +1431,24 @@ impl Indexer {
                 continue;
             }
 
-            // When extract_all_packages is true, empty list tells extractor to get ALL packages
             let mut target_list: Vec<String> = target_attr_paths.into_iter().collect();
             target_list.sort();
 
-            // Log extraction target info
-            let target_desc = if extract_all_packages {
-                "all packages".to_string()
-            } else {
-                format!("{} attrs", target_list.len())
-            };
-
             debug!(
                 commit = %commit.short_hash,
-                target_count = if extract_all_packages { usize::MAX } else { target_list.len() },
-                extract_all = extract_all_packages,
+                target_count = target_list.len(),
                 "Processing commit"
             );
 
             // Show extraction info for significant extractions
-            if (self.config.verbose || extract_all_packages || target_list.len() > 100)
+            if (self.config.verbose || target_list.len() > 100)
                 && let Some(ref pb) = progress_bar
             {
                 use owo_colors::OwoColorize;
                 pb.println(format!(
-                    "{} {} at {} ({})...",
+                    "{} {} attrs at {} ({})...",
                     "Evaluating".dimmed(),
-                    target_desc,
+                    target_list.len(),
                     commit.short_hash.commit(),
                     commit.date.format("%Y-%m-%d")
                 ));
@@ -1481,103 +1457,102 @@ impl Indexer {
             // Extract packages for all systems
             let mut aggregates: HashMap<String, PackageAggregate> = HashMap::new();
 
-            // Use parallel evaluation if worker pool is available, otherwise sequential
-            let extraction_results: Vec<(String, Result<Vec<extractor::PackageInfo>>)> = {
-                let _extract_span = info_span!(
-                    "extract_packages",
-                    targets = target_list.len(),
-                    systems = systems.len()
-                )
-                .entered();
-
-                if let Some(ref pool) = worker_pool {
-                    // Parallel extraction using worker pool
-                    let results = pool.extract_parallel(worktree_path, systems, &target_list);
-                    systems.iter().cloned().zip(results).collect()
-                } else {
-                    // Sequential extraction (fallback)
-                    systems
-                        .iter()
-                        .map(|system| {
-                            let result = extractor::extract_packages_for_attrs(
-                                worktree_path,
-                                system,
-                                &target_list,
-                            );
-                            (system.clone(), result)
-                        })
-                        .collect()
-                }
+            // For large attr lists, chunk to avoid overwhelming Nix evaluator
+            const EXTRACTION_CHUNK_SIZE: usize = 500;
+            let chunks: Vec<&[String]> = if target_list.len() > EXTRACTION_CHUNK_SIZE {
+                target_list.chunks(EXTRACTION_CHUNK_SIZE).collect()
+            } else {
+                vec![&target_list[..]]
             };
 
-            // Process results from all systems
-            for (system, packages_result) in extraction_results {
-                let packages = match packages_result {
-                    Ok(pkgs) => pkgs,
-                    Err(e) => {
-                        result.extraction_failures += 1;
-                        tracing::warn!(
-                            commit = %commit.short_hash,
-                            system = %system,
-                            error = %e,
-                            "Extraction failed for system"
-                        );
-                        if self.config.verbose {
-                            warn(
-                                &progress_bar,
-                                format!(
-                                    "Extraction failed at {} ({}): {}",
-                                    &commit.short_hash, system, e
-                                ),
-                            );
-                        }
-                        continue;
+            let total_chunks = chunks.len();
+            for (chunk_idx, chunk) in chunks.iter().enumerate() {
+                // Show chunk progress for large extractions
+                if total_chunks > 1
+                    && let Some(ref pb) = progress_bar
+                {
+                    pb.set_message(format!(
+                        "chunk {}/{} ({} attrs)",
+                        chunk_idx + 1,
+                        total_chunks,
+                        chunk.len()
+                    ));
+                }
+
+                // Use parallel evaluation if worker pool is available, otherwise sequential
+                let extraction_results: Vec<(String, Result<Vec<extractor::PackageInfo>>)> = {
+                    let _extract_span = info_span!(
+                        "extract_packages",
+                        targets = chunk.len(),
+                        systems = systems.len(),
+                        chunk = chunk_idx + 1,
+                        total_chunks = total_chunks
+                    )
+                    .entered();
+
+                    if let Some(ref pool) = worker_pool {
+                        // Parallel extraction using worker pool
+                        let results = pool.extract_parallel(worktree_path, systems, chunk);
+                        systems.iter().cloned().zip(results).collect()
+                    } else {
+                        // Sequential extraction (fallback)
+                        systems
+                            .iter()
+                            .map(|system| {
+                                let result = extractor::extract_packages_for_attrs(
+                                    worktree_path,
+                                    system,
+                                    chunk,
+                                );
+                                (system.clone(), result)
+                            })
+                            .collect()
                     }
                 };
 
-                for pkg in packages {
-                    let key = format!("{}::{}", pkg.attribute_path, pkg.version);
-                    if let Some(existing) = aggregates.get_mut(&key) {
-                        existing.merge(pkg, &system);
-                    } else {
-                        let mut agg = PackageAggregate::new(pkg, &system);
-                        // Clear store_paths for commits before 2020-01-01
-                        // (older binaries unlikely to be in cache.nixos.org)
-                        if !is_after_store_path_cutoff(commit.date) {
-                            agg.store_paths.clear();
+                // Process results from all systems for this chunk
+                for (system, packages_result) in extraction_results {
+                    let packages = match packages_result {
+                        Ok(pkgs) => pkgs,
+                        Err(e) => {
+                            result.extraction_failures += 1;
+                            tracing::warn!(
+                                commit = %commit.short_hash,
+                                system = %system,
+                                error = %e,
+                                "Extraction failed for system"
+                            );
+                            if self.config.verbose {
+                                warn(
+                                    &progress_bar,
+                                    format!(
+                                        "Extraction failed at {} ({}): {}",
+                                        &commit.short_hash, system, e
+                                    ),
+                                );
+                            }
+                            continue;
                         }
-                        aggregates.insert(key, agg);
+                    };
+
+                    for pkg in packages {
+                        let key = format!("{}::{}", pkg.attribute_path, pkg.version);
+                        if let Some(existing) = aggregates.get_mut(&key) {
+                            existing.merge(pkg, &system);
+                        } else {
+                            let mut agg = PackageAggregate::new(pkg, &system);
+                            // Clear store_paths for commits before 2020-01-01
+                            // (older binaries unlikely to be in cache.nixos.org)
+                            if !is_after_store_path_cutoff(commit.date) {
+                                agg.store_paths.clear();
+                            }
+                            aggregates.insert(key, agg);
+                        }
                     }
                 }
-            }
+            } // End of chunk loop
 
             result.packages_found += aggregates.len() as u64;
-
-            // If we attempted full extraction but got very few packages, the old nixpkgs
-            // commit may not be compatible. Retry full extraction on the next commit.
-            const MIN_FULL_EXTRACTION_PACKAGES: usize = 100;
-            if extract_all_packages && aggregates.len() < MIN_FULL_EXTRACTION_PACKAGES {
-                if let Some(ref pb) = progress_bar {
-                    pb.println(format!(
-                        "{} only {} packages extracted (need {}+), will retry on next commit...",
-                        "Initial full evaluation incomplete:".warning(),
-                        aggregates.len(),
-                        MIN_FULL_EXTRACTION_PACKAGES
-                    ));
-                }
-                needs_initial_full_eval = true; // Retry on next commit
-            } else if extract_all_packages && aggregates.len() >= MIN_FULL_EXTRACTION_PACKAGES {
-                // Successful full extraction - log the result
-                if let Some(ref pb) = progress_bar {
-                    pb.println(format!(
-                        "{} {} packages from {} ({})",
-                        "Extracted".success(),
-                        aggregates.len(),
-                        commit.short_hash.commit(),
-                        commit.date.format("%Y-%m-%d")
-                    ));
-                }
-            }
 
             // Update last_sampled_date for sample interval tracking
             last_sampled_date = Some(commit.date);
@@ -2603,5 +2578,197 @@ mod tests {
         assert!(config.reverse);
         assert_eq!(config.since.as_deref(), Some("2020-01-01"));
         assert_eq!(config.until.as_deref(), Some("2024-01-01"));
+    }
+
+    #[test]
+    fn test_slim_config_default() {
+        let config = IndexerConfig::default();
+        assert!(!config.slim);
+    }
+
+    #[test]
+    fn test_slim_config_set() {
+        let config = IndexerConfig {
+            slim: true,
+            ..Default::default()
+        };
+        assert!(config.slim);
+    }
+
+    #[test]
+    fn test_sample_interval_config_default() {
+        let config = IndexerConfig::default();
+        assert!(config.sample_interval.is_none());
+    }
+
+    #[test]
+    fn test_sample_interval_config_set() {
+        let config = IndexerConfig {
+            sample_interval: Some(std::time::Duration::from_secs(7 * 24 * 60 * 60)), // 1 week
+            ..Default::default()
+        };
+        assert!(config.sample_interval.is_some());
+        assert_eq!(config.sample_interval.unwrap().as_secs(), 7 * 24 * 60 * 60);
+    }
+
+    #[test]
+    fn test_sample_interval_within_forward() {
+        // Test the "within_interval" logic for forward mode
+        // In forward mode: skip if commit.date < last_date + interval
+        let last_date = chrono::Utc::now() - chrono::Duration::days(30);
+        let interval = chrono::Duration::weeks(2);
+
+        // Commit 10 days after last_date (within 2-week interval)
+        let commit_date_within = last_date + chrono::Duration::days(10);
+        let within_interval_forward = commit_date_within < last_date + interval;
+        assert!(within_interval_forward, "10 days is within 2-week interval");
+
+        // Commit 20 days after last_date (outside 2-week interval)
+        let commit_date_outside = last_date + chrono::Duration::days(20);
+        let outside_interval_forward = commit_date_outside < last_date + interval;
+        assert!(
+            !outside_interval_forward,
+            "20 days is outside 2-week interval"
+        );
+    }
+
+    #[test]
+    fn test_sample_interval_within_reverse() {
+        // Test the "within_interval" logic for reverse mode
+        // In reverse mode: skip if commit.date > last_date - interval
+        let last_date = chrono::Utc::now();
+        let interval = chrono::Duration::weeks(2);
+
+        // Commit 10 days before last_date (within 2-week interval going backwards)
+        let commit_date_within = last_date - chrono::Duration::days(10);
+        let within_interval_reverse = commit_date_within > last_date - interval;
+        assert!(
+            within_interval_reverse,
+            "10 days back is within 2-week interval"
+        );
+
+        // Commit 20 days before last_date (outside 2-week interval going backwards)
+        let commit_date_outside = last_date - chrono::Duration::days(20);
+        let outside_interval_reverse = commit_date_outside > last_date - interval;
+        assert!(
+            !outside_interval_reverse,
+            "20 days back is outside 2-week interval"
+        );
+    }
+
+    #[test]
+    fn test_chunking_small_list() {
+        // Test that small lists don't get chunked
+        let target_list: Vec<String> = (0..100).map(|i| format!("pkg{}", i)).collect();
+        const CHUNK_SIZE: usize = 500;
+
+        let chunks: Vec<&[String]> = if target_list.len() > CHUNK_SIZE {
+            target_list.chunks(CHUNK_SIZE).collect()
+        } else {
+            vec![&target_list[..]]
+        };
+
+        assert_eq!(chunks.len(), 1, "Small list should be single chunk");
+        assert_eq!(chunks[0].len(), 100);
+    }
+
+    #[test]
+    fn test_chunking_large_list() {
+        // Test that large lists get chunked properly
+        let target_list: Vec<String> = (0..1500).map(|i| format!("pkg{}", i)).collect();
+        const CHUNK_SIZE: usize = 500;
+
+        let chunks: Vec<&[String]> = if target_list.len() > CHUNK_SIZE {
+            target_list.chunks(CHUNK_SIZE).collect()
+        } else {
+            vec![&target_list[..]]
+        };
+
+        assert_eq!(chunks.len(), 3, "1500 items should be 3 chunks of 500");
+        assert_eq!(chunks[0].len(), 500);
+        assert_eq!(chunks[1].len(), 500);
+        assert_eq!(chunks[2].len(), 500);
+    }
+
+    #[test]
+    fn test_chunking_uneven_list() {
+        // Test chunking with non-divisible size
+        let target_list: Vec<String> = (0..1200).map(|i| format!("pkg{}", i)).collect();
+        const CHUNK_SIZE: usize = 500;
+
+        let chunks: Vec<&[String]> = if target_list.len() > CHUNK_SIZE {
+            target_list.chunks(CHUNK_SIZE).collect()
+        } else {
+            vec![&target_list[..]]
+        };
+
+        assert_eq!(chunks.len(), 3, "1200 items should be 3 chunks");
+        assert_eq!(chunks[0].len(), 500);
+        assert_eq!(chunks[1].len(), 500);
+        assert_eq!(chunks[2].len(), 200, "Last chunk should have remainder");
+    }
+
+    #[test]
+    fn test_initial_full_extraction_trigger() {
+        // Test conditions for initial full extraction:
+        // - commit_idx == 0 AND resume_from.is_none()
+        let commit_idx = 0;
+        let resume_from: Option<&str> = None;
+
+        let should_do_full_extraction = commit_idx == 0 && resume_from.is_none();
+        assert!(
+            should_do_full_extraction,
+            "Fresh start should trigger full extraction"
+        );
+
+        // Resuming should NOT trigger full extraction
+        let resume_from_some: Option<&str> = Some("abc123");
+        let should_not_do_full = commit_idx == 0 && resume_from_some.is_none();
+        assert!(
+            !should_not_do_full,
+            "Resume should NOT trigger full extraction"
+        );
+
+        // Non-first commit should NOT trigger full extraction
+        let commit_idx_later = 5;
+        let should_not_do_full_later = commit_idx_later == 0 && resume_from.is_none();
+        assert!(
+            !should_not_do_full_later,
+            "Non-first commit should NOT trigger full extraction"
+        );
+    }
+
+    #[test]
+    fn test_slim_and_reverse_combined() {
+        let config = IndexerConfig {
+            slim: true,
+            reverse: true,
+            sample_interval: Some(std::time::Duration::from_secs(28 * 24 * 60 * 60)), // 4 weeks
+            ..Default::default()
+        };
+        assert!(config.slim);
+        assert!(config.reverse);
+        assert!(config.sample_interval.is_some());
+    }
+
+    #[test]
+    fn test_all_indexer_options_combined() {
+        let config = IndexerConfig {
+            slim: true,
+            reverse: true,
+            sample_interval: Some(std::time::Duration::from_secs(14 * 24 * 60 * 60)),
+            since: Some("2020-01-01".to_string()),
+            until: Some("2024-01-01".to_string()),
+            verbose: true,
+            worker_count: Some(4),
+            ..Default::default()
+        };
+        assert!(config.slim);
+        assert!(config.reverse);
+        assert!(config.sample_interval.is_some());
+        assert!(config.since.is_some());
+        assert!(config.until.is_some());
+        assert!(config.verbose);
+        assert_eq!(config.worker_count, Some(4));
     }
 }

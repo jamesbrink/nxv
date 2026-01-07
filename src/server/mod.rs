@@ -122,9 +122,8 @@ pub fn init_tracing() {
             .try_init()
     };
 
-    if let Err(e) = result {
-        eprintln!("Note: tracing subscriber already initialized: {}", e);
-    }
+    // Silently ignore if already initialized (defensive for library usage)
+    let _ = result;
 }
 
 /// Shared application state.

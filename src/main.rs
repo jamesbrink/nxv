@@ -45,15 +45,25 @@ fn main() {
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
     }
 
-    // Initialize tracing subscriber (reads RUST_LOG env var)
-    // FmtSpan::CLOSE logs span duration when it completes
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
-        .with_writer(std::io::stderr)
-        .init();
-
     let cli = Cli::parse();
+
+    // Initialize tracing subscriber for indexer commands (reads RUST_LOG env var)
+    // FmtSpan::CLOSE logs span duration when it completes
+    // Note: serve command has its own tracing setup with JSON support
+    #[cfg(feature = "indexer")]
+    {
+        use cli::Commands::*;
+        if matches!(
+            cli.command,
+            Index(_) | Backfill(_) | Reset(_) | Publish(_) | Keygen(_)
+        ) {
+            tracing_subscriber::fmt()
+                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+                .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
+                .with_writer(std::io::stderr)
+                .init();
+        }
+    }
 
     // Handle no-color flag - affects both owo_colors and comfy_table
     if cli.no_color {

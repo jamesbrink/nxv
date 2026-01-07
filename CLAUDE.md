@@ -71,10 +71,12 @@ The `indexer` feature enables building indexes from a local nixpkgs clone:
 - `git.rs`: Walks nixpkgs git history (commits from 2017+, controlled by `MIN_INDEXABLE_DATE`)
 - `extractor.rs`: Extracts package metadata (version, license, homepage, maintainers, platforms)
 - `nix_ffi.rs`: Persistent Nix evaluator using FFI bindings (worker thread to prevent stack overflow)
+- `worker/`: Worker pool for parallel Nix evaluation (IPC-based subprocess architecture)
 - `mod.rs`: Coordinates indexing with checkpointing for Ctrl+C resilience
 - `backfill.rs`: Updates missing metadata (source_path, homepage) for existing records
   - HEAD mode: Fast extraction from current nixpkgs (may miss renamed/removed packages)
   - Historical mode (`--history`): Traverses git to original commits for accuracy
+- `gc.rs`: Nix store garbage collection to manage disk space during indexing
 - `publisher.rs`: Generates compressed index files, delta packs, and signed manifest for distribution
 
 ### Database Schema (`db/mod.rs`)
@@ -84,7 +86,7 @@ The `indexer` feature enables building indexes from a local nixpkgs clone:
 - `meta`: Key-value store for index metadata (last_indexed_commit, schema_version)
 - `checkpoint_open_ranges`: Indexer checkpoint table for persistence
 
-Schema version is `SCHEMA_VERSION = 5`. Database uses WAL mode with 5-second busy timeout.
+Schema version is `SCHEMA_VERSION = 7`. Database uses WAL mode with 5-second busy timeout.
 
 ### Key Design Decisions
 

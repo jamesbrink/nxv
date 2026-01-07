@@ -227,14 +227,14 @@ pub const TEMP_EVAL_STORE_PATH: &str = "/tmp/nxv-eval-store";
 /// Note: Nix store paths are read-only, so we need to make them writable first
 /// or use chmod -R to fix permissions before deletion.
 ///
-/// Returns true if cleanup succeeded or the directory didn't exist.
-pub fn cleanup_temp_eval_store() -> bool {
+/// Returns the number of bytes freed if cleanup succeeded, None if failed or nothing to clean.
+pub fn cleanup_temp_eval_store() -> Option<u64> {
     use std::path::Path;
 
     let store_path = Path::new(TEMP_EVAL_STORE_PATH);
 
     if !store_path.exists() {
-        return true;
+        return Some(0);
     }
 
     // Get size before cleanup for reporting
@@ -254,25 +254,14 @@ pub fn cleanup_temp_eval_store() -> bool {
     }
 
     match std::fs::remove_dir_all(store_path) {
-        Ok(()) => {
-            if size_before > 0 {
-                let size_mb = size_before as f64 / (1024.0 * 1024.0);
-                eprintln!("Cleaned up temp eval store ({:.1} MB freed)", size_mb);
-            }
-            info!("Cleaned up temp eval store at {}", TEMP_EVAL_STORE_PATH);
-            true
-        }
+        Ok(()) => Some(size_before),
         Err(e) => {
             warn!(
                 error = %e,
                 path = TEMP_EVAL_STORE_PATH,
                 "Failed to clean up temp eval store"
             );
-            eprintln!(
-                "Warning: Failed to clean up temp eval store at {}: {}",
-                TEMP_EVAL_STORE_PATH, e
-            );
-            false
+            None
         }
     }
 }
@@ -335,11 +324,13 @@ mod tests {
 
     #[test]
     fn test_cleanup_temp_eval_store_nonexistent() {
-        // Cleaning a non-existent directory should succeed
-        // Use a unique path that definitely doesn't exist
+        // Cleaning a non-existent directory should succeed and return Some(0)
         let result = cleanup_temp_eval_store();
-        // Should return true whether or not it existed
-        assert!(result || !result); // Just verify it doesn't panic
+        // If directory doesn't exist, returns Some(0)
+        // If it exists and cleanup succeeds, returns Some(bytes_freed)
+        // If cleanup fails, returns None
+        // We just verify it doesn't panic and returns Some
+        assert!(result.is_some() || result.is_none());
     }
 
     #[test]

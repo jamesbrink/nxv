@@ -761,8 +761,8 @@ impl Indexer {
         // Clean up orphaned worktrees from previous crashed runs
         repo.prune_worktrees()?;
 
-        // Clean up temp eval store from previous runs
-        gc::cleanup_temp_eval_store();
+        // Clean up temp eval store from previous runs (silently at startup)
+        let temp_store_freed = gc::cleanup_temp_eval_store();
 
         // Check store health before starting
         if !gc::verify_store() {
@@ -808,6 +808,16 @@ impl Indexer {
                 .unwrap_or(git::MIN_INDEXABLE_DATE)
         );
 
+        // Report temp store cleanup after "Found X commits"
+        if let Some(bytes) = temp_store_freed
+            && bytes > 0
+        {
+            eprintln!(
+                "Cleaned up temp eval store ({:.1} MB freed)",
+                bytes as f64 / 1_000_000.0
+            );
+        }
+
         self.process_commits(&mut db, &nixpkgs_path, &repo, commits, None)
     }
 
@@ -843,8 +853,8 @@ impl Indexer {
         // Clean up orphaned worktrees from previous crashed runs
         repo.prune_worktrees()?;
 
-        // Clean up temp eval store from previous runs
-        gc::cleanup_temp_eval_store();
+        // Clean up temp eval store from previous runs (silently at startup)
+        let temp_store_freed = gc::cleanup_temp_eval_store();
 
         // Check store health before starting
         if !gc::verify_store() {
@@ -941,6 +951,17 @@ impl Indexer {
                             });
                         }
                         eprintln!("Found {} new commits to process", commits.len());
+
+                        // Report temp store cleanup after "Found X commits"
+                        if let Some(bytes) = temp_store_freed
+                            && bytes > 0
+                        {
+                            eprintln!(
+                                "Cleaned up temp eval store ({:.1} MB freed)",
+                                bytes as f64 / 1_000_000.0
+                            );
+                        }
+
                         self.process_commits(&mut db, &nixpkgs_path, &repo, commits, Some(&hash))
                     }
                     Err(_) => {
@@ -1514,7 +1535,15 @@ impl Indexer {
                     }
 
                     // Clean up temp eval store to free disk space
-                    gc::cleanup_temp_eval_store();
+                    if let Some(bytes) = gc::cleanup_temp_eval_store()
+                        && bytes > 0
+                        && let Some(ref pb) = progress_bar
+                    {
+                        pb.println(format!(
+                            "Cleaned up temp eval store ({:.1} MB freed)",
+                            bytes as f64 / 1_000_000.0
+                        ));
+                    }
 
                     if let Some(duration) = gc::run_garbage_collection() {
                         if let Some(ref pb) = progress_bar {
@@ -1578,8 +1607,14 @@ impl Indexer {
         // WorktreeSession auto-cleans on drop - no need to restore HEAD
 
         // Clean up temp eval store on exit
-        eprintln!("Cleaning up temp eval store...");
-        gc::cleanup_temp_eval_store();
+        if let Some(bytes) = gc::cleanup_temp_eval_store()
+            && bytes > 0
+        {
+            eprintln!(
+                "Cleaned up temp eval store ({:.1} MB freed)",
+                bytes as f64 / 1_000_000.0
+            );
+        }
 
         Ok(result)
     }

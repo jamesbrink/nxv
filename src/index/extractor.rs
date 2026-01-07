@@ -4,9 +4,9 @@ use crate::error::Result;
 use crate::index::nix_ffi::with_evaluator;
 use serde::Deserialize;
 use std::path::Path;
-use tracing::instrument;
 #[cfg(test)]
 use std::process::Command;
+use tracing::instrument;
 
 /// Information about an extracted package.
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]

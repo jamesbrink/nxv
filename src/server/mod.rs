@@ -496,12 +496,29 @@ pub async fn run_server(config: ServerConfig) -> Result<()> {
     tracing::info!(url = %format!("http://{}/docs", addr), "API documentation");
     tracing::info!("Press Ctrl+C to stop");
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .map_err(NxvError::Io)?;
+    // Use a bounded graceful shutdown - if requests don't complete within
+    // the timeout after Ctrl+C, force shutdown to avoid hanging
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
-    tracing::info!("Server stopped");
+    let server = axum::serve(listener, app).with_graceful_shutdown(async move {
+        let _ = shutdown_rx.await;
+    });
+
+    tokio::select! {
+        result = server => {
+            result.map_err(NxvError::Io)?;
+        }
+        _ = async {
+            // Wait for Ctrl+C
+            shutdown_signal().await;
+            tracing::info!("Shutdown signal received, waiting for requests to complete...");
+            // Signal the server to begin graceful shutdown
+            let _ = shutdown_tx.send(());
+            // Give requests time to complete, then force exit
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            tracing::warn!("Graceful shutdown timeout (3s), forcing exit");
+        } => {}
+    }
 
     Ok(())
 }

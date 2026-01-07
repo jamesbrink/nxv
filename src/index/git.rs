@@ -255,24 +255,52 @@ impl NixpkgsRepo {
     }
 
     /// Get changed paths for a commit (including rename sources and destinations).
+    /// For merge commits, compares against first parent only to get actual PR changes.
     pub fn get_commit_changed_paths(&self, commit_hash: &str) -> Result<Vec<String>> {
+        // For merge commits, compare against first parent (^1) to get just the PR changes.
+        // For regular commits, this also works correctly.
         let output = Command::new("git")
             .current_dir(&self.path)
-            .args(["diff-tree", "--name-status", "-r", commit_hash])
+            .args([
+                "diff",
+                "--name-status",
+                &format!("{}^1", commit_hash),
+                commit_hash,
+            ])
             .output()?;
 
+        // If ^1 fails (e.g., initial commit), fall back to diff-tree
         if !output.status.success() {
-            return Err(NxvError::Git(git2::Error::from_str(
-                "Failed to list commit changes.",
-            )));
+            let fallback = Command::new("git")
+                .current_dir(&self.path)
+                .args(["diff-tree", "--name-status", "-r", commit_hash])
+                .output()?;
+
+            if !fallback.status.success() {
+                return Err(NxvError::Git(git2::Error::from_str(
+                    "Failed to list commit changes.",
+                )));
+            }
+
+            return Self::parse_diff_output(&String::from_utf8_lossy(&fallback.stdout));
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        Self::parse_diff_output(&String::from_utf8_lossy(&output.stdout))
+    }
+
+    /// Parse git diff --name-status output into a list of paths.
+    fn parse_diff_output(output: &str) -> Result<Vec<String>> {
         let mut paths = Vec::new();
-        for line in stdout.lines() {
+        for line in output.lines() {
+            // Skip empty lines and commit hash lines (40 hex chars)
+            if line.is_empty() || (line.len() == 40 && line.chars().all(|c| c.is_ascii_hexdigit()))
+            {
+                continue;
+            }
             let mut parts = line.split('\t');
             let status = parts.next().unwrap_or_default();
             if status.starts_with('R') {
+                // Rename: include both old and new paths
                 if let Some(old_path) = parts.next() {
                     paths.push(old_path.to_string());
                 }
@@ -284,6 +312,8 @@ impl NixpkgsRepo {
             }
         }
 
+        paths.sort();
+        paths.dedup();
         Ok(paths)
     }
 

@@ -14,7 +14,7 @@ import statistics
 import subprocess
 import sys
 from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 # Default database paths
@@ -52,7 +52,9 @@ def get_db_path() -> Path:
         return DEFAULT_DB_PATH
     if LINUX_DB_PATH.exists():
         return LINUX_DB_PATH
-    raise FileNotFoundError("No nxv database found. Set NXV_DB_PATH or run 'nxv update'")
+    raise FileNotFoundError(
+        "No nxv database found. Set NXV_DB_PATH or run 'nxv update'"
+    )
 
 
 def drop_os_caches():
@@ -132,7 +134,9 @@ def get_db_info(db_path: Path) -> DatabaseInfo:
         cursor = conn.execute("SELECT COUNT(*) FROM package_versions")
         info.total_rows = cursor.fetchone()[0]
 
-        cursor = conn.execute("SELECT COUNT(DISTINCT attribute_path) FROM package_versions")
+        cursor = conn.execute(
+            "SELECT COUNT(DISTINCT attribute_path) FROM package_versions"
+        )
         info.unique_attrs = cursor.fetchone()[0]
 
         cursor = conn.execute("SELECT COUNT(DISTINCT name) FROM package_versions")
@@ -248,7 +252,9 @@ def run_benchmarks(
                 f"%.{term}%",
             )
             results.append(
-                benchmark_query(conn, f"relevance_search({term})", table, query, params, **bm_kwargs)
+                benchmark_query(
+                    conn, f"relevance_search({term})", table, query, params, **bm_kwargs
+                )
             )
 
         # 5. Search by name + version
@@ -348,7 +354,9 @@ def print_results(results: list[BenchmarkResult], tables: list[str]) -> None:
                 print(f"{name:<35} {r.cold_ms:<12.2f} {r.warm_ms:<12.2f} {r.rows:<12,}")
     else:
         # Comparison output
-        print(f"\n{'Query':<30} {'Full Cold':<10} {'Full Warm':<10} {'Mat Cold':<10} {'Mat Warm':<10} {'Speedup':<8} {'Rows'}")
+        print(
+            f"\n{'Query':<30} {'Full Cold':<10} {'Full Warm':<10} {'Mat Cold':<10} {'Mat Warm':<10} {'Speedup':<8} {'Rows'}"
+        )
         print("=" * 100)
         for name, tbl_results in by_name.items():
             full = tbl_results.get("package_versions")
@@ -365,7 +373,9 @@ def print_results(results: list[BenchmarkResult], tables: list[str]) -> None:
                 speedup = "-"
 
             rows = f"{full.rows:,}" if full else (f"{mat.rows:,}" if mat else "0")
-            print(f"{name:<30} {full_cold:<10} {full_warm:<10} {mat_cold:<10} {mat_warm:<10} {speedup:<8} {rows}")
+            print(
+                f"{name:<30} {full_cold:<10} {full_warm:<10} {mat_cold:<10} {mat_warm:<10} {speedup:<8} {rows}"
+            )
 
     print()
 
@@ -378,12 +388,20 @@ def print_summary(info: DatabaseInfo) -> None:
     print(f"Total rows:             {info.total_rows:,}")
     print(f"Unique attribute paths: {info.unique_attrs:,}")
     print(f"Unique names:           {info.unique_names:,}")
-    print(f"Avg versions/package:   {info.total_rows / info.unique_attrs:.1f}" if info.unique_attrs else "")
+    print(
+        f"Avg versions/package:   {info.total_rows / info.unique_attrs:.1f}"
+        if info.unique_attrs
+        else ""
+    )
 
     if info.has_matview:
-        print(f"\nMaterialized view (package_latest):")
+        print("\nMaterialized view (package_latest):")
         print(f"  Rows:             {info.matview_rows:,}")
-        print(f"  Reduction factor: {info.total_rows / info.matview_rows:.1f}x" if info.matview_rows else "")
+        print(
+            f"  Reduction factor: {info.total_rows / info.matview_rows:.1f}x"
+            if info.matview_rows
+            else ""
+        )
 
 
 def main() -> None:
@@ -391,11 +409,22 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="Benchmark nxv database queries")
     parser.add_argument("--db", type=Path, help="Path to database file")
-    parser.add_argument("--drop-cache", action="store_true", help="Attempt to drop OS caches before benchmarking")
-    parser.add_argument("--true-cold", action="store_true",
-                        help="Drop OS cache before each cold measurement (slow, accurate)")
-    parser.add_argument("--table", choices=["full", "matview", "both"], default="both",
-                        help="Which table(s) to benchmark")
+    parser.add_argument(
+        "--drop-cache",
+        action="store_true",
+        help="Attempt to drop OS caches before benchmarking",
+    )
+    parser.add_argument(
+        "--true-cold",
+        action="store_true",
+        help="Drop OS cache before each cold measurement (slow, accurate)",
+    )
+    parser.add_argument(
+        "--table",
+        choices=["full", "matview", "both"],
+        default="both",
+        help="Which table(s) to benchmark",
+    )
     args = parser.parse_args()
 
     db_path = args.db or get_db_path()

@@ -510,10 +510,10 @@ fn set_to_json(values: &HashSet<String>) -> Option<String> {
 
 /// Tracks timing data for smoothed ETA calculations using exponential moving average (EMA).
 ///
-/// Uses EMA with outlier rejection instead of simple sliding window average because:
+/// Uses EMA blended with median for stability:
 /// - Commit processing times vary wildly (some touch 1 file, others touch thousands)
-/// - Simple averages get thrown off by outliers
-/// - EMA provides smooth, responsive estimates
+/// - Pure EMA is too volatile, pure median too slow to adapt
+/// - Blending provides smooth, stable estimates
 pub(super) struct EtaTracker {
     /// Exponential moving average of commit duration (in seconds)
     ema_secs: Option<f64>,
@@ -527,10 +527,10 @@ pub(super) struct EtaTracker {
     commits_processed: u64,
     /// Minimum samples before showing ETA
     warmup_count: u64,
-    /// Recent durations for outlier detection (rolling median)
+    /// Recent durations for median calculation and outlier detection
     recent_durations: VecDeque<f64>,
-    /// Window size for outlier detection
-    outlier_window: usize,
+    /// Window size for median calculation
+    median_window: usize,
 }
 
 impl EtaTracker {
@@ -540,8 +540,8 @@ impl EtaTracker {
     /// more smoothing (less responsive but more stable).
     ///
     /// The EMA alpha is calculated as 2/(window_size+1), which gives:
-    /// - window_size=20 -> alpha=0.095 (smooth)
     /// - window_size=50 -> alpha=0.039 (very smooth)
+    /// - window_size=100 -> alpha=0.020 (extremely smooth)
     fn new(window_size: usize) -> Self {
         // Convert window size to EMA alpha: alpha = 2/(N+1)
         // This gives equivalent smoothing to a simple moving average of size N
@@ -553,9 +553,9 @@ impl EtaTracker {
             commit_start: None,
             total_remaining: 0,
             commits_processed: 0,
-            warmup_count: 10, // Don't show ETA until 10 commits processed
-            recent_durations: VecDeque::with_capacity(50),
-            outlier_window: 50,
+            warmup_count: 20, // Don't show ETA until 20 commits processed
+            recent_durations: VecDeque::with_capacity(100),
+            median_window: 100,
         }
     }
 
@@ -574,9 +574,9 @@ impl EtaTracker {
             let elapsed_secs = start.elapsed().as_secs_f64();
             self.commits_processed += 1;
 
-            // Track recent durations for outlier detection
+            // Track recent durations for median calculation
             self.recent_durations.push_back(elapsed_secs);
-            if self.recent_durations.len() > self.outlier_window {
+            if self.recent_durations.len() > self.median_window {
                 self.recent_durations.pop_front();
             }
 
@@ -666,14 +666,21 @@ impl EtaTracker {
     /// Compute the estimated remaining duration.
     ///
     /// Returns None during warm-up period to avoid showing wildly inaccurate ETAs.
+    /// Uses a blend of EMA and median for stability - EMA adapts to trends while
+    /// median resists outliers.
     fn eta(&self) -> Option<Duration> {
         // Don't show ETA until we have enough samples
         if self.commits_processed < self.warmup_count {
             return None;
         }
 
-        let avg_secs = self.ema_secs?;
-        let remaining_secs = avg_secs * self.total_remaining as f64;
+        let ema = self.ema_secs?;
+        let median = self.calculate_median()?;
+
+        // Blend EMA (40%) with median (60%) for stability
+        // Median is more stable, EMA helps track trends
+        let blended_avg = ema * 0.4 + median * 0.6;
+        let remaining_secs = blended_avg * self.total_remaining as f64;
 
         // Cap at reasonable maximum (30 days)
         let max_secs = 30.0 * 24.0 * 3600.0;
@@ -1059,8 +1066,8 @@ impl Indexer {
             pb
         });
 
-        // ETA tracker with 20-commit sliding window for stable estimates
-        let mut eta_tracker = EtaTracker::new(20);
+        // ETA tracker with window size 50 and EMA/median blending for stable estimates
+        let mut eta_tracker = EtaTracker::new(50);
 
         // Track open ranges: attribute_path+version -> OpenRange
         // Try to load from checkpoint if resuming
@@ -1555,6 +1562,7 @@ impl Indexer {
         // WorktreeSession auto-cleans on drop - no need to restore HEAD
 
         // Clean up temp eval store on exit
+        eprintln!("Cleaning up temp eval store...");
         gc::cleanup_temp_eval_store();
 
         Ok(result)
@@ -1735,10 +1743,10 @@ mod tests {
         let mut tracker = EtaTracker::new(10);
         tracker.set_remaining(50);
 
-        // Process more commits than warmup_count (10)
-        for _ in 0..12 {
+        // Process more commits than warmup_count (20)
+        for _ in 0..25 {
             tracker.start_commit();
-            thread::sleep(Duration::from_millis(10));
+            thread::sleep(Duration::from_millis(5));
             tracker.finish_commit();
         }
 
@@ -1802,10 +1810,10 @@ mod tests {
         let mut tracker = EtaTracker::new(5);
         tracker.set_remaining(1);
 
-        // Process enough commits to pass warmup
-        for _ in 0..12 {
+        // Process enough commits to pass warmup (20)
+        for _ in 0..25 {
             tracker.start_commit();
-            thread::sleep(Duration::from_millis(10));
+            thread::sleep(Duration::from_millis(5));
             tracker.finish_commit();
         }
 

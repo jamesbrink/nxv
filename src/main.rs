@@ -11,6 +11,7 @@ mod output;
 mod paths;
 mod remote;
 mod search;
+mod theme;
 pub mod version;
 
 #[cfg(feature = "indexer")]
@@ -38,12 +39,63 @@ use cli::{Cli, Commands};
 /// nxv::main();
 /// ```
 fn main() {
+    // Install a custom panic hook to handle broken pipe gracefully.
+    // When piped to programs like `tee` that exit on Ctrl+C, writes to stderr
+    // fail with EPIPE. The println!/eprintln! macros panic on write failure,
+    // and when the default panic handler tries to print to stderr (also broken),
+    // Rust calls abort(). This hook catches broken pipe panics and exits cleanly.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        // Check if this is a broken pipe panic
+        let is_broken_pipe = info
+            .payload()
+            .downcast_ref::<String>()
+            .map(|s| s.contains("Broken pipe") || s.contains("os error 32"))
+            .unwrap_or(false)
+            || info
+                .payload()
+                .downcast_ref::<&str>()
+                .map(|s| s.contains("Broken pipe") || s.contains("os error 32"))
+                .unwrap_or(false);
+
+        if is_broken_pipe {
+            // Exit cleanly - don't try to print anything
+            std::process::exit(0);
+        }
+
+        // For other panics, use the default handler
+        default_hook(info);
+    }));
+
+    // Ignore SIGPIPE to prevent crashes when piped to programs that exit early (e.g., tee, head)
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
+
     let cli = Cli::parse();
 
-    // Handle no-color flag
+    // Initialize tracing subscriber for indexer commands (reads RUST_LOG env var)
+    // FmtSpan::CLOSE logs span duration when it completes
+    // Note: serve command has its own tracing setup with JSON support
+    #[cfg(feature = "indexer")]
+    {
+        use cli::Commands::*;
+        if matches!(
+            cli.command,
+            Index(_) | Backfill(_) | Reset(_) | Publish(_) | Keygen(_)
+        ) {
+            tracing_subscriber::fmt()
+                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+                .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
+                .with_writer(std::io::stderr)
+                .init();
+        }
+    }
+
+    // Handle no-color flag - affects both owo_colors and comfy_table
     if cli.no_color {
-        // Disable colors globally - this affects if_supports_color() calls
-        owo_colors::set_override(false);
+        theme::disable_colors();
     }
 
     let result = match &cli.command {
@@ -173,6 +225,7 @@ fn get_backend_with_prompt(cli: &Cli) -> Result<backend::Backend> {
                 if input.is_empty() || input == "y" || input == "yes" {
                     // Run the update command
                     let update_args = cli::UpdateArgs {
+                        variant: cli::IndexVariant::Slim,
                         force: false,
                         manifest_url: None,
                         skip_verify: false,
@@ -247,8 +300,39 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
     if args.exact && !args.desc && !backend.is_remote() {
         let bloom_path = paths::get_bloom_path_for_db(&cli.db_path);
 
-        // Regenerate bloom filter if missing but database exists
-        if !bloom_path.exists()
+        // Check if bloom filter is missing or stale (older than database)
+        // This handles the case where the database is being actively indexed
+        let bloom_is_stale = || -> bool {
+            // If bloom doesn't exist, it's "stale" (needs creation)
+            if !bloom_path.exists() {
+                return true;
+            }
+
+            // Get bloom filter modification time
+            let bloom_mtime = match std::fs::metadata(&bloom_path) {
+                Ok(m) => m.modified().ok(),
+                Err(_) => return true,
+            };
+
+            // Get database modification time (check WAL file too for active writes)
+            let db_mtime = std::fs::metadata(&cli.db_path)
+                .ok()
+                .and_then(|m| m.modified().ok());
+            let wal_path = cli.db_path.with_extension("db-wal");
+            let wal_mtime = std::fs::metadata(&wal_path)
+                .ok()
+                .and_then(|m| m.modified().ok());
+
+            // Bloom is stale if database or WAL is newer
+            match (bloom_mtime, db_mtime, wal_mtime) {
+                (Some(bloom), Some(db), _) if db > bloom => true,
+                (Some(bloom), _, Some(wal)) if wal > bloom => true,
+                _ => false,
+            }
+        };
+
+        // Regenerate bloom filter if missing or stale
+        if bloom_is_stale()
             && cli.db_path.exists()
             && let Ok(db) = crate::db::Database::open_readonly(&cli.db_path)
         {
@@ -325,6 +409,7 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
     let format: OutputFormat = args.format.into();
     let options = TableOptions {
         show_platforms: args.show_platforms,
+        show_store_path: args.show_store_path,
         ascii: args.ascii,
     };
     print_results(&result.data, format, options);
@@ -388,10 +473,16 @@ fn cmd_update(cli: &Cli, args: &cli::UpdateArgs) -> Result<()> {
         }
     }
 
+    let full_history = args.variant == cli::IndexVariant::Full;
+
     if args.force {
         eprintln!("Forcing full re-download of index...");
     } else {
         eprintln!("Checking for updates...");
+    }
+
+    if full_history {
+        eprintln!("Requesting {} (complete version history)...", args.variant);
     }
 
     let status = perform_update(
@@ -402,6 +493,7 @@ fn cmd_update(cli: &Cli, args: &cli::UpdateArgs) -> Result<()> {
         args.skip_verify,
         args.public_key.as_deref(),
         Some(cli.api_timeout),
+        full_history,
     )?;
 
     match status {
@@ -468,7 +560,7 @@ fn cmd_update(cli: &Cli, args: &cli::UpdateArgs) -> Result<()> {
 /// cmd_pkg_info(&cli, &args).unwrap();
 /// ```
 fn cmd_pkg_info(cli: &Cli, args: &cli::InfoArgs) -> Result<()> {
-    use owo_colors::OwoColorize;
+    use output::components;
 
     // Get backend (local DB or remote API)
     let backend = get_backend_with_prompt(cli)?;
@@ -522,171 +614,16 @@ fn cmd_pkg_info(cli: &Cli, args: &cli::InfoArgs) -> Result<()> {
             // and summarize if there are multiple attribute paths
             let pkg = &packages[0];
 
-            println!(
-                "{}: {} {}",
-                "Package".bold(),
-                pkg.name.cyan(),
-                pkg.version.green()
-            );
-            println!();
-
-            println!("{}", "Details".bold().underline());
-            println!(
-                "  {:<16} {}",
-                "Attribute:".yellow(),
-                pkg.attribute_path.cyan()
-            );
-            println!(
-                "  {:<16} {}",
-                "Description:",
-                pkg.description.as_deref().unwrap_or("-")
-            );
-            println!(
-                "  {:<16} {}",
-                "Homepage:",
-                pkg.homepage.as_deref().unwrap_or("-")
-            );
-            println!(
-                "  {:<16} {}",
-                "License:",
-                pkg.license.as_deref().unwrap_or("-")
-            );
-            println!();
-
-            println!("{}", "Availability".bold().underline());
-            println!(
-                "  {:<16} {} ({})",
-                "First seen:".yellow(),
-                pkg.first_commit_short(),
-                pkg.first_commit_date.format("%Y-%m-%d")
-            );
-            println!(
-                "  {:<16} {} ({})",
-                "Last seen:".yellow(),
-                pkg.last_commit_short(),
-                pkg.last_commit_date.format("%Y-%m-%d")
-            );
-            println!();
-
-            if let Some(ref maintainers) = pkg.maintainers {
-                println!("{}", "Maintainers".bold().underline());
-                // Parse JSON array and display
-                if let Ok(list) = serde_json::from_str::<Vec<String>>(maintainers) {
-                    for m in list {
-                        println!("  • {}", m);
-                    }
-                } else {
-                    println!("  {}", maintainers);
-                }
-                println!();
-            }
-
-            if let Some(ref platforms) = pkg.platforms {
-                println!("{}", "Platforms".bold().underline());
-                if let Ok(list) = serde_json::from_str::<Vec<String>>(platforms) {
-                    // Detect current platform
-                    let current_platform = format!(
-                        "{}-{}",
-                        std::env::consts::ARCH,
-                        if std::env::consts::OS == "macos" {
-                            "darwin"
-                        } else {
-                            std::env::consts::OS
-                        }
-                    );
-
-                    // Helper to format platform with highlighting
-                    let format_platform = |p: &str| -> String {
-                        if p == current_platform {
-                            format!("{}", p.green().bold())
-                        } else {
-                            p.to_string()
-                        }
-                    };
-
-                    // Group by OS
-                    let mut linux: Vec<&str> = Vec::new();
-                    let mut darwin: Vec<&str> = Vec::new();
-                    let mut other: Vec<&str> = Vec::new();
-
-                    for p in &list {
-                        if p.contains("linux") {
-                            linux.push(p);
-                        } else if p.contains("darwin") {
-                            darwin.push(p);
-                        } else {
-                            other.push(p);
-                        }
-                    }
-
-                    if !linux.is_empty() {
-                        let formatted: Vec<_> = linux.iter().map(|p| format_platform(p)).collect();
-                        println!("  Linux:  {}", formatted.join(", "));
-                    }
-                    if !darwin.is_empty() {
-                        let formatted: Vec<_> = darwin.iter().map(|p| format_platform(p)).collect();
-                        println!("  Darwin: {}", formatted.join(", "));
-                    }
-                    if !other.is_empty() {
-                        let formatted: Vec<_> = other.iter().map(|p| format_platform(p)).collect();
-                        println!("  Other:  {}", formatted.join(", "));
-                    }
-                } else {
-                    println!("  {}", platforms);
-                }
-                println!();
-            }
-
-            // Show security warning if package has known vulnerabilities
-            if pkg.is_insecure() {
-                println!("{}", "Security Warning".bold().underline().red());
-                println!(
-                    "  {}",
-                    "This package has known vulnerabilities!".red().bold()
-                );
-                let vulns = pkg.vulnerabilities();
-                for vuln in &vulns {
-                    println!("  {} {}", "•".red(), vuln);
-                }
-                println!();
-            }
-
-            println!("{}", "Usage".bold().underline());
-            println!("  {}", pkg.nix_shell_cmd());
-            println!("  {}", pkg.nix_run_cmd());
-
-            if pkg.predates_flakes() {
-                println!();
-                println!(
-                    "{}",
-                    "Note: Very old nixpkgs (pre-2020) may not build with modern Nix.".yellow()
-                );
-            }
-
-            // Show other attribute paths if there are multiple (deduplicated)
-            if packages.len() > 1 {
-                use std::collections::HashSet;
-                let mut seen: HashSet<(&str, &str)> = HashSet::new();
-                seen.insert((&pkg.attribute_path, &pkg.version));
-
-                let others: Vec<_> = packages
-                    .iter()
-                    .skip(1)
-                    .filter(|p| seen.insert((&p.attribute_path, &p.version)))
-                    .collect();
-
-                if !others.is_empty() {
-                    println!();
-                    println!("{}", "Other Attribute Paths".bold().underline());
-                    for other_pkg in others {
-                        println!(
-                            "  • {} ({})",
-                            other_pkg.attribute_path.cyan(),
-                            other_pkg.version.green()
-                        );
-                    }
-                }
-            }
+            components::print_package_header(pkg);
+            components::print_details(pkg);
+            components::print_availability(pkg);
+            components::print_maintainers(pkg);
+            components::print_platforms(pkg);
+            components::print_security_warning(pkg);
+            components::print_usage(pkg);
+            components::print_store_paths(pkg);
+            components::print_preflakes_warning(pkg);
+            components::print_other_attr_paths(&packages, pkg);
         }
     }
 
@@ -709,6 +646,8 @@ fn cmd_pkg_info(cli: &Cli, args: &cli::InfoArgs) -> Result<()> {
 /// // cmd_stats(&cli).unwrap();
 /// ```
 fn cmd_stats(cli: &Cli) -> Result<()> {
+    use theme::Themed;
+
     // Check if using remote API
     let is_remote = std::env::var("NXV_API_URL").is_ok();
 
@@ -734,49 +673,81 @@ fn cmd_stats(cli: &Cli) -> Result<()> {
     let last_commit = backend.get_meta("last_indexed_commit")?;
     let last_indexed_date = backend.get_meta("last_indexed_date")?;
     let index_version = backend.get_meta("index_version")?;
+    let schema_version = backend.get_meta("schema_version")?;
 
-    println!("Index Information");
-    println!("=================");
+    println!("{}", "Index Information".section_header());
 
     if is_remote {
         println!(
-            "API endpoint: {}",
+            "{} {}",
+            "API endpoint:".label(),
             std::env::var("NXV_API_URL").unwrap_or_default()
         );
     } else {
-        println!("Database path: {:?}", cli.db_path);
+        println!("{} {:?}", "Database path:".label(), cli.db_path);
     }
 
     if let Some(version) = index_version {
-        println!("Index version: {}", version);
+        println!("{} {}", "Index version:".label(), version);
+    }
+
+    if let Some(version) = schema_version {
+        println!("{} {}", "Schema version:".label(), version);
     }
 
     if let Some(commit) = last_commit {
-        println!("Last indexed commit: {}", &commit[..7.min(commit.len())]);
+        println!(
+            "{} {}",
+            "Last indexed commit:".label(),
+            (&commit[..7.min(commit.len())]).commit()
+        );
     }
 
     if let Some(date_str) = last_indexed_date {
         // Parse the RFC3339 date and display in a friendly format
         if let Ok(date) = chrono::DateTime::parse_from_rfc3339(&date_str) {
-            println!("Last updated: {}", date.format("%Y-%m-%d %H:%M:%S UTC"));
+            println!(
+                "{} {}",
+                "Last updated:".label(),
+                date.format("%Y-%m-%d %H:%M:%S UTC")
+            );
         } else {
-            println!("Last updated: {}", date_str);
+            println!("{} {}", "Last updated:".label(), date_str);
         }
     }
 
     println!();
-    println!("Statistics");
-    println!("----------");
-    println!("Total version ranges: {}", stats.total_ranges);
-    println!("Unique package names: {}", stats.unique_names);
-    println!("Unique versions: {}", stats.unique_versions);
+    println!("{}", "Statistics".section_header());
+    println!(
+        "{} {}",
+        "Total version ranges:".label(),
+        stats.total_ranges.count()
+    );
+    println!(
+        "{} {}",
+        "Unique package names:".label(),
+        stats.unique_names.count()
+    );
+    println!(
+        "{} {}",
+        "Unique versions:".label(),
+        stats.unique_versions.count()
+    );
 
     if let Some(oldest) = stats.oldest_commit_date {
-        println!("Oldest package date: {}", oldest.format("%Y-%m-%d"));
+        println!(
+            "{} {}",
+            "Oldest package date:".label(),
+            oldest.format("%Y-%m-%d")
+        );
     }
 
     if let Some(newest) = stats.newest_commit_date {
-        println!("Latest package change: {}", newest.format("%Y-%m-%d"));
+        println!(
+            "{} {}",
+            "Latest package change:".label(),
+            newest.format("%Y-%m-%d")
+        );
     }
 
     // Local-only info: file sizes
@@ -785,7 +756,7 @@ fn cmd_stats(cli: &Cli) -> Result<()> {
             && let Ok(metadata) = std::fs::metadata(&cli.db_path)
         {
             let size_mb = metadata.len() as f64 / (1024.0 * 1024.0);
-            println!("Database size: {:.2} MB", size_mb);
+            println!("{} {:.2} MB", "Database size:".label(), size_mb);
         }
 
         // Bloom filter status
@@ -794,9 +765,14 @@ fn cmd_stats(cli: &Cli) -> Result<()> {
             && let Ok(metadata) = std::fs::metadata(&bloom_path)
         {
             let size_kb = metadata.len() as f64 / 1024.0;
-            println!("Bloom filter: present ({:.2} KB)", size_kb);
+            println!(
+                "{} {} ({:.2} KB)",
+                "Bloom filter:".label(),
+                "present".success(),
+                size_kb
+            );
         } else if !bloom_path.exists() {
-            println!("Bloom filter: not found");
+            println!("{} {}", "Bloom filter:".label(), "not found".warning());
         }
     }
 
@@ -867,11 +843,21 @@ fn cmd_complete_package(cli: &Cli, args: &cli::CompletePackageArgs) -> Result<()
 /// cmd_history(&cli, &args)?;
 /// ```
 fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
+    use comfy_table::{
+        Cell, ContentArrangement, Table,
+        presets::{ASCII_FULL, UTF8_FULL},
+    };
+    use output::components;
+    use theme::{Semantic, ThemedCell};
+
     // Get backend (local DB or remote API)
     let backend = get_backend_with_prompt(cli)?;
 
     if let Some(ref version) = args.version {
-        // Show when a specific version was available
+        // DEPRECATED: Show when a specific version was available
+        // This is redundant with `nxv info <pkg> <version>` which shows more details
+        components::print_history_deprecation_warning();
+
         // Use prefix search (like info command) to find best matching package
         let packages = backend.search_by_name_version(&args.package, Some(version.as_str()))?;
 
@@ -880,37 +866,10 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
         } else {
             // Use the first (most recent) match
             let pkg = &packages[0];
-            println!("Package: {} {}", pkg.attribute_path, pkg.version);
-            println!();
-            println!(
-                "First appeared: {} ({})",
-                pkg.first_commit_short(),
-                pkg.first_commit_date.format("%Y-%m-%d")
-            );
-            println!(
-                "Last seen: {} ({})",
-                pkg.last_commit_short(),
-                pkg.last_commit_date.format("%Y-%m-%d")
-            );
-            println!();
-
-            // Show security warning if package has known vulnerabilities
-            if pkg.is_insecure() {
-                use owo_colors::OwoColorize;
-                println!("{}", "Security Warning".bold().underline().red());
-                println!(
-                    "  {}",
-                    "This package has known vulnerabilities!".red().bold()
-                );
-                let vulns = pkg.vulnerabilities();
-                for vuln in &vulns {
-                    println!("  {} {}", "•".red(), vuln);
-                }
-                println!();
-            }
-
-            println!("To use this version:");
-            println!("  {}", pkg.nix_run_cmd());
+            components::print_package_header_with_attr(&pkg.attribute_path, &pkg.version);
+            components::print_availability_compact(pkg);
+            components::print_security_warning(pkg);
+            components::print_usage_compact(pkg);
         }
     } else if args.full {
         // Show full details for all versions
@@ -948,10 +907,6 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
                 }
             }
             cli::OutputFormatArg::Table => {
-                use comfy_table::{
-                    Cell, Color, ContentArrangement, Table, presets::ASCII_FULL, presets::UTF8_FULL,
-                };
-
                 let mut table = Table::new();
                 table
                     .load_preset(if args.ascii { ASCII_FULL } else { UTF8_FULL })
@@ -966,33 +921,32 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
 
                 for pkg in packages {
                     let desc = pkg.description.as_deref().unwrap_or("-");
-                    // Add warning indicator and use red for insecure packages
                     let version_display = if pkg.is_insecure() {
-                        format!("{} ⚠", pkg.version)
+                        format!("{} \u{26a0}", pkg.version)
                     } else {
                         pkg.version.clone()
                     };
-                    let version_color = if pkg.is_insecure() {
-                        Color::Red
+                    let version_semantic = if pkg.is_insecure() {
+                        Semantic::VersionInsecure
                     } else {
-                        Color::Green
+                        Semantic::Version
                     };
                     table.add_row(vec![
-                        Cell::new(&version_display).fg(version_color),
-                        Cell::new(&pkg.attribute_path).fg(Color::Cyan),
+                        Cell::new(&version_display).themed(version_semantic),
+                        Cell::new(&pkg.attribute_path).themed(Semantic::AttrPath),
                         Cell::new(format!(
                             "{} ({})",
                             pkg.first_commit_short(),
                             pkg.first_commit_date.format("%Y-%m-%d")
                         ))
-                        .fg(Color::Yellow),
+                        .themed(Semantic::Commit),
                         Cell::new(format!(
                             "{} ({})",
                             pkg.last_commit_short(),
                             pkg.last_commit_date.format("%Y-%m-%d")
                         ))
-                        .fg(Color::Yellow),
-                        Cell::new(desc),
+                        .themed(Semantic::Commit),
+                        Cell::new(desc).themed(Semantic::Description),
                     ]);
                 }
 
@@ -1039,10 +993,6 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
                 }
             }
             cli::OutputFormatArg::Table => {
-                use comfy_table::{
-                    Cell, Color, ContentArrangement, Table, presets::ASCII_FULL, presets::UTF8_FULL,
-                };
-
                 let mut table = Table::new();
                 table
                     .load_preset(if args.ascii { ASCII_FULL } else { UTF8_FULL })
@@ -1051,25 +1001,104 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
 
                 for (version, first, last, is_insecure) in history {
                     let version_display = if is_insecure {
-                        format!("{} ⚠", version)
+                        format!("{} \u{26a0}", version)
                     } else {
                         version
                     };
-                    let version_color = if is_insecure {
-                        Color::Red
+                    let version_semantic = if is_insecure {
+                        Semantic::VersionInsecure
                     } else {
-                        Color::Green
+                        Semantic::Version
                     };
                     table.add_row(vec![
-                        Cell::new(&version_display).fg(version_color),
-                        Cell::new(first.format("%Y-%m-%d").to_string()).fg(Color::White),
-                        Cell::new(last.format("%Y-%m-%d").to_string()).fg(Color::White),
+                        Cell::new(&version_display).themed(version_semantic),
+                        Cell::new(first.format("%Y-%m-%d").to_string()).themed(Semantic::Date),
+                        Cell::new(last.format("%Y-%m-%d").to_string()).themed(Semantic::Date),
                     ]);
                 }
 
                 println!("{table}");
             }
         }
+    }
+
+    Ok(())
+}
+
+/// Validate a date argument in YYYY-MM-DD format.
+/// Returns the date string if valid, or an error message.
+#[cfg(feature = "indexer")]
+fn validate_date_format(date: &str, arg_name: &str) -> Result<()> {
+    let parts: Vec<&str> = date.split('-').collect();
+    if parts.len() != 3 {
+        anyhow::bail!("--{} must be in YYYY-MM-DD format, got: {}", arg_name, date);
+    }
+    let year = parts[0].parse::<u32>();
+    let month = parts[1].parse::<u32>();
+    let day = parts[2].parse::<u32>();
+    match (year, month, day) {
+        (Ok(y), Ok(m), Ok(d))
+            if (1970..=2100).contains(&y) && (1..=12).contains(&m) && (1..=31).contains(&d) =>
+        {
+            Ok(())
+        }
+        _ => anyhow::bail!(
+            "--{} must be a valid date in YYYY-MM-DD format, got: {}",
+            arg_name,
+            date
+        ),
+    }
+}
+
+/// Validate date range against MIN_INDEXABLE_DATE.
+/// Returns error if --until is before MIN_INDEXABLE_DATE.
+/// Warns if --since is before MIN_INDEXABLE_DATE.
+#[cfg(feature = "indexer")]
+fn validate_date_range(since: Option<&str>, until: Option<&str>) -> Result<()> {
+    use crate::index::git::MIN_INDEXABLE_DATE;
+
+    // Validate format first
+    if let Some(since) = since {
+        validate_date_format(since, "since")?;
+    }
+    if let Some(until) = until {
+        validate_date_format(until, "until")?;
+    }
+
+    // Check that --until is not before MIN_INDEXABLE_DATE
+    if let Some(until) = until
+        && until < MIN_INDEXABLE_DATE
+    {
+        anyhow::bail!(
+            "--until date {} is before the minimum indexable date {}.\n\
+             nixpkgs commits before {} have a different structure that \
+             doesn't work with modern Nix evaluation.",
+            until,
+            MIN_INDEXABLE_DATE,
+            MIN_INDEXABLE_DATE
+        );
+    }
+
+    // Warn if --since is before MIN_INDEXABLE_DATE (it will be clamped)
+    if let Some(since) = since
+        && since < MIN_INDEXABLE_DATE
+    {
+        eprintln!(
+            "Note: --since {} is before the minimum indexable date {}. \
+             Starting from {} instead.",
+            since, MIN_INDEXABLE_DATE, MIN_INDEXABLE_DATE
+        );
+    }
+
+    // Check that --since is not after --until
+    if let (Some(since), Some(until)) = (since, until)
+        && since > until
+    {
+        anyhow::bail!(
+            "--since {} is after --until {}. No commits in this range.",
+            since,
+            until
+        );
     }
 
     Ok(())
@@ -1103,6 +1132,17 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
     use crate::index::{Indexer, IndexerConfig, save_bloom_filter};
     use std::sync::atomic::Ordering;
 
+    // Check for internal worker mode first
+    if args.internal_worker {
+        // Set memory threshold from CLI args
+        crate::index::worker::worker_main::set_max_memory(args.max_memory);
+        // Run worker subprocess loop (never returns)
+        crate::index::worker::run_worker_main();
+    }
+
+    // Validate date arguments
+    validate_date_range(args.since.as_deref(), args.until.as_deref())?;
+
     // Ensure data directory exists before opening database
     paths::ensure_data_dir()?;
 
@@ -1120,6 +1160,11 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
         since: args.since.clone(),
         until: args.until.clone(),
         max_commits: args.max_commits,
+        worker_count: args.workers,
+        max_memory_mib: args.max_memory,
+        verbose: args.verbose,
+        gc_interval: args.gc_interval,
+        gc_min_free_bytes: args.gc_min_free_gb * 1024 * 1024 * 1024,
     };
 
     let indexer = Indexer::new(config);
@@ -1127,7 +1172,12 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
     // Set up Ctrl+C handler
     let shutdown_flag = indexer.shutdown_flag();
     ctrlc::set_handler(move || {
-        eprintln!("\nReceived Ctrl+C, requesting graceful shutdown...");
+        // Use write! instead of eprintln! to handle broken pipe gracefully
+        // (e.g., when piped to `tee` which exits on Ctrl+C)
+        let _ = std::io::Write::write_all(
+            &mut std::io::stderr(),
+            b"\nReceived Ctrl+C, requesting graceful shutdown...\n",
+        );
         shutdown_flag.store(true, Ordering::SeqCst);
     })
     .expect("Error setting Ctrl+C handler");
@@ -1196,6 +1246,9 @@ fn cmd_backfill(cli: &Cli, args: &cli::BackfillArgs) -> Result<()> {
     use crate::index::backfill::{BackfillConfig, create_shutdown_flag, run_backfill};
     use std::sync::atomic::Ordering;
 
+    // Validate date arguments
+    validate_date_range(args.since.as_deref(), args.until.as_deref())?;
+
     let nixpkgs_path = paths::expand_tilde(&args.nixpkgs_path);
 
     if args.history {
@@ -1221,13 +1274,21 @@ fn cmd_backfill(cli: &Cli, args: &cli::BackfillArgs) -> Result<()> {
         limit: args.limit,
         dry_run: args.dry_run,
         use_history: args.history,
+        since: args.since.clone(),
+        until: args.until.clone(),
+        max_commits: args.max_commits,
     };
 
     // Set up Ctrl+C handler
     let shutdown_flag = create_shutdown_flag();
     let flag_clone = shutdown_flag.clone();
     ctrlc::set_handler(move || {
-        eprintln!("\nReceived Ctrl+C, requesting graceful shutdown...");
+        // Use write! instead of eprintln! to handle broken pipe gracefully
+        // (e.g., when piped to `tee` which exits on Ctrl+C)
+        let _ = std::io::Write::write_all(
+            &mut std::io::stderr(),
+            b"\nReceived Ctrl+C, requesting graceful shutdown...\n",
+        );
         flag_clone.store(true, Ordering::SeqCst);
     })
     .expect("Error setting Ctrl+C handler");
@@ -1278,7 +1339,7 @@ fn cmd_backfill(cli: &Cli, args: &cli::BackfillArgs) -> Result<()> {
 /// Resets the local nixpkgs git repository to a given reference, optionally fetching from origin first.
 ///
 /// If `args.fetch` is true, the repository will be fetched from origin before performing a hard reset.
-/// The repository is reset to `args.to` when provided, otherwise to `origin/master`. Progress and the
+/// The repository is reset to `args.to` when provided, otherwise to `origin/nixpkgs-unstable`. Progress and the
 /// resulting HEAD short hash are printed to stderr. Errors from repository operations are propagated.
 ///
 /// # Examples
@@ -1306,7 +1367,7 @@ fn cmd_reset(_cli: &Cli, args: &cli::ResetArgs) -> Result<()> {
     }
 
     let target = args.to.as_deref();
-    let target_display = target.unwrap_or("origin/master");
+    let target_display = target.unwrap_or("origin/nixpkgs-unstable");
     eprintln!("Resetting to {}...", target_display);
 
     repo.reset_hard(target)?;
@@ -1355,6 +1416,7 @@ fn cmd_publish(cli: &Cli, args: &cli::PublishArgs) -> Result<()> {
         !cli.quiet,
         args.secret_key.as_deref(),
         args.min_version,
+        args.compression_level,
     )?;
 
     Ok(())

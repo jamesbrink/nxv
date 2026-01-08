@@ -5,6 +5,8 @@ use chrono::{DateTime, TimeZone, Utc};
 use git2::{Oid, Repository, Sort};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Instant;
+use tracing::{instrument, trace};
 
 /// The earliest commit date we support for indexing.
 /// Before this date, nixpkgs had a different structure that doesn't work
@@ -86,6 +88,100 @@ impl Drop for Worktree {
     }
 }
 
+/// A managed worktree session for safe, fast commit traversal.
+///
+/// Creates a persistent worktree in a temp directory that can be quickly
+/// checked out to different commits without modifying the main repository.
+/// Auto-cleans up on drop (even on panic).
+///
+/// # Example
+///
+/// ```ignore
+/// let session = WorktreeSession::new(&repo, "abc123")?;
+/// for commit in commits {
+///     session.checkout(&commit.hash)?;
+///     // Work with files at session.path()
+/// }
+/// // Auto-cleanup on drop
+/// ```
+pub struct WorktreeSession {
+    /// The underlying worktree.
+    _worktree: Worktree,
+    /// Path to the worktree directory.
+    worktree_path: PathBuf,
+    /// Temp directory that owns the worktree path (cleaned up on drop).
+    _temp_dir: tempfile::TempDir,
+}
+
+impl WorktreeSession {
+    /// Create a new worktree session in a temp directory.
+    ///
+    /// The worktree is initially checked out to `initial_commit`.
+    /// Use `checkout()` to switch to different commits.
+    pub fn new(repo: &NixpkgsRepo, initial_commit: &str) -> Result<Self> {
+        let temp_dir = tempfile::tempdir().map_err(|e| {
+            NxvError::Git(git2::Error::from_str(&format!(
+                "Failed to create temp directory for worktree: {}",
+                e
+            )))
+        })?;
+
+        let worktree_path = temp_dir.path().join("nixpkgs");
+        let worktree = repo.create_worktree(&worktree_path, initial_commit)?;
+
+        Ok(Self {
+            _worktree: worktree,
+            worktree_path,
+            _temp_dir: temp_dir,
+        })
+    }
+
+    /// Checkout a different commit in this worktree.
+    ///
+    /// This is fast because it doesn't create a new worktree, just
+    /// updates the existing one. Uses `git checkout -f` which forces
+    /// the checkout and discards any local changes.
+    #[instrument(skip(self))]
+    pub fn checkout(&self, commit_hash: &str) -> Result<()> {
+        let checkout_start = Instant::now();
+
+        // Force checkout - no need for git clean since nix eval doesn't modify files
+        let output = Command::new("git")
+            .args(["checkout", "-f", commit_hash])
+            .current_dir(&self.worktree_path)
+            .output()
+            .map_err(|e| {
+                NxvError::Git(git2::Error::from_str(&format!(
+                    "Failed to run git checkout: {}",
+                    e
+                )))
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(NxvError::Git(git2::Error::from_str(&format!(
+                "git checkout failed: {}",
+                stderr.lines().take(3).collect::<Vec<_>>().join(" ")
+            ))));
+        }
+
+        trace!(
+            commit = %commit_hash,
+            checkout_time_ms = checkout_start.elapsed().as_millis(),
+            "Worktree checkout completed"
+        );
+
+        Ok(())
+    }
+
+    /// Get the path to the worktree directory.
+    ///
+    /// Use this path for file operations (e.g., running nix eval).
+    pub fn path(&self) -> &Path {
+        &self.worktree_path
+    }
+}
+
 impl NixpkgsRepo {
     /// Open a nixpkgs repository at the given path.
     ///
@@ -105,6 +201,36 @@ impl NixpkgsRepo {
         }
 
         Ok(Self { repo, path })
+    }
+
+    /// Prune orphaned worktrees from previous crashed indexer runs.
+    ///
+    /// This cleans up worktrees in `/tmp/.tmp*/` that were left behind when
+    /// the indexer was killed or crashed without proper cleanup.
+    ///
+    /// Should be called at the start of indexing to reclaim disk space and
+    /// prevent worktree name conflicts.
+    pub fn prune_worktrees(&self) -> Result<()> {
+        let output = Command::new("git")
+            .current_dir(&self.path)
+            .args(["worktree", "prune"])
+            .output()
+            .map_err(|e| {
+                NxvError::Git(git2::Error::from_str(&format!(
+                    "Failed to run git worktree prune: {}",
+                    e
+                )))
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::warn!(
+                stderr = %stderr,
+                "git worktree prune failed (non-fatal)"
+            );
+        }
+
+        Ok(())
     }
 
     /// Get all commits on the current branch in chronological order (oldest first).
@@ -256,7 +382,10 @@ impl NixpkgsRepo {
 
     /// Get changed paths for a commit (including rename sources and destinations).
     /// For merge commits, compares against first parent only to get actual PR changes.
+    #[instrument(skip(self))]
     pub fn get_commit_changed_paths(&self, commit_hash: &str) -> Result<Vec<String>> {
+        let diff_start = Instant::now();
+
         // For merge commits, compare against first parent (^1) to get just the PR changes.
         // For regular commits, this also works correctly.
         let output = Command::new("git")
@@ -270,7 +399,7 @@ impl NixpkgsRepo {
             .output()?;
 
         // If ^1 fails (e.g., initial commit), fall back to diff-tree
-        if !output.status.success() {
+        let paths = if !output.status.success() {
             let fallback = Command::new("git")
                 .current_dir(&self.path)
                 .args(["diff-tree", "--name-status", "-r", commit_hash])
@@ -282,10 +411,19 @@ impl NixpkgsRepo {
                 )));
             }
 
-            return Self::parse_diff_output(&String::from_utf8_lossy(&fallback.stdout));
-        }
+            Self::parse_diff_output(&String::from_utf8_lossy(&fallback.stdout))?
+        } else {
+            Self::parse_diff_output(&String::from_utf8_lossy(&output.stdout))?
+        };
 
-        Self::parse_diff_output(&String::from_utf8_lossy(&output.stdout))
+        trace!(
+            commit = %commit_hash,
+            changed_files = paths.len(),
+            diff_time_ms = diff_start.elapsed().as_millis(),
+            "Git diff completed"
+        );
+
+        Ok(paths)
     }
 
     /// Parse git diff --name-status output into a list of paths.
@@ -417,6 +555,7 @@ impl NixpkgsRepo {
     /// // let repo = NixpkgsRepo::open("/path/to/nixpkgs").unwrap();
     /// // repo.checkout_commit("a1b2c3d").unwrap();
     /// ```
+    #[allow(dead_code)] // Kept for tests and future use; production uses WorktreeSession
     pub fn checkout_commit(&self, hash: &str) -> Result<()> {
         // Remove any stale index.lock file that might be left from a crashed process
         self.remove_index_lock();
@@ -454,6 +593,7 @@ impl NixpkgsRepo {
     /// # Ok(())
     /// # }
     /// ```
+    #[allow(dead_code)]
     fn checkout_commit_libgit2(&self, hash: &str) -> Result<()> {
         let oid = Oid::from_str(hash).map_err(|_| {
             NxvError::Git(git2::Error::from_str(&format!(
@@ -494,6 +634,7 @@ impl NixpkgsRepo {
     /// let repo = NixpkgsRepo::open("/path/to/nixpkgs").unwrap();
     /// repo.checkout_commit_cli("0123456789abcdef0123456789abcdef01234567").unwrap();
     /// ```
+    #[allow(dead_code)]
     fn checkout_commit_cli(&self, hash: &str) -> Result<()> {
         let repo_path = self.path();
 
@@ -593,6 +734,7 @@ impl NixpkgsRepo {
     /// // either a ref like "refs/heads/main" or a 40-char commit hash
     /// assert!(head_ref.starts_with("refs/heads/") || head_ref.len() == 40);
     /// ```
+    #[allow(dead_code)] // Kept for potential future use; production uses WorktreeSession
     pub fn head_ref(&self) -> Result<String> {
         let head = self.repo.head()?;
         if head.is_branch() {
@@ -635,6 +777,7 @@ impl NixpkgsRepo {
     /// # Ok(())
     /// # }
     /// ```
+    #[allow(dead_code)] // Kept for potential future use; production uses WorktreeSession
     pub fn restore_ref(&self, ref_name: &str) -> Result<()> {
         if ref_name.starts_with("refs/") {
             // It's a branch reference - checkout the branch
@@ -885,10 +1028,10 @@ impl NixpkgsRepo {
         Ok(())
     }
 
-    /// Reset the repository to a clean state by hard-resetting to `target` (default `origin/master`)
+    /// Reset the repository to a clean state by hard-resetting to `target` (default `origin/nixpkgs-unstable`)
     /// and removing all untracked files and directories.
     ///
-    /// If `target` is `None`, `origin/master` is used.
+    /// If `target` is `None`, `origin/nixpkgs-unstable` is used.
     ///
     /// # Errors
     /// Returns an `Err` if the underlying git commands (`reset` or `clean`) fail or cannot be executed.
@@ -896,7 +1039,7 @@ impl NixpkgsRepo {
     /// # Examples
     ///
     /// ```
-    /// // Reset to origin/master
+    /// // Reset to origin/nixpkgs-unstable
     /// repo.reset_hard(None).unwrap();
     ///
     /// // Reset to a specific ref
@@ -906,7 +1049,7 @@ impl NixpkgsRepo {
         // Remove any stale lock files
         self.remove_index_lock();
 
-        let target_ref = target.unwrap_or("origin/master");
+        let target_ref = target.unwrap_or("origin/nixpkgs-unstable");
 
         // First, try to abort any in-progress operations
         let _ = Command::new("git")

@@ -253,6 +253,10 @@ fn fetch_manifest(
 }
 
 /// Apply a full index update.
+///
+/// If `full_history` is true and the manifest contains a full_history_index,
+/// downloads the complete history database with all version ranges.
+/// Otherwise downloads the slim database (one row per attr+version).
 pub fn apply_full_update<P: AsRef<Path>>(
     manifest_url: Option<&str>,
     db_path: P,
@@ -260,6 +264,7 @@ pub fn apply_full_update<P: AsRef<Path>>(
     skip_verify: bool,
     public_key: Option<&str>,
     timeout_secs: Option<u64>,
+    full_history: bool,
 ) -> Result<()> {
     let manifest_url = manifest_url.unwrap_or(DEFAULT_MANIFEST_URL);
     let manifest = fetch_manifest(
@@ -270,7 +275,7 @@ pub fn apply_full_update<P: AsRef<Path>>(
         timeout_secs,
     )?;
 
-    apply_full_update_with_manifest(&manifest, db_path, show_progress)
+    apply_full_update_with_manifest(&manifest, db_path, show_progress, full_history)
 }
 
 /// Apply a full index update using a pre-fetched manifest.
@@ -282,20 +287,36 @@ fn apply_full_update_with_manifest<P: AsRef<Path>>(
     manifest: &Manifest,
     db_path: P,
     show_progress: bool,
+    full_history: bool,
 ) -> Result<()> {
     let db_path = db_path.as_ref();
 
     // Check compatibility before downloading anything
     check_manifest_compatibility(manifest)?;
 
-    // Download full index
+    // Select which index to download
+    let (index_to_download, index_name) = if full_history {
+        if let Some(ref full_history_index) = manifest.full_history_index {
+            (full_history_index, "full history")
+        } else {
+            // Fall back to slim if full history not available
+            if show_progress {
+                eprintln!("Note: Full history index not available, downloading slim index");
+            }
+            (&manifest.full_index, "slim")
+        }
+    } else {
+        (&manifest.full_index, "slim")
+    };
+
+    // Download index
     if show_progress {
-        eprintln!("Downloading full index...");
+        eprintln!("Downloading {} index...", index_name);
     }
     download_file(
-        &manifest.full_index.url,
+        &index_to_download.url,
         db_path,
-        &manifest.full_index.sha256,
+        &index_to_download.sha256,
         show_progress,
     )?;
 
@@ -381,6 +402,10 @@ pub fn apply_delta_update<P: AsRef<Path>>(
 }
 
 /// Perform an update (auto-selecting delta or full as appropriate).
+///
+/// If `full_history` is true, downloads the complete history database with all
+/// version ranges. Otherwise downloads the slim database (default).
+#[allow(clippy::too_many_arguments)]
 pub fn perform_update<P: AsRef<Path>>(
     manifest_url: Option<&str>,
     db_path: P,
@@ -389,6 +414,7 @@ pub fn perform_update<P: AsRef<Path>>(
     skip_verify: bool,
     public_key: Option<&str>,
     timeout_secs: Option<u64>,
+    full_history: bool,
 ) -> Result<UpdateStatus> {
     let db_path = db_path.as_ref();
 
@@ -408,7 +434,7 @@ pub fn perform_update<P: AsRef<Path>>(
             timeout_secs,
         )?;
 
-        apply_full_update_with_manifest(&manifest, db_path, show_progress)?;
+        apply_full_update_with_manifest(&manifest, db_path, show_progress, full_history)?;
 
         return Ok(UpdateStatus::FullDownloadNeeded {
             commit: manifest.latest_commit,
@@ -439,6 +465,7 @@ pub fn perform_update<P: AsRef<Path>>(
                 skip_verify,
                 public_key,
                 timeout_secs,
+                full_history,
             )?;
         }
         UpdateStatus::DeltaAvailable { from_commit, .. } => {
@@ -516,6 +543,7 @@ mod tests {
             latest_commit: "abc".to_string(),
             latest_commit_date: "2024-01-01".to_string(),
             full_index: index_file.clone(),
+            full_history_index: None,
             bloom_filter: index_file.clone(),
             deltas: vec![],
         };
@@ -528,6 +556,7 @@ mod tests {
             latest_commit: "abc".to_string(),
             latest_commit_date: "2024-01-01".to_string(),
             full_index: index_file.clone(),
+            full_history_index: None,
             bloom_filter: index_file.clone(),
             deltas: vec![],
         };
@@ -540,6 +569,7 @@ mod tests {
             latest_commit: "abc".to_string(),
             latest_commit_date: "2024-01-01".to_string(),
             full_index: index_file.clone(),
+            full_history_index: None,
             bloom_filter: index_file,
             deltas: vec![],
         };

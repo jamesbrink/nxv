@@ -4,21 +4,78 @@
 
 pub mod backfill;
 pub mod extractor;
+pub mod gc;
 pub mod git;
+pub mod nix_ffi;
 pub mod publisher;
+pub mod worker;
+
+/// A checkpoint-serializable version of OpenRange for database persistence.
+/// This is used to save/restore open ranges across indexer restarts.
+#[derive(Debug, Clone)]
+pub struct CheckpointRange {
+    pub name: String,
+    pub version: String,
+    pub first_commit_hash: String,
+    pub first_commit_date: chrono::DateTime<chrono::Utc>,
+    pub attribute_path: String,
+    pub description: Option<String>,
+    pub license: Option<String>,
+    pub homepage: Option<String>,
+    pub maintainers: Option<String>,
+    pub platforms: Option<String>,
+    pub source_path: Option<String>,
+    pub known_vulnerabilities: Option<String>,
+    /// Store paths per architecture (e.g., {"x86_64-linux": "/nix/store/..."})
+    pub store_paths: std::collections::HashMap<String, String>,
+}
 
 use crate::bloom::PackageBloomFilter;
 use crate::db::Database;
 use crate::db::queries::PackageVersion;
 use crate::error::{NxvError, Result};
-use chrono::{DateTime, Utc};
-use git::NixpkgsRepo;
+use chrono::{DateTime, TimeZone, Utc};
+use git::{NixpkgsRepo, WorktreeSession};
+
+/// Cutoff date for store path extraction (2020-01-01).
+///
+/// Store paths are only extracted for commits from this date onwards because:
+///
+/// 1. **Binary cache availability**: cache.nixos.org has performed garbage collection
+///    events that removed "ancient store paths" (announced January 2024). Binaries
+///    from 2020+ are generally still available, while older ones are less reliable.
+///
+/// 2. **Practical utility**: Users wanting historical versions typically need relatively
+///    recent ones. Very old packages (pre-2020) often have other issues like incompatible
+///    Nix evaluation or missing dependencies.
+///
+/// 3. **Index size**: Including store paths for all historical packages would
+///    significantly increase database size with diminishing returns.
+///
+/// This date is used by:
+/// - `is_after_store_path_cutoff()` to filter during indexing
+/// - Documentation in `PackageVersion.store_path` and API responses
+///
+/// See `docs/specs/store-path-indexing.md` for full rationale.
+pub const STORE_PATH_CUTOFF_DATE: (i32, u32, u32) = (2020, 1, 1);
+
+/// Check if a commit date is after the store path extraction cutoff.
+///
+/// Store paths are only extracted for commits from [`STORE_PATH_CUTOFF_DATE`]
+/// onwards because older binaries are unlikely to be in cache.nixos.org.
+fn is_after_store_path_cutoff(date: DateTime<Utc>) -> bool {
+    let (year, month, day) = STORE_PATH_CUTOFF_DATE;
+    let cutoff = Utc.with_ymd_and_hms(year, month, day, 0, 0, 0).unwrap();
+    date >= cutoff
+}
+use crate::theme::Themed;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+use tracing::{debug, info_span, instrument, trace};
 
 /// Configuration for the indexer.
 #[derive(Debug, Clone)]
@@ -35,6 +92,22 @@ pub struct IndexerConfig {
     pub until: Option<String>,
     /// Optional limit on number of commits.
     pub max_commits: Option<usize>,
+    /// Number of parallel worker processes for evaluation.
+    /// If None, uses the number of systems for parallel evaluation.
+    /// If Some(1), disables parallel evaluation (sequential mode).
+    pub worker_count: Option<usize>,
+    /// Memory threshold (MiB) before worker restart.
+    pub max_memory_mib: usize,
+    /// Show verbose output including extraction warnings.
+    pub verbose: bool,
+    /// Number of checkpoints between garbage collection runs.
+    /// Set to 0 to disable automatic garbage collection.
+    /// Default: 5 (GC every 500 commits with default checkpoint_interval of 100)
+    pub gc_interval: usize,
+    /// Minimum available disk space (bytes) before triggering GC.
+    /// If available space falls below this, GC runs at next checkpoint.
+    /// Default: 10 GB
+    pub gc_min_free_bytes: u64,
 }
 
 impl Default for IndexerConfig {
@@ -51,6 +124,11 @@ impl Default for IndexerConfig {
             since: None,
             until: None,
             max_commits: None,
+            worker_count: None, // Default: use parallel evaluation with one worker per system
+            max_memory_mib: 6 * 1024, // 6 GiB
+            verbose: false,
+            gc_interval: 20, // GC every 20 checkpoints (2000 commits by default)
+            gc_min_free_bytes: 10 * 1024 * 1024 * 1024, // 10 GB
         }
     }
 }
@@ -70,6 +148,8 @@ struct OpenRange {
     platforms: Option<String>,
     source_path: Option<String>,
     known_vulnerabilities: Option<String>,
+    /// Store paths per architecture
+    store_paths: HashMap<String, String>,
 }
 
 impl OpenRange {
@@ -107,6 +187,45 @@ impl OpenRange {
             platforms: self.platforms.clone(),
             source_path: self.source_path.clone(),
             known_vulnerabilities: self.known_vulnerabilities.clone(),
+            store_paths: self.store_paths.clone(),
+        }
+    }
+
+    /// Convert to a CheckpointRange for serialization.
+    fn to_checkpoint(&self) -> CheckpointRange {
+        CheckpointRange {
+            name: self.name.clone(),
+            version: self.version.clone(),
+            first_commit_hash: self.first_commit_hash.clone(),
+            first_commit_date: self.first_commit_date,
+            attribute_path: self.attribute_path.clone(),
+            description: self.description.clone(),
+            license: self.license.clone(),
+            homepage: self.homepage.clone(),
+            maintainers: self.maintainers.clone(),
+            platforms: self.platforms.clone(),
+            source_path: self.source_path.clone(),
+            known_vulnerabilities: self.known_vulnerabilities.clone(),
+            store_paths: self.store_paths.clone(),
+        }
+    }
+
+    /// Create from a CheckpointRange for deserialization.
+    fn from_checkpoint(cr: CheckpointRange) -> Self {
+        Self {
+            name: cr.name,
+            version: cr.version,
+            first_commit_hash: cr.first_commit_hash,
+            first_commit_date: cr.first_commit_date,
+            attribute_path: cr.attribute_path,
+            description: cr.description,
+            license: cr.license,
+            homepage: cr.homepage,
+            maintainers: cr.maintainers,
+            platforms: cr.platforms,
+            source_path: cr.source_path,
+            known_vulnerabilities: cr.known_vulnerabilities,
+            store_paths: cr.store_paths,
         }
     }
 
@@ -208,6 +327,8 @@ struct PackageAggregate {
     platforms: HashSet<String>,
     source_path: Option<String>,
     known_vulnerabilities: Option<Vec<String>>,
+    /// Store paths per architecture
+    store_paths: HashMap<String, String>,
 }
 
 impl PackageAggregate {
@@ -236,10 +357,11 @@ impl PackageAggregate {
     /// assert_eq!(agg.name, "foo");
     /// assert!(agg.license.contains("MIT"));
     /// ```
-    fn new(pkg: extractor::PackageInfo) -> Self {
+    fn new(pkg: extractor::PackageInfo, system: &str) -> Self {
         let mut license = HashSet::new();
         let mut maintainers = HashSet::new();
         let mut platforms = HashSet::new();
+        let mut store_paths = HashMap::new();
 
         if let Some(licenses) = pkg.license {
             license.extend(licenses);
@@ -249,6 +371,9 @@ impl PackageAggregate {
         }
         if let Some(platforms_list) = pkg.platforms {
             platforms.extend(platforms_list);
+        }
+        if let Some(path) = pkg.out_path {
+            store_paths.insert(system.to_string(), path);
         }
 
         Self {
@@ -262,6 +387,7 @@ impl PackageAggregate {
             platforms,
             source_path: pkg.source_path,
             known_vulnerabilities: pkg.known_vulnerabilities,
+            store_paths,
         }
     }
 
@@ -308,7 +434,7 @@ impl PackageAggregate {
     /// assert!(agg.license.contains("MIT"));
     /// assert_eq!(agg.source_path.as_deref(), Some("pkgs/foo/default.nix"));
     /// ```
-    fn merge(&mut self, pkg: extractor::PackageInfo) {
+    fn merge(&mut self, pkg: extractor::PackageInfo, system: &str) {
         if self.description.is_none() {
             self.description = pkg.description;
         }
@@ -330,6 +456,10 @@ impl PackageAggregate {
         // Merge known_vulnerabilities - keep existing or use new
         if self.known_vulnerabilities.is_none() {
             self.known_vulnerabilities = pkg.known_vulnerabilities;
+        }
+        // Merge store_path for this system - each architecture gets its own path
+        if let Some(path) = pkg.out_path {
+            self.store_paths.entry(system.to_string()).or_insert(path);
         }
     }
 
@@ -379,164 +509,195 @@ fn set_to_json(values: &HashSet<String>) -> Option<String> {
     serde_json::to_string(&list).ok()
 }
 
-/// Tracks timing data for smoothed ETA calculations.
+/// Tracks timing data for smoothed ETA calculations using exponential moving average (EMA).
 ///
-/// Uses a sliding window of recent commit processing times to calculate
-/// a stable ETA that doesn't jump wildly when individual commits vary
-/// in processing time.
-struct EtaTracker {
-    /// Recent processing times (sliding window)
-    times: VecDeque<Duration>,
-    /// Maximum window size
-    window_size: usize,
+/// Uses EMA blended with median for stability:
+/// - Commit processing times vary wildly (some touch 1 file, others touch thousands)
+/// - Pure EMA is too volatile, pure median too slow to adapt
+/// - Blending provides smooth, stable estimates
+pub(super) struct EtaTracker {
+    /// Exponential moving average of commit duration (in seconds)
+    ema_secs: Option<f64>,
+    /// EMA smoothing factor (0.0-1.0, higher = more responsive)
+    alpha: f64,
     /// When the current commit started processing
     commit_start: Option<Instant>,
     /// Total remaining commits
     total_remaining: u64,
+    /// Number of commits processed (for warm-up)
+    commits_processed: u64,
+    /// Minimum samples before showing ETA
+    warmup_count: u64,
+    /// Recent durations for median calculation and outlier detection
+    recent_durations: VecDeque<f64>,
+    /// Window size for median calculation
+    median_window: usize,
 }
 
 impl EtaTracker {
-    /// Creates an EtaTracker that smooths ETA estimates over a sliding window.
+    /// Creates an EtaTracker with exponential moving average smoothing.
     ///
-    /// `window_size` is the maximum number of recent commit durations retained for averaging; larger
-    /// values produce a smoother but less responsive ETA.
+    /// `window_size` controls the effective smoothing - larger values mean
+    /// more smoothing (less responsive but more stable).
     ///
-    /// # Examples
-    ///
-    /// ```
-    /// let tracker = EtaTracker::new(5);
-    /// assert_eq!(tracker.window_size, 5);
-    /// assert!(tracker.avg_time_per_commit().is_none());
-    /// assert_eq!(tracker.eta_string(), "calculating...");
-    /// ```
+    /// The EMA alpha is calculated as 2/(window_size+1), which gives:
+    /// - window_size=50 -> alpha=0.039 (very smooth)
+    /// - window_size=100 -> alpha=0.020 (extremely smooth)
     fn new(window_size: usize) -> Self {
+        // Convert window size to EMA alpha: alpha = 2/(N+1)
+        // This gives equivalent smoothing to a simple moving average of size N
+        let alpha = 2.0 / (window_size as f64 + 1.0);
+
         Self {
-            times: VecDeque::with_capacity(window_size),
-            window_size,
+            ema_secs: None,
+            alpha,
             commit_start: None,
             total_remaining: 0,
+            commits_processed: 0,
+            warmup_count: 20, // Don't show ETA until 20 commits processed
+            recent_durations: VecDeque::with_capacity(100),
+            median_window: 100,
         }
     }
 
     /// Begin timing for the current commit.
-    ///
-    /// Records the current instant so that a subsequent call to `finish_commit` can
-    /// measure and record the commit's elapsed time.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// let mut tracker = EtaTracker::new(3);
-    /// tracker.start_commit(); // begin timing for one commit
-    /// ```
     fn start_commit(&mut self) {
         self.commit_start = Some(Instant::now());
     }
 
-    /// Stops the current commit timer and records its elapsed duration into the sliding window.
+    /// Stops the current commit timer and updates the EMA.
     ///
-    /// This appends the duration measured since the last `start_commit` to the internal times
-    /// buffer and drops the oldest entry if the buffer exceeds `window_size`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// let mut tracker = EtaTracker::new(3);
-    /// tracker.start_commit();
-    /// std::thread::sleep(std::time::Duration::from_millis(10));
-    /// tracker.finish_commit();
-    /// assert!(tracker.avg_time_per_commit().is_some());
-    /// ```
+    /// Uses outlier rejection for very fast commits (skipped commits)
+    /// to prevent them from making the ETA too optimistic.
+    /// Slow commits are given full weight since they represent real work.
     fn finish_commit(&mut self) {
         if let Some(start) = self.commit_start.take() {
-            let elapsed = start.elapsed();
-            self.times.push_back(elapsed);
-            if self.times.len() > self.window_size {
-                self.times.pop_front();
+            let elapsed_secs = start.elapsed().as_secs_f64();
+            self.commits_processed += 1;
+
+            // Track recent durations for median calculation
+            self.recent_durations.push_back(elapsed_secs);
+            if self.recent_durations.len() > self.median_window {
+                self.recent_durations.pop_front();
             }
+
+            // Calculate median for outlier detection
+            let median = self.calculate_median();
+
+            // Only dampen very fast commits (likely skipped commits)
+            // Slow commits get full weight - they represent real work and
+            // dampening them makes ETA too optimistic
+            let effective_alpha = if let Some(med) = median {
+                if elapsed_secs < med * 0.1 {
+                    // Outlier (very fast): reduce impact to avoid ETA being too optimistic
+                    self.alpha * 0.3
+                } else {
+                    self.alpha
+                }
+            } else {
+                self.alpha
+            };
+
+            // Update EMA: new_ema = alpha * sample + (1-alpha) * old_ema
+            self.ema_secs = Some(match self.ema_secs {
+                Some(current) => effective_alpha * elapsed_secs + (1.0 - effective_alpha) * current,
+                None => elapsed_secs, // First sample becomes the initial EMA
+            });
+        }
+    }
+
+    /// Skip the current commit timer without updating the EMA.
+    ///
+    /// Use this for commits that are skipped early (no packages to extract).
+    /// This prevents fast skips from making the ETA too optimistic.
+    fn skip_commit(&mut self) {
+        self.commit_start = None;
+        self.commits_processed += 1;
+    }
+
+    /// Calculate median of recent durations for outlier detection.
+    fn calculate_median(&self) -> Option<f64> {
+        if self.recent_durations.len() < 5 {
+            return None;
+        }
+
+        let mut sorted: Vec<f64> = self.recent_durations.iter().copied().collect();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        let mid = sorted.len() / 2;
+        if sorted.len().is_multiple_of(2) {
+            Some((sorted[mid - 1] + sorted[mid]) / 2.0)
+        } else {
+            Some(sorted[mid])
         }
     }
 
     /// Sets the number of remaining commits used to compute the ETA.
-    ///
-    /// This updates the internal remaining-count which eta() and eta_string() use
-    /// to calculate the estimated time left.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// let mut tracker = EtaTracker::new(3);
-    /// tracker.set_remaining(42);
-    /// assert_eq!(tracker.eta().is_none(), true);
-    /// ```
     fn set_remaining(&mut self, remaining: u64) {
         self.total_remaining = remaining;
     }
 
-    /// Compute the average duration per commit from the tracked sliding window.
-    ///
-    /// Returns `Some(duration)` equal to the arithmetic mean of the recorded commit durations when at least one sample exists, or `None` if no durations have been recorded.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::time::Duration;
-    /// let mut tracker = super::EtaTracker::new(5);
-    /// // simulate recorded commit durations
-    /// tracker.times.push_back(Duration::from_millis(100));
-    /// tracker.times.push_back(Duration::from_millis(200));
-    /// let avg = tracker.avg_time_per_commit().unwrap();
-    /// assert_eq!(avg, Duration::from_millis(150));
-    /// ```
-    fn avg_time_per_commit(&self) -> Option<Duration> {
-        if self.times.is_empty() {
-            return None;
-        }
-        let total: Duration = self.times.iter().sum();
-        Some(total / self.times.len() as u32)
+    /// Get the number of commits processed.
+    #[allow(dead_code)]
+    fn processed(&self) -> u64 {
+        self.commits_processed
     }
 
-    /// Compute a smoothed estimated remaining duration using the sliding-window average of recent commit timings.
+    /// Calculate percentage complete.
+    fn percentage(&self, total: u64) -> f64 {
+        if total == 0 {
+            return 100.0;
+        }
+        (self.commits_processed as f64 / total as f64) * 100.0
+    }
+
+    /// Returns a formatted progress string with percentage and ETA.
+    fn progress_string(&self, total: u64) -> String {
+        let pct = self.percentage(total);
+        let eta = self.eta_string();
+        format!("{:.1}% | {}", pct, eta)
+    }
+
+    /// Compute the average duration per commit from the EMA.
+    #[allow(dead_code)]
+    fn avg_time_per_commit(&self) -> Option<Duration> {
+        self.ema_secs.map(Duration::from_secs_f64)
+    }
+
+    /// Compute the estimated remaining duration.
     ///
-    /// Uses the average time per commit from the tracker multiplied by the configured remaining commit count.
-    ///
-    /// # Returns
-    ///
-    /// `Some(Duration)` equal to the average duration per commit multiplied by `total_remaining`, `None` if there is no timing data.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// let mut t = EtaTracker::new(3);
-    /// t.start_commit();
-    /// t.finish_commit();
-    /// t.set_remaining(5);
-    /// let e = t.eta();
-    /// assert!(e.is_some());
-    /// ```
+    /// Returns None during warm-up period to avoid showing wildly inaccurate ETAs.
+    /// Uses a blend of EMA and median for stability - EMA adapts to trends while
+    /// median resists outliers.
     fn eta(&self) -> Option<Duration> {
-        let avg = self.avg_time_per_commit()?;
-        // Use checked multiplication to avoid overflow, cap at u32::MAX commits
-        let remaining = self.total_remaining.min(u32::MAX as u64) as u32;
-        avg.checked_mul(remaining).or(Some(Duration::MAX))
+        // Don't show ETA until we have enough samples
+        if self.commits_processed < self.warmup_count {
+            return None;
+        }
+
+        let ema = self.ema_secs?;
+        let median = self.calculate_median()?;
+
+        // Blend EMA (40%) with median (60%) for stability
+        // Median is more stable, EMA helps track trends
+        let blended_avg = ema * 0.4 + median * 0.6;
+        let remaining_secs = blended_avg * self.total_remaining as f64;
+
+        // Cap at reasonable maximum (30 days)
+        let max_secs = 30.0 * 24.0 * 3600.0;
+        Some(Duration::from_secs_f64(remaining_secs.min(max_secs)))
     }
 
     /// Returns a human-readable ETA string for the remaining work.
     ///
-    /// The duration is formatted as:
-    /// - `"<secs>s"` for durations less than 60 seconds,
-    /// - `"<mins>m <secs>s"` for durations less than an hour,
-    /// - `"<hours>h <mins>m"` for one hour or more.
-    ///
-    /// If no ETA can be computed, returns `"calculating..."`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// let tracker = EtaTracker::new(3);
-    /// assert_eq!(tracker.eta_string(), "calculating...");
-    /// ```
+    /// Shows "warming up..." during initial sample collection,
+    /// then provides stable ETA estimates.
     fn eta_string(&self) -> String {
+        if self.commits_processed < self.warmup_count {
+            let remaining = self.warmup_count - self.commits_processed;
+            return format!("warming up ({} more)...", remaining);
+        }
+
         match self.eta() {
             Some(eta) => {
                 let secs = eta.as_secs();
@@ -596,6 +757,35 @@ impl Indexer {
         db_path: Q,
     ) -> Result<IndexResult> {
         let repo = NixpkgsRepo::open(&nixpkgs_path)?;
+
+        // Clean up orphaned worktrees from previous crashed runs
+        repo.prune_worktrees()?;
+
+        // Clean up temp eval store from previous runs (silently at startup)
+        let temp_store_freed = gc::cleanup_temp_eval_store();
+
+        // Check store health before starting
+        if !gc::verify_store() {
+            eprintln!(
+                "{} Nix store verification failed. Run 'nix-store --verify --repair' to fix.",
+                "Warning:".warning()
+            );
+        }
+
+        // Check available disk space
+        if gc::is_store_low_on_space(self.config.gc_min_free_bytes) {
+            eprintln!(
+                "{} Low disk space detected. Running garbage collection...",
+                "Warning:".warning()
+            );
+            if let Some(duration) = gc::run_garbage_collection() {
+                eprintln!(
+                    "Garbage collection completed in {:.1}s",
+                    duration.as_secs_f64()
+                );
+            }
+        }
+
         let mut db = Database::open(&db_path)?;
 
         // Get indexable commits touching package paths
@@ -612,8 +802,21 @@ impl Indexer {
         eprintln!(
             "Found {} indexable commits with package changes (starting from {})",
             total_commits,
-            git::MIN_INDEXABLE_DATE
+            self.config
+                .since
+                .as_deref()
+                .unwrap_or(git::MIN_INDEXABLE_DATE)
         );
+
+        // Report temp store cleanup after "Found X commits"
+        if let Some(bytes) = temp_store_freed
+            && bytes > 0
+        {
+            eprintln!(
+                "Cleaned up temp eval store ({:.1} MB freed)",
+                bytes as f64 / 1_000_000.0
+            );
+        }
 
         self.process_commits(&mut db, &nixpkgs_path, &repo, commits, None)
     }
@@ -646,6 +849,35 @@ impl Indexer {
         db_path: Q,
     ) -> Result<IndexResult> {
         let repo = NixpkgsRepo::open(&nixpkgs_path)?;
+
+        // Clean up orphaned worktrees from previous crashed runs
+        repo.prune_worktrees()?;
+
+        // Clean up temp eval store from previous runs (silently at startup)
+        let temp_store_freed = gc::cleanup_temp_eval_store();
+
+        // Check store health before starting
+        if !gc::verify_store() {
+            eprintln!(
+                "{} Nix store verification failed. Run 'nix-store --verify --repair' to fix.",
+                "Warning:".warning()
+            );
+        }
+
+        // Check available disk space
+        if gc::is_store_low_on_space(self.config.gc_min_free_bytes) {
+            eprintln!(
+                "{} Low disk space detected. Running garbage collection...",
+                "Warning:".warning()
+            );
+            if let Some(duration) = gc::run_garbage_collection() {
+                eprintln!(
+                    "Garbage collection completed in {:.1}s",
+                    duration.as_secs_f64()
+                );
+            }
+        }
+
         let mut db = Database::open(&db_path)?;
 
         // Check for last indexed commit
@@ -673,7 +905,7 @@ impl Indexer {
                             eprintln!("To fix this, either:");
                             eprintln!("  1. Update your nixpkgs repository to a newer commit:");
                             eprintln!(
-                                "     git -C <nixpkgs-path> fetch origin && git -C <nixpkgs-path> checkout origin/master"
+                                "     git -C <nixpkgs-path> fetch origin && git -C <nixpkgs-path> checkout origin/nixpkgs-unstable"
                             );
                             eprintln!();
                             eprintln!(
@@ -715,9 +947,21 @@ impl Indexer {
                                 ranges_created: 0,
                                 unique_names: 0,
                                 was_interrupted: false,
+                                extraction_failures: 0,
                             });
                         }
                         eprintln!("Found {} new commits to process", commits.len());
+
+                        // Report temp store cleanup after "Found X commits"
+                        if let Some(bytes) = temp_store_freed
+                            && bytes > 0
+                        {
+                            eprintln!(
+                                "Cleaned up temp eval store ({:.1} MB freed)",
+                                bytes as f64 / 1_000_000.0
+                            );
+                        }
+
                         self.process_commits(&mut db, &nixpkgs_path, &repo, commits, Some(&hash))
                     }
                     Err(_) => {
@@ -777,6 +1021,7 @@ impl Indexer {
     /// let result = indexer.process_commits(&mut db, "/path/to/nixpkgs", &repo, commits, None).unwrap();
     /// println!("Indexed {} commits", result.commits_processed);
     /// ```
+    #[instrument(skip(self, db, nixpkgs_path, repo, commits, resume_from), fields(total_commits = commits.len()))]
     fn process_commits<P: AsRef<Path>>(
         &self,
         db: &mut Database,
@@ -787,7 +1032,42 @@ impl Indexer {
     ) -> Result<IndexResult> {
         let total_commits = commits.len();
         let systems = &self.config.systems;
-        let nixpkgs_path = nixpkgs_path.as_ref();
+        // Note: nixpkgs_path is unused here because we use WorktreeSession for all checkouts
+        let _ = nixpkgs_path.as_ref();
+
+        // Determine if we should use parallel evaluation
+        let use_parallel = self.config.worker_count != Some(1) && systems.len() > 1;
+        let worker_count = self.config.worker_count.unwrap_or(systems.len());
+
+        // Create worker pool for parallel evaluation (if enabled)
+        let worker_pool = if use_parallel && worker_count > 1 {
+            let pool_config = worker::WorkerPoolConfig {
+                worker_count,
+                max_memory_mib: self.config.max_memory_mib,
+                ..Default::default()
+            };
+            match worker::WorkerPool::new(pool_config) {
+                Ok(pool) => {
+                    eprintln!(
+                        "Using parallel evaluation with {} workers",
+                        pool.worker_count()
+                    );
+                    Some(pool)
+                }
+                Err(e) => {
+                    eprintln!(
+                        "Warning: Failed to create worker pool ({}), falling back to sequential",
+                        e
+                    );
+                    None
+                }
+            }
+        } else {
+            if systems.len() > 1 {
+                eprintln!("Using sequential evaluation (--workers=1)");
+            }
+            None
+        };
 
         // Set up progress bar if enabled
         let multi_progress = if self.config.show_progress {
@@ -801,18 +1081,52 @@ impl Indexer {
             pb.set_style(
                 ProgressStyle::default_bar()
                     .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} {msg}")
-                    .unwrap()
+                    // Template is a compile-time constant, this should never fail
+                    .expect("Invalid progress bar template")
                     .progress_chars("█▓▒░  "),
             );
             pb.enable_steady_tick(std::time::Duration::from_millis(100));
             pb
         });
 
-        // ETA tracker with 20-commit sliding window for stable estimates
-        let mut eta_tracker = EtaTracker::new(20);
+        // ETA tracker with window size 50 and EMA/median blending for stable estimates
+        let mut eta_tracker = EtaTracker::new(50);
 
         // Track open ranges: attribute_path+version -> OpenRange
-        let mut open_ranges: HashMap<String, OpenRange> = HashMap::new();
+        // Try to load from checkpoint if resuming
+        let mut open_ranges: HashMap<String, OpenRange> = if resume_from.is_some() {
+            match db.load_checkpoint_ranges() {
+                Ok(checkpoint_ranges) => {
+                    if !checkpoint_ranges.is_empty() {
+                        if let Some(ref pb) = progress_bar {
+                            pb.println(format!(
+                                "{} {} open ranges from checkpoint",
+                                "Restored".success(),
+                                checkpoint_ranges.len().count_pending()
+                            ));
+                        } else {
+                            eprintln!(
+                                "{} {} open ranges from checkpoint",
+                                "Restored".success(),
+                                checkpoint_ranges.len().count_pending()
+                            );
+                        }
+                        checkpoint_ranges
+                            .into_iter()
+                            .map(|(k, v)| (k, OpenRange::from_checkpoint(v)))
+                            .collect()
+                    } else {
+                        HashMap::new()
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Warning: Could not load checkpoint ranges: {}", e);
+                    HashMap::new()
+                }
+            }
+        } else {
+            HashMap::new()
+        };
 
         // Track unique package names for bloom filter
         let mut unique_names: HashSet<String> = HashSet::new();
@@ -823,23 +1137,37 @@ impl Indexer {
             ranges_created: 0,
             unique_names: 0,
             was_interrupted: false,
+            extraction_failures: 0,
         };
 
         let mut prev_commit_hash: Option<String> = resume_from.map(String::from);
         let mut prev_commit_date: Option<DateTime<Utc>> = None;
         let mut pending_inserts: Vec<PackageVersion> = Vec::new();
+        let mut checkpoints_since_gc: usize = 0;
 
         // Build the initial file-to-attribute map
         let first_commit = commits
             .first()
             .ok_or_else(|| NxvError::Git(git2::Error::from_str("No commits to process")))?;
 
-        // Save original HEAD ref so we can restore it after indexing
-        let original_ref = repo.head_ref()?;
+        // Create a worktree session for isolated checkouts (auto-cleaned on drop)
+        let session = WorktreeSession::new(repo, &first_commit.hash)?;
+        let worktree_path = session.path();
 
-        repo.checkout_commit(&first_commit.hash)?;
-        let mut file_attr_map = build_file_attr_map(nixpkgs_path, systems)?;
-        let mut mapping_commit = first_commit.hash.clone();
+        // Build initial file-to-attribute map, handling failure gracefully
+        // If this fails (e.g., Nix eval error on first commit), start with empty map
+        // and try to rebuild on first commit that changes top-level files
+        let (mut file_attr_map, mut mapping_commit) =
+            match build_file_attr_map(worktree_path, systems, worker_pool.as_ref()) {
+                Ok(map) => (map, first_commit.hash.clone()),
+                Err(e) => {
+                    eprintln!(
+                        "Warning: Initial file-to-attribute map failed ({}), using empty map",
+                        e
+                    );
+                    (HashMap::new(), String::new())
+                }
+            };
 
         // Helper to print warnings without disrupting progress bar
         let warn = |pb: &Option<ProgressBar>, msg: String| {
@@ -859,54 +1187,73 @@ impl Indexer {
             // Check for shutdown
             if self.is_shutdown_requested() {
                 if let Some(ref pb) = progress_bar {
-                    pb.println("Shutdown requested, saving checkpoint...");
+                    pb.println(format!(
+                        "{} saving checkpoint...",
+                        "Shutdown requested,".warning()
+                    ));
                 }
                 result.was_interrupted = true;
 
-                // Close all open ranges at the previous commit
-                if let (Some(prev_hash), Some(prev_date)) = (&prev_commit_hash, prev_commit_date) {
-                    for range in open_ranges.values() {
-                        pending_inserts.push(range.to_package_version(prev_hash, prev_date));
-                    }
-                }
-
-                // Insert pending ranges
+                // Insert any pending ranges (ranges that were closed during this run)
                 if !pending_inserts.is_empty() {
                     result.ranges_created +=
                         db.insert_package_ranges_batch(&pending_inserts)? as u64;
                 }
 
-                // Save checkpoint
+                // Save checkpoint with open ranges for resume
                 if let Some(ref prev_hash) = prev_commit_hash {
                     db.set_meta("last_indexed_commit", prev_hash)?;
                     db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
+                    db.set_meta("checkpoint_open_ranges", &open_ranges.len().to_string())?;
+
+                    // Save open ranges to checkpoint table for resume capability
+                    let checkpoint_ranges: HashMap<String, CheckpointRange> = open_ranges
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.to_checkpoint()))
+                        .collect();
+                    db.save_checkpoint_ranges(&checkpoint_ranges)?;
+
+                    db.checkpoint()?;
+
+                    if let Some(ref pb) = progress_bar {
+                        pb.println(format!(
+                            "{} {} open ranges to checkpoint",
+                            "Saved".success(),
+                            open_ranges.len().count_pending()
+                        ));
+                    }
                 }
 
                 break;
             }
 
-            // Update progress bar with smoothed ETA
+            // Update progress bar with percentage and smoothed ETA
             if let Some(ref pb) = progress_bar {
+                use owo_colors::OwoColorize;
                 pb.set_position(commit_idx as u64);
                 pb.set_message(format!(
-                    "({}) {} ({}) | {} pkgs | {} ranges",
-                    eta_tracker.eta_string(),
-                    &commit.short_hash,
-                    commit.date.format("%Y-%m-%d"),
-                    result.packages_found,
-                    result.ranges_created
+                    "{} | {} {} | {} {} | {} {} {} {}",
+                    eta_tracker.progress_string(total_commits as u64),
+                    commit.short_hash.commit(),
+                    format!("({})", commit.date.format("%Y-%m-%d")).dimmed(),
+                    result.packages_found.count_found(),
+                    "pkgs".dimmed(),
+                    open_ranges.len().count_pending(),
+                    "open".dimmed(),
+                    (result.ranges_created + pending_inserts.len() as u64).count(),
+                    "closed".dimmed()
                 ));
             }
 
-            // Checkout the commit
-            if let Err(e) = repo.checkout_commit(&commit.hash) {
+            // Checkout the commit in the worktree
+            if let Err(e) = session.checkout(&commit.hash) {
                 warn(
                     &progress_bar,
                     format!("Failed to checkout {}: {}", &commit.short_hash, e),
                 );
                 prev_commit_hash = Some(commit.hash.clone());
                 prev_commit_date = Some(commit.date);
-                eta_tracker.finish_commit();
+                eta_tracker.skip_commit();
                 continue;
             }
 
@@ -920,15 +1267,17 @@ impl Indexer {
                     );
                     prev_commit_hash = Some(commit.hash.clone());
                     prev_commit_date = Some(commit.date);
-                    eta_tracker.finish_commit();
+                    eta_tracker.skip_commit();
                     continue;
                 }
             };
 
             // Check if we need to refresh the file map
-            if should_refresh_file_map(&changed_paths)
+            // Also try to rebuild if map is empty (e.g., initial extraction failed)
+            let need_refresh = file_attr_map.is_empty() || should_refresh_file_map(&changed_paths);
+            if need_refresh
                 && mapping_commit != commit.hash
-                && let Ok(map) = build_file_attr_map(nixpkgs_path, systems)
+                && let Ok(map) = build_file_attr_map(worktree_path, systems, worker_pool.as_ref())
             {
                 file_attr_map = map;
                 mapping_commit = commit.hash.clone();
@@ -983,22 +1332,80 @@ impl Indexer {
                 result.commits_processed += 1;
                 prev_commit_hash = Some(commit.hash.clone());
                 prev_commit_date = Some(commit.date);
-                eta_tracker.finish_commit();
+                eta_tracker.skip_commit();
                 continue;
             }
 
             let mut target_list: Vec<String> = target_attr_paths.into_iter().collect();
             target_list.sort();
 
+            debug!(
+                commit = %commit.short_hash,
+                target_count = target_list.len(),
+                "Processing commit"
+            );
+
+            // Trace: show which files triggered extraction and target attrs
+            trace!(
+                commit = %commit.short_hash,
+                changed_files = changed_paths.len(),
+                target_attrs = ?target_list,
+                "Commit changed files mapped to target attributes"
+            );
+
             // Extract packages for all systems
             let mut aggregates: HashMap<String, PackageAggregate> = HashMap::new();
 
-            for system in systems {
-                let packages =
-                    match extractor::extract_packages_for_attrs(nixpkgs_path, system, &target_list)
-                    {
-                        Ok(pkgs) => pkgs,
-                        Err(e) => {
+            // Use parallel evaluation if worker pool is available, otherwise sequential
+            let extraction_results: Vec<(String, Result<Vec<extractor::PackageInfo>>)> = {
+                let _extract_span = info_span!(
+                    "extract_packages",
+                    targets = target_list.len(),
+                    systems = systems.len()
+                )
+                .entered();
+
+                if let Some(ref pool) = worker_pool {
+                    // Parallel extraction using worker pool
+                    let results = pool.extract_parallel(worktree_path, systems, &target_list);
+                    systems.iter().cloned().zip(results).collect()
+                } else {
+                    // Sequential extraction (fallback)
+                    systems
+                        .iter()
+                        .map(|system| {
+                            let result = extractor::extract_packages_for_attrs(
+                                worktree_path,
+                                system,
+                                &target_list,
+                            );
+                            (system.clone(), result)
+                        })
+                        .collect()
+                }
+            };
+
+            // Process results from all systems
+            for (system, packages_result) in extraction_results {
+                let packages = match packages_result {
+                    Ok(pkgs) => {
+                        trace!(
+                            commit = %commit.short_hash,
+                            system = %system,
+                            packages_extracted = pkgs.len(),
+                            "System extraction completed"
+                        );
+                        pkgs
+                    }
+                    Err(e) => {
+                        result.extraction_failures += 1;
+                        tracing::warn!(
+                            commit = %commit.short_hash,
+                            system = %system,
+                            error = %e,
+                            "Extraction failed for system"
+                        );
+                        if self.config.verbose {
                             warn(
                                 &progress_bar,
                                 format!(
@@ -1006,21 +1413,35 @@ impl Indexer {
                                     &commit.short_hash, system, e
                                 ),
                             );
-                            continue;
                         }
-                    };
+                        continue;
+                    }
+                };
 
                 for pkg in packages {
                     let key = format!("{}::{}", pkg.attribute_path, pkg.version);
                     if let Some(existing) = aggregates.get_mut(&key) {
-                        existing.merge(pkg);
+                        existing.merge(pkg, &system);
                     } else {
-                        aggregates.insert(key, PackageAggregate::new(pkg));
+                        let mut agg = PackageAggregate::new(pkg, &system);
+                        // Clear store_paths for commits before 2020-01-01
+                        // (older binaries unlikely to be in cache.nixos.org)
+                        if !is_after_store_path_cutoff(commit.date) {
+                            agg.store_paths.clear();
+                        }
+                        aggregates.insert(key, agg);
                     }
                 }
             }
 
             result.packages_found += aggregates.len() as u64;
+
+            trace!(
+                commit = %commit.short_hash,
+                unique_packages = aggregates.len(),
+                open_ranges = open_ranges.len(),
+                "Aggregation complete"
+            );
 
             // Track which packages we saw in this commit
             let mut seen_keys: HashSet<String> = HashSet::new();
@@ -1063,6 +1484,7 @@ impl Indexer {
                             platforms: platforms_json,
                             source_path: aggregate.source_path.clone(),
                             known_vulnerabilities: aggregate.known_vulnerabilities_json(),
+                            store_paths: aggregate.store_paths.clone(),
                         },
                     );
                 }
@@ -1076,6 +1498,15 @@ impl Indexer {
                 })
                 .map(|(key, _)| key.clone())
                 .collect();
+
+            if !disappeared.is_empty() {
+                trace!(
+                    commit = %commit.short_hash,
+                    disappeared_count = disappeared.len(),
+                    disappeared_keys = ?disappeared,
+                    "Closing ranges for disappeared packages"
+                );
+            }
 
             for key in disappeared {
                 if let Some(range) = open_ranges.remove(&key)
@@ -1097,9 +1528,18 @@ impl Indexer {
             if (commit_idx + 1).is_multiple_of(self.config.checkpoint_interval)
                 || commit_idx + 1 == commits.len()
             {
+                let checkpoint_start = Instant::now();
+
                 if !pending_inserts.is_empty() {
+                    let insert_start = Instant::now();
+                    let insert_count = pending_inserts.len();
                     result.ranges_created +=
                         db.insert_package_ranges_batch(&pending_inserts)? as u64;
+                    trace!(
+                        insert_count = insert_count,
+                        insert_time_ms = insert_start.elapsed().as_millis(),
+                        "Database batch insert completed"
+                    );
                     pending_inserts.clear();
                 }
 
@@ -1107,8 +1547,68 @@ impl Indexer {
                     db.set_meta("last_indexed_commit", prev_hash)?;
                     db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
                     db.set_meta("checkpoint_open_ranges", &open_ranges.len().to_string())?;
+
+                    // Save open ranges to checkpoint table for resume capability
+                    let checkpoint_ranges: HashMap<String, CheckpointRange> = open_ranges
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.to_checkpoint()))
+                        .collect();
+                    db.save_checkpoint_ranges(&checkpoint_ranges)?;
+
                     db.checkpoint()?;
                 }
+
+                // Garbage collection: run periodically or when disk is low
+                checkpoints_since_gc += 1;
+                let should_gc = if self.config.gc_interval > 0 {
+                    // Periodic GC based on checkpoint count
+                    checkpoints_since_gc >= self.config.gc_interval
+                        // Or emergency GC if disk space is critically low
+                        || gc::is_store_low_on_space(self.config.gc_min_free_bytes)
+                } else {
+                    // GC disabled, but still run if critically low on disk
+                    gc::is_store_low_on_space(self.config.gc_min_free_bytes / 2)
+                };
+
+                if should_gc {
+                    if let Some(ref pb) = progress_bar {
+                        pb.set_message("Running garbage collection...".to_string());
+                    }
+
+                    // Clean up temp eval store to free disk space
+                    if let Some(bytes) = gc::cleanup_temp_eval_store()
+                        && bytes > 0
+                        && let Some(ref pb) = progress_bar
+                    {
+                        pb.println(format!(
+                            "Cleaned up temp eval store ({:.1} MB freed)",
+                            bytes as f64 / 1_000_000.0
+                        ));
+                    }
+
+                    if let Some(duration) = gc::run_garbage_collection() {
+                        if let Some(ref pb) = progress_bar {
+                            pb.println(format!(
+                                "{} garbage collection in {:.1}s",
+                                "Completed".success(),
+                                duration.as_secs_f64()
+                            ));
+                        }
+                    } else if let Some(ref pb) = progress_bar {
+                        pb.println(format!(
+                            "{} garbage collection (GC command failed)",
+                            "Skipped".warning()
+                        ));
+                    }
+                    checkpoints_since_gc = 0;
+                }
+
+                trace!(
+                    commit_idx = commit_idx + 1,
+                    checkpoint_time_ms = checkpoint_start.elapsed().as_millis(),
+                    open_ranges = open_ranges.len(),
+                    "Checkpoint completed"
+                );
             }
         }
 
@@ -1129,6 +1629,9 @@ impl Indexer {
                 db.set_meta("last_indexed_commit", last_hash)?;
                 db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
             }
+
+            // Clear checkpoint ranges - indexing completed successfully
+            db.clear_checkpoint_ranges()?;
         }
 
         // Set final unique names count
@@ -1136,17 +1639,28 @@ impl Indexer {
 
         // Finish progress bar
         if let Some(ref pb) = progress_bar {
+            use owo_colors::OwoColorize;
             pb.finish_with_message(format!(
-                "done | {} commits | {} pkgs | {} ranges",
-                result.commits_processed, result.packages_found, result.ranges_created
+                "{} | {} {} | {} {} | {} {}",
+                "done".success(),
+                result.commits_processed.count(),
+                "commits".dimmed(),
+                result.packages_found.count_found(),
+                "pkgs".dimmed(),
+                result.ranges_created.count(),
+                "ranges".dimmed()
             ));
         }
 
-        // Restore original HEAD ref
-        if let Err(e) = repo.restore_ref(&original_ref) {
+        // WorktreeSession auto-cleans on drop - no need to restore HEAD
+
+        // Clean up temp eval store on exit
+        if let Some(bytes) = gc::cleanup_temp_eval_store()
+            && bytes > 0
+        {
             eprintln!(
-                "Warning: Failed to restore original git state ({}): {}",
-                original_ref, e
+                "Cleaned up temp eval store ({:.1} MB freed)",
+                bytes as f64 / 1_000_000.0
             );
         }
 
@@ -1154,19 +1668,39 @@ impl Indexer {
     }
 }
 
+/// Infrastructure files that affect many packages but rarely indicate version changes.
+///
+/// These files are excluded from the file-to-attribute mapping because:
+/// 1. `all-packages.nix` imports/exports all packages, so any change triggers 18k+ targets
+/// 2. `aliases.nix` just defines aliases, not actual package versions
+/// 3. Changes to actual package files are still detected via path-based fallback heuristics
+const INFRASTRUCTURE_FILES: &[&str] = &[
+    "pkgs/top-level/all-packages.nix",
+    "pkgs/top-level/aliases.nix",
+];
+
 fn build_file_attr_map(
     repo_path: &Path,
     systems: &[String],
+    worker_pool: Option<&worker::WorkerPool>,
 ) -> Result<HashMap<String, Vec<String>>> {
     let system = systems
         .first()
         .ok_or_else(|| NxvError::NixEval("No systems configured".to_string()))?;
-    let positions = extractor::extract_attr_positions(repo_path, system)?;
+
+    // Use worker pool if available to avoid memory accumulation in parent process
+    let positions = if let Some(pool) = worker_pool {
+        pool.extract_positions(system, repo_path)?
+    } else {
+        extractor::extract_attr_positions(repo_path, system)?
+    };
+
     let mut map: HashMap<String, Vec<String>> = HashMap::new();
 
     for position in positions {
         if let Some(file) = position.file
             && let Some(relative) = normalize_position_file(repo_path, &file)
+            && !INFRASTRUCTURE_FILES.contains(&relative.as_str())
         {
             map.entry(relative).or_default().push(position.attr_path);
         }
@@ -1223,6 +1757,8 @@ pub struct IndexResult {
     pub unique_names: u64,
     /// Whether the indexing was interrupted (e.g., by Ctrl+C).
     pub was_interrupted: bool,
+    /// Number of extraction failures (per-system failures during indexing).
+    pub extraction_failures: u64,
 }
 
 /// Constructs a Bloom filter containing all unique package attribute paths from the database.
@@ -1292,54 +1828,113 @@ mod tests {
         let tracker = EtaTracker::new(10);
         assert!(tracker.avg_time_per_commit().is_none());
         assert!(tracker.eta().is_none());
-        assert_eq!(tracker.eta_string(), "calculating...");
+        // Shows warm-up message when no commits processed
+        assert!(tracker.eta_string().contains("warming up"));
     }
 
     #[test]
-    fn test_eta_tracker_single_commit() {
+    fn test_eta_tracker_warmup_period() {
         let mut tracker = EtaTracker::new(10);
-        tracker.set_remaining(5);
+        tracker.set_remaining(100);
 
-        tracker.start_commit();
-        thread::sleep(Duration::from_millis(50));
-        tracker.finish_commit();
-
-        let avg = tracker.avg_time_per_commit().unwrap();
-        assert!(avg >= Duration::from_millis(50));
-
-        let eta = tracker.eta().unwrap();
-        // 5 remaining * ~50ms = ~250ms
-        assert!(eta >= Duration::from_millis(200));
-    }
-
-    #[test]
-    fn test_eta_tracker_sliding_window() {
-        let mut tracker = EtaTracker::new(3);
-        tracker.set_remaining(10);
-
-        // Add 5 commits - only last 3 should be kept
+        // Process fewer commits than warmup_count
         for _ in 0..5 {
             tracker.start_commit();
-            thread::sleep(Duration::from_millis(10));
+            thread::sleep(Duration::from_millis(5));
             tracker.finish_commit();
         }
 
-        assert_eq!(tracker.times.len(), 3);
+        // Should still show warming up
+        assert!(tracker.eta_string().contains("warming up"));
+        assert!(tracker.eta().is_none());
+    }
+
+    #[test]
+    fn test_eta_tracker_after_warmup() {
+        let mut tracker = EtaTracker::new(10);
+        tracker.set_remaining(50);
+
+        // Process more commits than warmup_count (20)
+        for _ in 0..25 {
+            tracker.start_commit();
+            thread::sleep(Duration::from_millis(5));
+            tracker.finish_commit();
+        }
+
+        // Should now show actual ETA
+        let eta = tracker.eta();
+        assert!(eta.is_some());
+        assert!(!tracker.eta_string().contains("warming up"));
+    }
+
+    #[test]
+    fn test_eta_tracker_ema_smoothing() {
+        let mut tracker = EtaTracker::new(10);
+        tracker.set_remaining(10);
+
+        // Add consistent commits to establish baseline (~20ms each)
+        for _ in 0..15 {
+            tracker.start_commit();
+            thread::sleep(Duration::from_millis(20));
+            tracker.finish_commit();
+        }
+
+        let ema_before = tracker.ema_secs.unwrap();
+
+        // Very fast commits (skipped) should be dampened to prevent ETA from being too optimistic
+        // These represent skipped commits that didn't do real work
+        for _ in 0..5 {
+            tracker.start_commit();
+            thread::sleep(Duration::from_millis(1)); // Very fast - < 10% of median
+            tracker.finish_commit();
+        }
+
+        let ema_after_fast = tracker.ema_secs.unwrap();
+
+        // EMA should not have dropped dramatically despite fast outliers
+        // (fast outliers get reduced alpha to prevent optimistic ETA)
+        assert!(
+            ema_after_fast > ema_before * 0.5,
+            "EMA dropped too much after fast outliers: before={:.4}, after={:.4}",
+            ema_before,
+            ema_after_fast
+        );
+
+        // Slow commits (real work) should have full weight
+        tracker.start_commit();
+        thread::sleep(Duration::from_millis(100)); // Slow - represents real work
+        tracker.finish_commit();
+
+        let ema_after_slow = tracker.ema_secs.unwrap();
+
+        // EMA should increase noticeably because slow commits aren't dampened
+        assert!(
+            ema_after_slow > ema_after_fast,
+            "Slow commit should increase EMA: fast={:.4}, slow={:.4}",
+            ema_after_fast,
+            ema_after_slow
+        );
     }
 
     #[test]
     fn test_eta_tracker_formatting() {
-        let mut tracker = EtaTracker::new(10);
+        let mut tracker = EtaTracker::new(5);
         tracker.set_remaining(1);
 
-        // Add a commit that takes ~100ms
-        tracker.start_commit();
-        thread::sleep(Duration::from_millis(100));
-        tracker.finish_commit();
+        // Process enough commits to pass warmup (20)
+        for _ in 0..25 {
+            tracker.start_commit();
+            thread::sleep(Duration::from_millis(5));
+            tracker.finish_commit();
+        }
 
-        // Should format as seconds
+        // Should format with time units
         let eta_str = tracker.eta_string();
-        assert!(eta_str.contains("s") || eta_str.contains("calculating"));
+        assert!(
+            eta_str.contains("s") || eta_str.contains("m") || eta_str.contains("h"),
+            "Expected time format, got: {}",
+            eta_str
+        );
     }
 
     /// Creates a temporary git repository resembling a minimal nixpkgs checkout.
@@ -1448,6 +2043,7 @@ mod tests {
             platforms: None,
             source_path: Some("pkgs/hello/default.nix".to_string()),
             known_vulnerabilities: None,
+            store_paths: HashMap::new(),
         };
 
         let last_date = Utc::now();
@@ -1468,10 +2064,12 @@ mod tests {
             ranges_created: 0,
             unique_names: 0,
             was_interrupted: false,
+            extraction_failures: 0,
         };
 
         assert_eq!(result.commits_processed, 0);
         assert!(!result.was_interrupted);
+        assert_eq!(result.extraction_failures, 0);
     }
 
     #[test]
@@ -1523,6 +2121,11 @@ mod tests {
             since: None,
             until: None,
             max_commits: None,
+            worker_count: Some(1), // Sequential for tests
+            max_memory_mib: 6 * 1024,
+            verbose: false,
+            gc_interval: 0, // Disable GC for tests
+            gc_min_free_bytes: 0,
         };
         let _indexer = Indexer::new(config);
 
@@ -1553,6 +2156,11 @@ mod tests {
             since: None,
             until: None,
             max_commits: None,
+            worker_count: Some(1), // Sequential for tests
+            max_memory_mib: 6 * 1024,
+            verbose: false,
+            gc_interval: 0, // Disable GC for tests
+            gc_min_free_bytes: 0,
         };
         let _indexer = Indexer::new(config);
 
@@ -1614,6 +2222,7 @@ mod tests {
                 platforms: None,
                 source_path: None,
                 known_vulnerabilities: None,
+                store_paths: HashMap::new(),
             },
             PackageVersion {
                 id: 0,
@@ -1631,6 +2240,7 @@ mod tests {
                 platforms: None,
                 source_path: None,
                 known_vulnerabilities: None,
+                store_paths: HashMap::new(),
             },
         ];
 
@@ -1682,6 +2292,7 @@ mod tests {
                 platforms: None,
                 source_path: None,
                 known_vulnerabilities: None,
+                store_paths: HashMap::new(),
             };
             db.insert_package_ranges_batch(&[pkg]).unwrap();
 
@@ -1718,6 +2329,7 @@ mod tests {
                 platforms: None,
                 source_path: None,
                 known_vulnerabilities: None,
+                store_paths: HashMap::new(),
             };
             db.insert_package_ranges_batch(&[pkg]).unwrap();
 

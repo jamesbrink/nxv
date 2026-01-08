@@ -103,6 +103,38 @@
           };
         });
 
+        # Nix C API build dependencies for nix-bindings
+        nixBindingsInputs = with pkgs; [
+          nix.dev
+          nlohmann_json
+          boost
+          libsodium
+          curl
+          sqlite
+          bzip2
+          xz
+          zlib
+          libarchive
+          lowdown
+          editline
+        ];
+
+        # Extract Nix C API library paths from pkg-config files
+        getNixCApiLibPath = name:
+          let
+            pcFile = "${pkgs.nix.dev}/lib/pkgconfig/${name}.pc";
+            content = builtins.readFile pcFile;
+            lines = pkgs.lib.splitString "\n" content;
+            prefixLine = pkgs.lib.findFirst (l: pkgs.lib.hasPrefix "prefix=" l) "" lines;
+            prefix = pkgs.lib.removePrefix "prefix=" prefixLine;
+          in "${prefix}/lib";
+
+        nixCApiLibPaths = [
+          (getNixCApiLibPath "nix-expr-c")
+          (getNixCApiLibPath "nix-store-c")
+          (getNixCApiLibPath "nix-util-c")
+        ];
+
         # Build nxv with indexer feature enabled
         nxv-indexer = craneLib.buildPackage (commonArgs // {
           inherit cargoArtifacts;
@@ -111,12 +143,27 @@
 
           buildInputs = commonArgs.buildInputs ++ [
             pkgs.libgit2
-          ];
+          ] ++ nixBindingsInputs;
 
           nativeBuildInputs = commonArgs.nativeBuildInputs ++ [
             pkgs.cmake
             pkgs.git
+            pkgs.clang
+            pkgs.llvmPackages.libclang
           ];
+
+          # Environment variables for nix-bindings build
+          NIX_CFLAGS_COMPILE = "-I${pkgs.nix.dev}/include";
+          PKG_CONFIG_PATH = "${pkgs.nix.dev}/lib/pkgconfig";
+          LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+          CC = "clang";
+          CXX = "clang++";
+
+          # Pass library search paths to the Rust linker
+          RUSTFLAGS = pkgs.lib.concatStringsSep " " (
+            (map (p: "-L ${p}") nixCApiLibPaths)
+            ++ ["-l nixexprc" "-l nixstorec" "-l nixutilc"]
+          );
 
           postInstall = installCompletions;
 
@@ -343,9 +390,17 @@
             pkgs.nodePackages.prettier  # HTML/JS/CSS formatter
             pkgs.markdownlint-cli  # Markdown linter
             pkgs.k6  # Load testing tool
-          ];
+            pkgs.python3  # For benchmark scripts
+            # For indexer feature with nix-bindings
+            pkgs.clang
+            pkgs.llvmPackages.libclang
+          ] ++ nixBindingsInputs;
 
           RUST_BACKTRACE = "1";
+          # Environment for nix-bindings (indexer feature)
+          NIX_CFLAGS_COMPILE = "-I${pkgs.nix.dev}/include";
+          PKG_CONFIG_PATH = "${pkgs.nix.dev}/lib/pkgconfig";
+          LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
         };
 
         # Checks (run with `nix flake check`)

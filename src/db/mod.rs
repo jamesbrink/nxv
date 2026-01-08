@@ -7,7 +7,8 @@ use crate::error::{NxvError, Result};
 use queries::PackageVersion;
 use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use tracing::{instrument, trace};
 
 /// Default timeout for SQLite busy handler (in seconds).
 /// When the database is locked, SQLite will retry for this duration before returning SQLITE_BUSY.
@@ -15,7 +16,15 @@ const DEFAULT_BUSY_TIMEOUT_SECS: u64 = 5;
 
 /// Current schema version.
 #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 7;
+
+/// Supported systems for store paths.
+pub const STORE_PATH_SYSTEMS: [&str; 4] = [
+    "x86_64-linux",
+    "aarch64-linux",
+    "x86_64-darwin",
+    "aarch64-darwin",
+];
 
 /// Minimum schema version this build can read.
 /// Indexes with min_schema_version > this value are incompatible.
@@ -30,14 +39,27 @@ impl Database {
     /// Open or create a database at the given path.
     #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let path = path.as_ref();
+        if path.exists() && path.is_dir() {
+            let path_str = path.display().to_string();
+            let path_trimmed = path_str.trim_end_matches('/');
+            return Err(NxvError::InvalidPath(format!(
+                "'{}' is a directory, not a file. Expected a path like '{}/index.db'",
+                path.display(),
+                path_trimmed
+            )));
+        }
         let conn = Connection::open(path)?;
 
         // Enable WAL mode for better concurrent performance and durability
+        // Set larger cache for better performance with large indexes
         conn.execute_batch(
             r#"
             PRAGMA journal_mode = WAL;
             PRAGMA synchronous = NORMAL;
             PRAGMA wal_autocheckpoint = 1000;
+            PRAGMA cache_size = -64000;
+            PRAGMA temp_store = MEMORY;
             "#,
         )?;
 
@@ -50,6 +72,7 @@ impl Database {
     /// Checkpoint the WAL to ensure data is flushed to disk.
     /// Call this at regular intervals during long-running operations.
     #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
+    #[instrument(skip(self))]
     pub fn checkpoint(&self) -> Result<()> {
         self.conn
             .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
@@ -68,11 +91,29 @@ impl Database {
         if !path.exists() {
             return Err(NxvError::NoIndex);
         }
+        if path.is_dir() {
+            let path_str = path.display().to_string();
+            let path_trimmed = path_str.trim_end_matches('/');
+            return Err(NxvError::InvalidPath(format!(
+                "'{}' is a directory, not a file. Expected a path like '{}/index.db'",
+                path.display(),
+                path_trimmed
+            )));
+        }
         let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
 
         // Set busy timeout to prevent indefinite blocking on database locks.
         // This is critical for preventing thread pool exhaustion under load.
         conn.busy_timeout(Duration::from_secs(DEFAULT_BUSY_TIMEOUT_SECS))?;
+
+        // Performance optimizations for read-only queries
+        conn.execute_batch(
+            r#"
+            PRAGMA cache_size = -64000;
+            PRAGMA temp_store = MEMORY;
+            PRAGMA case_sensitive_like = ON;
+            "#,
+        )?;
 
         let db = Self { conn };
 
@@ -166,6 +207,10 @@ impl Database {
                 platforms TEXT,
                 source_path TEXT,
                 known_vulnerabilities TEXT,
+                store_path_x86_64_linux TEXT,
+                store_path_aarch64_linux TEXT,
+                store_path_x86_64_darwin TEXT,
+                store_path_aarch64_darwin TEXT,
                 UNIQUE(attribute_path, version, first_commit_hash)
             );
 
@@ -175,6 +220,36 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_packages_attr ON package_versions(attribute_path);
             CREATE INDEX IF NOT EXISTS idx_packages_first_date ON package_versions(first_commit_date DESC);
             CREATE INDEX IF NOT EXISTS idx_packages_last_date ON package_versions(last_commit_date DESC);
+
+            -- Covering indexes for optimized search queries (added in v7)
+            -- These allow ORDER BY to use the index directly without a separate sort
+            CREATE INDEX IF NOT EXISTS idx_attr_date_covering ON package_versions(
+                attribute_path, last_commit_date DESC, name, version
+            );
+            CREATE INDEX IF NOT EXISTS idx_name_attr_date_covering ON package_versions(
+                name, attribute_path, last_commit_date DESC
+            );
+
+            -- Checkpoint table for persisting open ranges across restarts
+            CREATE TABLE IF NOT EXISTS checkpoint_open_ranges (
+                key TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                version TEXT NOT NULL,
+                first_commit_hash TEXT NOT NULL,
+                first_commit_date INTEGER NOT NULL,
+                attribute_path TEXT NOT NULL,
+                description TEXT,
+                license TEXT,
+                homepage TEXT,
+                maintainers TEXT,
+                platforms TEXT,
+                source_path TEXT,
+                known_vulnerabilities TEXT,
+                store_path_x86_64_linux TEXT,
+                store_path_aarch64_linux TEXT,
+                store_path_x86_64_darwin TEXT,
+                store_path_aarch64_darwin TEXT
+            );
             "#,
         )?;
 
@@ -302,6 +377,157 @@ impl Database {
             )?;
         }
 
+        if current_version < 4 {
+            // Migration v3 -> v4: Add checkpoint_open_ranges table
+            self.conn.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS checkpoint_open_ranges (
+                    key TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    version TEXT NOT NULL,
+                    first_commit_hash TEXT NOT NULL,
+                    first_commit_date INTEGER NOT NULL,
+                    attribute_path TEXT NOT NULL,
+                    description TEXT,
+                    license TEXT,
+                    homepage TEXT,
+                    maintainers TEXT,
+                    platforms TEXT,
+                    source_path TEXT,
+                    known_vulnerabilities TEXT,
+                    store_path TEXT
+                );
+                "#,
+            )?;
+        }
+
+        if current_version < 5 {
+            // Migration v4 -> v5: Add store_path column for fetchClosure support
+            let has_store_path: bool = self
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM pragma_table_info('package_versions') WHERE name='store_path'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+
+            if !has_store_path {
+                self.conn.execute(
+                    "ALTER TABLE package_versions ADD COLUMN store_path TEXT",
+                    [],
+                )?;
+            }
+
+            // Also add to checkpoint_open_ranges if not present
+            let checkpoint_has_store_path: bool = self
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM pragma_table_info('checkpoint_open_ranges') WHERE name='store_path'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+
+            if !checkpoint_has_store_path {
+                self.conn.execute(
+                    "ALTER TABLE checkpoint_open_ranges ADD COLUMN store_path TEXT",
+                    [],
+                )?;
+            }
+        }
+
+        if current_version < 6 {
+            // Migration v5 -> v6: Add per-architecture store_path columns
+            // Add columns to package_versions
+            for system in STORE_PATH_SYSTEMS {
+                let col_name = format!("store_path_{}", system.replace('-', "_"));
+                let has_col: bool = self
+                    .conn
+                    .query_row(
+                        &format!(
+                            "SELECT COUNT(*) > 0 FROM pragma_table_info('package_versions') WHERE name='{}'",
+                            col_name
+                        ),
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(false);
+
+                if !has_col {
+                    self.conn.execute(
+                        &format!("ALTER TABLE package_versions ADD COLUMN {} TEXT", col_name),
+                        [],
+                    )?;
+                }
+            }
+
+            // Migrate existing store_path data to store_path_x86_64_linux
+            // (since previous indexer used x86_64-linux as default)
+            let has_old_store_path: bool = self
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM pragma_table_info('package_versions') WHERE name='store_path'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+
+            if has_old_store_path {
+                self.conn.execute(
+                    "UPDATE package_versions SET store_path_x86_64_linux = store_path WHERE store_path IS NOT NULL AND store_path_x86_64_linux IS NULL",
+                    [],
+                )?;
+            }
+
+            // Add columns to checkpoint_open_ranges
+            for system in STORE_PATH_SYSTEMS {
+                let col_name = format!("store_path_{}", system.replace('-', "_"));
+                let has_col: bool = self
+                    .conn
+                    .query_row(
+                        &format!(
+                            "SELECT COUNT(*) > 0 FROM pragma_table_info('checkpoint_open_ranges') WHERE name='{}'",
+                            col_name
+                        ),
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(false);
+
+                if !has_col {
+                    self.conn.execute(
+                        &format!(
+                            "ALTER TABLE checkpoint_open_ranges ADD COLUMN {} TEXT",
+                            col_name
+                        ),
+                        [],
+                    )?;
+                }
+            }
+        }
+
+        if current_version < 7 {
+            // Migration v6 -> v7: Add covering indexes for optimized search queries
+            // These indexes allow ORDER BY to use the index directly without a separate sort step
+            self.conn.execute_batch(
+                r#"
+                -- Covering index for attribute_path searches with date ordering
+                CREATE INDEX IF NOT EXISTS idx_attr_date_covering ON package_versions(
+                    attribute_path, last_commit_date DESC, name, version
+                );
+
+                -- Covering index for name-based searches with attribute_path filtering
+                CREATE INDEX IF NOT EXISTS idx_name_attr_date_covering ON package_versions(
+                    name, attribute_path, last_commit_date DESC
+                );
+
+                -- Update query planner statistics for optimal index selection
+                ANALYZE;
+                "#,
+            )?;
+        }
+
         if current_version < SCHEMA_VERSION {
             self.set_meta("schema_version", &SCHEMA_VERSION.to_string())?;
         }
@@ -326,6 +552,7 @@ impl Database {
 
     /// Set a metadata value.
     #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
+    #[instrument(skip(self, value))]
     pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
@@ -359,9 +586,14 @@ impl Database {
     /// # }
     /// ```
     #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
+    #[instrument(skip(self, packages), fields(batch_size = packages.len()))]
     pub fn insert_package_ranges_batch(&mut self, packages: &[PackageVersion]) -> Result<usize> {
+        let batch_start = Instant::now();
         let tx = self.conn.transaction()?;
+        let tx_start_time = batch_start.elapsed();
+
         let mut inserted = 0;
+        let mut duplicates = 0;
 
         {
             let mut stmt = tx.prepare_cached(
@@ -370,8 +602,10 @@ impl Database {
                     (name, version, first_commit_hash, first_commit_date,
                      last_commit_hash, last_commit_date, attribute_path,
                      description, license, homepage, maintainers, platforms, source_path,
-                     known_vulnerabilities)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     known_vulnerabilities,
+                     store_path_x86_64_linux, store_path_aarch64_linux,
+                     store_path_x86_64_darwin, store_path_aarch64_darwin)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
             )?;
 
@@ -391,13 +625,172 @@ impl Database {
                     pkg.platforms,
                     pkg.source_path,
                     pkg.known_vulnerabilities,
+                    pkg.store_paths.get("x86_64-linux"),
+                    pkg.store_paths.get("aarch64-linux"),
+                    pkg.store_paths.get("x86_64-darwin"),
+                    pkg.store_paths.get("aarch64-darwin"),
                 ])?;
-                inserted += changes;
+                if changes > 0 {
+                    inserted += changes;
+                } else {
+                    duplicates += 1;
+                }
+            }
+        }
+
+        let insert_time = batch_start.elapsed();
+        tx.commit()?;
+        let total_time = batch_start.elapsed();
+
+        trace!(
+            batch_size = packages.len(),
+            inserted = inserted,
+            duplicates = duplicates,
+            tx_start_ms = tx_start_time.as_millis(),
+            insert_ms = insert_time.as_millis(),
+            commit_ms = (total_time - insert_time).as_millis(),
+            total_ms = total_time.as_millis(),
+            "Batch insert completed"
+        );
+
+        Ok(inserted)
+    }
+
+    /// Save checkpoint open ranges to the database.
+    ///
+    /// This persists the current open ranges so they can be restored on resume.
+    /// Called during periodic checkpoints and graceful shutdown.
+    #[cfg(feature = "indexer")]
+    #[instrument(skip(self, ranges), fields(range_count = ranges.len()))]
+    pub fn save_checkpoint_ranges(
+        &mut self,
+        ranges: &std::collections::HashMap<String, crate::index::CheckpointRange>,
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+
+        // Clear existing checkpoint ranges
+        tx.execute("DELETE FROM checkpoint_open_ranges", [])?;
+
+        // Insert all current ranges
+        {
+            let mut stmt = tx.prepare_cached(
+                r#"
+                INSERT INTO checkpoint_open_ranges
+                    (key, name, version, first_commit_hash, first_commit_date,
+                     attribute_path, description, license, homepage, maintainers,
+                     platforms, source_path, known_vulnerabilities,
+                     store_path_x86_64_linux, store_path_aarch64_linux,
+                     store_path_x86_64_darwin, store_path_aarch64_darwin)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                "#,
+            )?;
+
+            for (key, range) in ranges {
+                stmt.execute(rusqlite::params![
+                    key,
+                    range.name,
+                    range.version,
+                    range.first_commit_hash,
+                    range.first_commit_date.timestamp(),
+                    range.attribute_path,
+                    range.description,
+                    range.license,
+                    range.homepage,
+                    range.maintainers,
+                    range.platforms,
+                    range.source_path,
+                    range.known_vulnerabilities,
+                    range.store_paths.get("x86_64-linux"),
+                    range.store_paths.get("aarch64-linux"),
+                    range.store_paths.get("x86_64-darwin"),
+                    range.store_paths.get("aarch64-darwin"),
+                ])?;
             }
         }
 
         tx.commit()?;
-        Ok(inserted)
+        Ok(())
+    }
+
+    /// Load checkpoint open ranges from the database.
+    ///
+    /// Returns the previously saved open ranges for resuming indexing.
+    #[cfg(feature = "indexer")]
+    #[instrument(skip(self))]
+    pub fn load_checkpoint_ranges(
+        &self,
+    ) -> Result<std::collections::HashMap<String, crate::index::CheckpointRange>> {
+        use chrono::{TimeZone, Utc};
+        use std::collections::HashMap;
+
+        let mut ranges = HashMap::new();
+
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT key, name, version, first_commit_hash, first_commit_date,
+                   attribute_path, description, license, homepage, maintainers,
+                   platforms, source_path, known_vulnerabilities,
+                   store_path_x86_64_linux, store_path_aarch64_linux,
+                   store_path_x86_64_darwin, store_path_aarch64_darwin
+            FROM checkpoint_open_ranges
+            "#,
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            let key: String = row.get(0)?;
+            let timestamp: i64 = row.get(4)?;
+
+            let mut store_paths = HashMap::new();
+            if let Some(path) = row.get::<_, Option<String>>(13)? {
+                store_paths.insert("x86_64-linux".to_string(), path);
+            }
+            if let Some(path) = row.get::<_, Option<String>>(14)? {
+                store_paths.insert("aarch64-linux".to_string(), path);
+            }
+            if let Some(path) = row.get::<_, Option<String>>(15)? {
+                store_paths.insert("x86_64-darwin".to_string(), path);
+            }
+            if let Some(path) = row.get::<_, Option<String>>(16)? {
+                store_paths.insert("aarch64-darwin".to_string(), path);
+            }
+
+            Ok((
+                key,
+                crate::index::CheckpointRange {
+                    name: row.get(1)?,
+                    version: row.get(2)?,
+                    first_commit_hash: row.get(3)?,
+                    first_commit_date: Utc.timestamp_opt(timestamp, 0).single().unwrap_or_default(),
+                    attribute_path: row.get(5)?,
+                    description: row.get(6)?,
+                    license: row.get(7)?,
+                    homepage: row.get(8)?,
+                    maintainers: row.get(9)?,
+                    platforms: row.get(10)?,
+                    source_path: row.get(11)?,
+                    known_vulnerabilities: row.get(12)?,
+                    store_paths,
+                },
+            ))
+        })?;
+
+        for row in rows {
+            let (key, range) = row?;
+            ranges.insert(key, range);
+        }
+
+        Ok(ranges)
+    }
+
+    /// Clear checkpoint open ranges from the database.
+    ///
+    /// Called when indexing completes successfully.
+    #[cfg(feature = "indexer")]
+    #[instrument(skip(self))]
+    pub fn clear_checkpoint_ranges(&self) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM checkpoint_open_ranges", [])?;
+        Ok(())
     }
 
     /// Update the last_commit fields for an existing package version range.
@@ -498,7 +891,7 @@ mod tests {
         let db = Database::open(&db_path).unwrap();
 
         let version = db.get_meta("schema_version").unwrap();
-        assert_eq!(version, Some("3".to_string()));
+        assert_eq!(version, Some(SCHEMA_VERSION.to_string()));
     }
 
     #[test]
@@ -527,6 +920,7 @@ mod tests {
                 platforms: None,
                 source_path: None,
                 known_vulnerabilities: None,
+                store_paths: std::collections::HashMap::new(),
             },
             PackageVersion {
                 id: 0,
@@ -544,6 +938,7 @@ mod tests {
                 platforms: None,
                 source_path: None,
                 known_vulnerabilities: None,
+                store_paths: std::collections::HashMap::new(),
             },
         ];
 
@@ -585,6 +980,7 @@ mod tests {
             platforms: None,
             source_path: None,
             known_vulnerabilities: None,
+            store_paths: std::collections::HashMap::new(),
         };
 
         // First insert should succeed
@@ -634,6 +1030,7 @@ mod tests {
             platforms: None,
             source_path: None,
             known_vulnerabilities: None,
+            store_paths: std::collections::HashMap::new(),
         };
 
         db.insert_package_ranges_batch(&[pkg]).unwrap();
@@ -677,6 +1074,7 @@ mod tests {
                 platforms: None,
                 source_path: None,
                 known_vulnerabilities: None,
+                store_paths: std::collections::HashMap::new(),
             })
             .collect();
 

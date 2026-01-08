@@ -3,6 +3,7 @@
 use crate::error::Result;
 use chrono::{DateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Escapes SQL LIKE wildcard characters (`%`, `_`, `\`) in user input.
 ///
@@ -60,6 +61,10 @@ pub struct PackageVersion {
     pub source_path: Option<String>,
     /// Known security vulnerabilities or EOL notices (JSON array)
     pub known_vulnerabilities: Option<String>,
+    /// Store paths per architecture (e.g., {"x86_64-linux": "/nix/store/hash-name-version"})
+    /// Only populated for commits from 2020-01-01 onwards.
+    #[serde(default)]
+    pub store_paths: HashMap<String, String>,
 }
 
 impl PackageVersion {
@@ -104,6 +109,37 @@ impl PackageVersion {
                 )
             })?;
 
+        // Build store_paths from the 4 architecture columns
+        let mut store_paths = HashMap::new();
+        if let Some(path) = row
+            .get::<_, Option<String>>("store_path_x86_64_linux")
+            .ok()
+            .flatten()
+        {
+            store_paths.insert("x86_64-linux".to_string(), path);
+        }
+        if let Some(path) = row
+            .get::<_, Option<String>>("store_path_aarch64_linux")
+            .ok()
+            .flatten()
+        {
+            store_paths.insert("aarch64-linux".to_string(), path);
+        }
+        if let Some(path) = row
+            .get::<_, Option<String>>("store_path_x86_64_darwin")
+            .ok()
+            .flatten()
+        {
+            store_paths.insert("x86_64-darwin".to_string(), path);
+        }
+        if let Some(path) = row
+            .get::<_, Option<String>>("store_path_aarch64_darwin")
+            .ok()
+            .flatten()
+        {
+            store_paths.insert("aarch64-darwin".to_string(), path);
+        }
+
         Ok(Self {
             id: row.get("id")?,
             name: row.get("name")?,
@@ -120,6 +156,7 @@ impl PackageVersion {
             platforms: row.get("platforms")?,
             source_path: row.get("source_path").ok().flatten(),
             known_vulnerabilities: row.get("known_vulnerabilities").ok().flatten(),
+            store_paths,
         })
     }
 
@@ -210,7 +247,19 @@ impl PackageVersion {
     pub fn vulnerabilities(&self) -> Vec<String> {
         self.known_vulnerabilities
             .as_ref()
-            .and_then(|v| serde_json::from_str(v).ok())
+            .and_then(|v| {
+                serde_json::from_str(v)
+                    .map_err(|e| {
+                        tracing::warn!(
+                            attr = %self.attribute_path,
+                            error = %e,
+                            raw_value = %v,
+                            "Failed to parse known_vulnerabilities JSON"
+                        );
+                        e
+                    })
+                    .ok()
+            })
             .unwrap_or_default()
     }
 }
@@ -259,13 +308,71 @@ pub fn search_by_name(
     Ok(results)
 }
 
-/// Search for packages by attribute path.
+/// Search for packages by attribute path with relevance ranking.
+///
+/// Matches packages where:
+/// - The attribute path starts with the query (prefix match)
+/// - The attribute path contains the query after a dot (suffix/component match)
+///
+/// Results are ranked by relevance:
+/// 1. Exact match (attribute_path == query)
+/// 2. Top-level prefix match (query at start, no dot before next segment)
+/// 3. Final component exact match (last segment after dot == query)
+/// 4. Final component prefix match (last segment starts with query)
+/// 5. Other matches (query appears elsewhere)
+///
+/// Within each relevance tier, results are sorted by last_commit_date DESC.
+///
+/// This allows searching "python" to show `python` first, then `python2`,
+/// before nested packages like `python3Packages.numpy`.
 pub fn search_by_attr(conn: &rusqlite::Connection, attr_path: &str) -> Result<Vec<PackageVersion>> {
     let mut stmt = conn.prepare(
-        "SELECT * FROM package_versions WHERE attribute_path LIKE ? ESCAPE '\\' ORDER BY last_commit_date DESC",
+        r#"SELECT *,
+           CASE
+               -- Exact match: highest priority
+               WHEN attribute_path = ?1 THEN 1
+               -- Top-level prefix: "python" matches "python2" but not "python3Packages.foo"
+               -- Match if starts with query and either ends there or next char isn't a dot
+               WHEN attribute_path LIKE ?2 ESCAPE '\' AND attribute_path NOT LIKE ?3 ESCAPE '\' THEN 2
+               -- Final component exact match: "qtwebengine" matches "qt5.qtwebengine"
+               WHEN attribute_path LIKE ?4 ESCAPE '\' THEN 3
+               -- Final component prefix: "numpy" matches "python3Packages.numpy1"
+               WHEN attribute_path LIKE ?5 ESCAPE '\' THEN 4
+               -- Other prefix matches
+               WHEN attribute_path LIKE ?2 ESCAPE '\' THEN 5
+               -- Other substring matches
+               ELSE 6
+           END as relevance
+           FROM package_versions
+           WHERE attribute_path LIKE ?2 ESCAPE '\'
+              OR attribute_path LIKE ?6 ESCAPE '\'
+           ORDER BY relevance, last_commit_date DESC"#,
     )?;
-    let pattern = format!("{}%", escape_like_pattern(attr_path));
-    let rows = stmt.query_map([&pattern], PackageVersion::from_row)?;
+    let escaped = escape_like_pattern(attr_path);
+    // ?1: exact match
+    let exact = attr_path;
+    // ?2: prefix pattern (python%)
+    let prefix_pattern = format!("{}%", escaped);
+    // ?3: prefix with dot pattern (python%.%) - excludes nested packages from tier 2
+    let prefix_dot_pattern = format!("{}%.%", escaped);
+    // ?4: final component exact match (%.python)
+    let final_exact_pattern = format!("%.{}", escaped);
+    // ?5: final component prefix match (%.python%)
+    let final_prefix_pattern = format!("%.{}%", escaped);
+    // ?6: suffix/contains pattern (%.python%)
+    let suffix_pattern = format!("%.{}%", escaped);
+
+    let rows = stmt.query_map(
+        rusqlite::params![
+            exact,
+            prefix_pattern,
+            prefix_dot_pattern,
+            final_exact_pattern,
+            final_prefix_pattern,
+            suffix_pattern
+        ],
+        PackageVersion::from_row,
+    )?;
 
     let mut results = Vec::new();
     for row in rows {
@@ -274,39 +381,74 @@ pub fn search_by_attr(conn: &rusqlite::Connection, attr_path: &str) -> Result<Ve
     Ok(results)
 }
 
-/// Finds package versions whose attribute path and version start with the given prefixes.
+/// Finds package versions whose attribute path matches the query and version starts with given prefix.
 ///
-/// The `package` argument is matched as a prefix against the `attribute_path` column
-/// (i.e., `attribute_path LIKE 'package%'`) and the `version` argument is matched as a
-/// prefix against the `version` column. Results are ordered by `first_commit_date` descending.
+/// The `package` argument matches attribute paths where:
+/// - The path starts with the query (prefix match)
+/// - The path contains the query after a dot (suffix/component match)
+///
+/// The `version` argument is matched as a prefix against the `version` column.
+///
+/// Results are ranked by relevance (same as `search_by_attr`):
+/// 1. Exact match (attribute_path == query)
+/// 2. Top-level prefix match
+/// 3. Final component exact match
+/// 4. Final component prefix match
+/// 5. Other matches
+///
+/// Within each relevance tier, results are sorted by first_commit_date DESC.
 ///
 /// # Returns
 ///
-/// A vector of `PackageVersion` entries that match the provided package and version prefixes.
+/// A vector of `PackageVersion` entries that match the provided package and version patterns.
 ///
 /// # Examples
 ///
 /// ```
 /// // Assuming `conn` is a valid rusqlite::Connection populated with package_versions...
-/// let matches = search_by_name_version(&conn, "python", "3.11").unwrap();
-/// for pv in matches {
-///     assert!(pv.attribute_path.starts_with("python"));
-///     assert!(pv.version.starts_with("3.11"));
-/// }
+/// let matches = search_by_name_version(&conn, "numpy", "1.24").unwrap();
+/// // Matches both "numpy" and "python3Packages.numpy"
 /// ```
 pub fn search_by_name_version(
     conn: &rusqlite::Connection,
     package: &str,
     version: &str,
 ) -> Result<Vec<PackageVersion>> {
-    // Search by attribute_path (package) and version prefix
+    // Search by attribute_path (package) and version prefix with relevance ranking
     let mut stmt = conn.prepare(
-        "SELECT * FROM package_versions WHERE attribute_path LIKE ? ESCAPE '\\' AND version LIKE ? ESCAPE '\\' ORDER BY first_commit_date DESC",
+        r#"SELECT *,
+           CASE
+               WHEN attribute_path = ?1 THEN 1
+               WHEN attribute_path LIKE ?2 ESCAPE '\' AND attribute_path NOT LIKE ?3 ESCAPE '\' THEN 2
+               WHEN attribute_path LIKE ?4 ESCAPE '\' THEN 3
+               WHEN attribute_path LIKE ?5 ESCAPE '\' THEN 4
+               WHEN attribute_path LIKE ?2 ESCAPE '\' THEN 5
+               ELSE 6
+           END as relevance
+           FROM package_versions
+           WHERE (attribute_path LIKE ?2 ESCAPE '\' OR attribute_path LIKE ?6 ESCAPE '\')
+             AND version LIKE ?7 ESCAPE '\'
+           ORDER BY relevance, first_commit_date DESC"#,
     )?;
-    let package_pattern = format!("{}%", escape_like_pattern(package));
+    let escaped_pkg = escape_like_pattern(package);
+    let exact = package;
+    let prefix_pattern = format!("{}%", escaped_pkg);
+    let prefix_dot_pattern = format!("{}%.%", escaped_pkg);
+    let final_exact_pattern = format!("%.{}", escaped_pkg);
+    let final_prefix_pattern = format!("%.{}%", escaped_pkg);
+    let suffix_pattern = format!("%.{}%", escaped_pkg);
     let version_pattern = format!("{}%", escape_like_pattern(version));
+
     let rows = stmt.query_map(
-        [&package_pattern, &version_pattern],
+        rusqlite::params![
+            exact,
+            prefix_pattern,
+            prefix_dot_pattern,
+            final_exact_pattern,
+            final_prefix_pattern,
+            suffix_pattern,
+            version_pattern
+        ],
         PackageVersion::from_row,
     )?;
 
@@ -655,7 +797,7 @@ mod tests {
     /// Creates a temporary SQLite database pre-populated with sample package_versions rows for use in tests.
     ///
     /// The returned TempDir owns the temporary file location and should be kept alive while the Database is used.
-    /// The database is populated with four sample entries (two python versions, one python2, one nodejs).
+    /// The database is populated with sample entries including nested packages (qt5.qtwebengine, python3Packages.numpy).
     ///
     /// # Examples
     ///
@@ -669,6 +811,7 @@ mod tests {
         let db = Database::open(&db_path).unwrap();
 
         // Insert test data - attribute_path is the "Package" that users install with
+        // Includes nested packages like qt5.qtwebengine and python3Packages.numpy
         db.connection()
             .execute(
                 r#"
@@ -678,7 +821,9 @@ mod tests {
                 ('python-3.11.0', '3.11.0', 'abc1234567890', 1700000000, 'def1234567890', 1700100000, 'python', 'Python interpreter'),
                 ('python-3.12.0', '3.12.0', 'ghi1234567890', 1701000000, 'jkl1234567890', 1701100000, 'python', 'Python interpreter'),
                 ('python2-2.7.18', '2.7.18', 'mno1234567890', 1600000000, 'pqr1234567890', 1600100000, 'python2', 'Python 2 interpreter'),
-                ('nodejs-20.0.0', '20.0.0', 'stu1234567890', 1702000000, 'vwx1234567890', 1702100000, 'nodejs', 'Node.js runtime')
+                ('nodejs-20.0.0', '20.0.0', 'stu1234567890', 1702000000, 'vwx1234567890', 1702100000, 'nodejs', 'Node.js runtime'),
+                ('qtwebengine-5.15.2', '5.15.2', 'qtw1234567890', 1703000000, 'qtx1234567890', 1703100000, 'qt5.qtwebengine', 'Qt WebEngine'),
+                ('numpy-1.24.0', '1.24.0', 'npy1234567890', 1704000000, 'npz1234567890', 1704100000, 'python3Packages.numpy', 'NumPy for Python')
             "#,
                 [],
             )
@@ -736,8 +881,8 @@ mod tests {
     fn test_search_by_attr() {
         let (_dir, db) = create_test_db();
         let results = search_by_attr(db.connection(), "python").unwrap();
-        // Should match "python" and "python2" attribute paths
-        assert_eq!(results.len(), 3);
+        // Should match "python", "python2", and "python3Packages.numpy" attribute paths
+        assert_eq!(results.len(), 4);
     }
 
     #[test]
@@ -746,6 +891,347 @@ mod tests {
         let results = search_by_attr(db.connection(), "nodejs").unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].attribute_path, "nodejs");
+    }
+
+    #[test]
+    fn test_search_by_attr_nested_package() {
+        let (_dir, db) = create_test_db();
+        // Searching "qtwebengine" should find "qt5.qtwebengine"
+        let results = search_by_attr(db.connection(), "qtwebengine").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].attribute_path, "qt5.qtwebengine");
+
+        // Searching "numpy" should find "python3Packages.numpy"
+        let results = search_by_attr(db.connection(), "numpy").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].attribute_path, "python3Packages.numpy");
+    }
+
+    #[test]
+    fn test_search_by_attr_full_nested_path() {
+        let (_dir, db) = create_test_db();
+        // Searching full path should also work
+        let results = search_by_attr(db.connection(), "qt5.qtwebengine").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].attribute_path, "qt5.qtwebengine");
+    }
+
+    #[test]
+    fn test_search_by_name_version_nested_package() {
+        let (_dir, db) = create_test_db();
+        // Searching "numpy" with version should find nested package
+        let results = search_by_name_version(db.connection(), "numpy", "1.24").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].attribute_path, "python3Packages.numpy");
+    }
+
+    /// Regression test: Verify that search results are ordered by relevance.
+    ///
+    /// When searching for "python", results should be ordered:
+    /// 1. Exact match: "python"
+    /// 2. Top-level prefix matches: "python2", "python3" (no dots)
+    /// 3. Nested packages: "python3Packages.numpy" (contains dots)
+    ///
+    /// This test ensures that top-level packages appear before nested packages,
+    /// which is critical for user experience when searching common package names.
+    #[test]
+    fn test_search_by_attr_relevance_ranking() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("relevance_test.db");
+        let db = Database::open(&db_path).unwrap();
+
+        // Insert packages at different relevance tiers with varying timestamps
+        // to ensure relevance ordering takes precedence over date ordering.
+        // The nested package has the NEWEST date to verify relevance wins over recency.
+        db.connection()
+            .execute(
+                r#"
+            INSERT INTO package_versions (name, version, first_commit_hash, first_commit_date,
+                last_commit_hash, last_commit_date, attribute_path, description)
+            VALUES
+                -- Tier 5: Nested package with prefix match (newest date - would be first if sorted by date)
+                ('python-lib', '1.0.0', 'nested1234567', 1800000000, 'nested7654321', 1800100000, 'python3Packages.python-dateutil', 'Date utilities'),
+                -- Tier 1: Exact match (oldest date)
+                ('python', '3.11.0', 'exact1234567', 1600000000, 'exact7654321', 1600100000, 'python', 'Python interpreter'),
+                -- Tier 5: Another nested package (second newest)
+                ('numpy', '1.24.0', 'numpy1234567', 1750000000, 'numpy7654321', 1750100000, 'python3Packages.numpy', 'NumPy'),
+                -- Tier 2: Top-level prefix without dot
+                ('python2', '2.7.18', 'py2_1234567', 1650000000, 'py2_7654321', 1650100000, 'python2', 'Python 2'),
+                -- Tier 2: Another top-level prefix
+                ('python3', '3.10.0', 'py3_1234567', 1700000000, 'py3_7654321', 1700100000, 'python3', 'Python 3'),
+                -- Tier 3: Final component exact match (e.g., linuxPackages.python)
+                ('kernel-python', '3.9.0', 'kern1234567', 1680000000, 'kern7654321', 1680100000, 'linuxPackages.python', 'Python for kernel')
+            "#,
+                [],
+            )
+            .unwrap();
+
+        let results = search_by_attr(db.connection(), "python").unwrap();
+
+        // Should have 6 results total
+        assert_eq!(results.len(), 6, "Expected 6 results for 'python' search");
+
+        // Verify ordering by relevance tiers:
+        // Tier 1: Exact match should be first
+        assert_eq!(
+            results[0].attribute_path, "python",
+            "Exact match 'python' should be first"
+        );
+
+        // Tier 2: Top-level prefix matches (python2, python3) should come next
+        // Order within tier is by last_commit_date DESC
+        let tier2_packages: Vec<&str> = results[1..3]
+            .iter()
+            .map(|p| p.attribute_path.as_str())
+            .collect();
+        assert!(
+            tier2_packages.contains(&"python2") && tier2_packages.contains(&"python3"),
+            "Top-level prefixes 'python2' and 'python3' should be in positions 1-2, got: {:?}",
+            tier2_packages
+        );
+
+        // Tier 3: Final component exact match
+        assert_eq!(
+            results[3].attribute_path, "linuxPackages.python",
+            "Final component exact match should be in position 3"
+        );
+
+        // Tier 5: Nested packages should be last (positions 4-5)
+        let nested_packages: Vec<&str> = results[4..6]
+            .iter()
+            .map(|p| p.attribute_path.as_str())
+            .collect();
+        assert!(
+            nested_packages.contains(&"python3Packages.numpy")
+                && nested_packages.contains(&"python3Packages.python-dateutil"),
+            "Nested packages should be in positions 4-5, got: {:?}",
+            nested_packages
+        );
+
+        // Verify that date ordering within the same tier works correctly
+        // python3 (1700100000) should come before python2 (1650100000) within tier 2
+        assert_eq!(
+            results[1].attribute_path, "python3",
+            "Within tier 2, python3 (newer) should come before python2"
+        );
+        assert_eq!(
+            results[2].attribute_path, "python2",
+            "Within tier 2, python2 (older) should come after python3"
+        );
+    }
+
+    /// Regression test: Verify relevance ranking for search_by_name_version.
+    #[test]
+    fn test_search_by_name_version_relevance_ranking() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("relevance_version_test.db");
+        let db = Database::open(&db_path).unwrap();
+
+        db.connection()
+            .execute(
+                r#"
+            INSERT INTO package_versions (name, version, first_commit_hash, first_commit_date,
+                last_commit_hash, last_commit_date, attribute_path, description)
+            VALUES
+                -- Nested package (newest date)
+                ('numpy', '1.24.0', 'numpy1234567', 1800000000, 'numpy7654321', 1800100000, 'python3Packages.numpy', 'NumPy'),
+                -- Exact match (oldest date)
+                ('numpy', '1.24.0', 'exact1234567', 1600000000, 'exact7654321', 1600100000, 'numpy', 'NumPy standalone'),
+                -- Another nested
+                ('numpy', '1.24.1', 'np2_1234567', 1750000000, 'np2_7654321', 1750100000, 'python39Packages.numpy', 'NumPy for Py39')
+            "#,
+                [],
+            )
+            .unwrap();
+
+        let results = search_by_name_version(db.connection(), "numpy", "1.24").unwrap();
+
+        assert_eq!(results.len(), 3, "Expected 3 results");
+
+        // Exact match should be first despite having oldest date
+        assert_eq!(
+            results[0].attribute_path, "numpy",
+            "Exact match 'numpy' should be first"
+        );
+
+        // Nested packages should follow
+        assert!(
+            results[1].attribute_path.contains('.') && results[2].attribute_path.contains('.'),
+            "Nested packages should be after exact match"
+        );
+    }
+
+    /// Regression test: Verify relevance ranking with Qt-style nested packages.
+    ///
+    /// Qt packages in nixpkgs are typically structured as qt5.qtwebengine, qt6.qtbase, etc.
+    /// When searching for "qtwebengine", results should prioritize:
+    /// 1. Exact match: "qtwebengine" (if it exists)
+    /// 2. Final component exact match: "qt5.qtwebengine"
+    /// 3. Final component prefix: "qt5.qtwebengine-extra"
+    #[test]
+    fn test_search_by_attr_relevance_ranking_qt_style() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("qt_relevance_test.db");
+        let db = Database::open(&db_path).unwrap();
+
+        db.connection()
+            .execute(
+                r#"
+            INSERT INTO package_versions (name, version, first_commit_hash, first_commit_date,
+                last_commit_hash, last_commit_date, attribute_path, description)
+            VALUES
+                -- Tier 4: Final component prefix match (newest)
+                ('qtwebengine-extra', '5.15.2', 'extra1234567', 1800000000, 'extra7654321', 1800100000, 'qt5.qtwebengine-extra', 'Qt WebEngine Extra'),
+                -- Tier 3: Final component exact match
+                ('qtwebengine', '5.15.2', 'qt5we1234567', 1700000000, 'qt5we7654321', 1700100000, 'qt5.qtwebengine', 'Qt5 WebEngine'),
+                -- Tier 1: Exact match (oldest)
+                ('qtwebengine', '6.0.0', 'exact1234567', 1600000000, 'exact7654321', 1600100000, 'qtwebengine', 'Standalone WebEngine'),
+                -- Tier 3: Another final component exact match
+                ('qtwebengine', '6.2.0', 'qt6we1234567', 1750000000, 'qt6we7654321', 1750100000, 'qt6.qtwebengine', 'Qt6 WebEngine')
+            "#,
+                [],
+            )
+            .unwrap();
+
+        let results = search_by_attr(db.connection(), "qtwebengine").unwrap();
+
+        assert_eq!(results.len(), 4, "Expected 4 results");
+
+        // Tier 1: Exact match should be first
+        assert_eq!(
+            results[0].attribute_path, "qtwebengine",
+            "Exact match 'qtwebengine' should be first"
+        );
+
+        // Tier 3: Final component exact matches should be next (ordered by date DESC)
+        let tier3_packages: Vec<&str> = results[1..3]
+            .iter()
+            .map(|p| p.attribute_path.as_str())
+            .collect();
+        assert!(
+            tier3_packages.contains(&"qt5.qtwebengine")
+                && tier3_packages.contains(&"qt6.qtwebengine"),
+            "Final component exact matches should be in positions 1-2, got: {:?}",
+            tier3_packages
+        );
+        // qt6.qtwebengine (1750100000) should come before qt5.qtwebengine (1700100000)
+        assert_eq!(results[1].attribute_path, "qt6.qtwebengine");
+        assert_eq!(results[2].attribute_path, "qt5.qtwebengine");
+
+        // Tier 4: Final component prefix match should be last
+        assert_eq!(
+            results[3].attribute_path, "qt5.qtwebengine-extra",
+            "Final component prefix match should be last"
+        );
+    }
+
+    /// Regression test: Verify relevance ranking with Haskell-style packages.
+    ///
+    /// Haskell packages are typically structured as haskellPackages.aeson, etc.
+    /// This tests another common pattern in nixpkgs.
+    #[test]
+    fn test_search_by_attr_relevance_ranking_haskell_style() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("haskell_relevance_test.db");
+        let db = Database::open(&db_path).unwrap();
+
+        db.connection()
+            .execute(
+                r#"
+            INSERT INTO package_versions (name, version, first_commit_hash, first_commit_date,
+                last_commit_hash, last_commit_date, attribute_path, description)
+            VALUES
+                -- Nested in haskellPackages (newest)
+                ('aeson', '2.1.0', 'hask1234567', 1800000000, 'hask7654321', 1800100000, 'haskellPackages.aeson', 'Haskell JSON'),
+                -- Exact match (oldest)
+                ('aeson', '2.0.0', 'exact1234567', 1600000000, 'exact7654321', 1600100000, 'aeson', 'Standalone Aeson'),
+                -- Different nesting
+                ('aeson', '2.0.5', 'ghc_1234567', 1700000000, 'ghc_7654321', 1700100000, 'haskell.compiler.ghc92.aeson', 'GHC92 Aeson')
+            "#,
+                [],
+            )
+            .unwrap();
+
+        let results = search_by_attr(db.connection(), "aeson").unwrap();
+
+        assert_eq!(results.len(), 3, "Expected 3 results");
+
+        // Exact match should be first despite being oldest
+        assert_eq!(
+            results[0].attribute_path, "aeson",
+            "Exact match 'aeson' should be first"
+        );
+
+        // Nested packages should follow (tier 3 - final component exact matches)
+        assert!(
+            results[1].attribute_path.ends_with(".aeson")
+                && results[2].attribute_path.ends_with(".aeson"),
+            "Nested packages with .aeson suffix should follow"
+        );
+    }
+
+    /// Regression test: Verify that top-level prefix beats nested prefix.
+    ///
+    /// When searching for "gtk", "gtk3" (top-level) should appear before
+    /// "gnome.gtk" (nested), even if the nested one is newer.
+    #[test]
+    fn test_search_by_attr_relevance_toplevel_beats_nested() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("toplevel_test.db");
+        let db = Database::open(&db_path).unwrap();
+
+        db.connection()
+            .execute(
+                r#"
+            INSERT INTO package_versions (name, version, first_commit_hash, first_commit_date,
+                last_commit_hash, last_commit_date, attribute_path, description)
+            VALUES
+                -- Nested prefix (newest - would be first if sorted by date)
+                ('gtk', '4.0.0', 'gnome1234567', 1800000000, 'gnome7654321', 1800100000, 'gnome.gtk', 'GNOME GTK'),
+                -- Top-level exact (oldest)
+                ('gtk', '3.24.0', 'exact1234567', 1500000000, 'exact7654321', 1500100000, 'gtk', 'GTK toolkit'),
+                -- Another nested
+                ('gtk-doc', '1.0.0', 'doc_1234567', 1750000000, 'doc_7654321', 1750100000, 'gnome.gtk-doc', 'GTK Documentation'),
+                -- Top-level prefix
+                ('gtk3', '3.24.0', 'gtk3_1234567', 1600000000, 'gtk3_7654321', 1600100000, 'gtk3', 'GTK3 toolkit'),
+                -- Top-level prefix
+                ('gtk4', '4.0.0', 'gtk4_1234567', 1700000000, 'gtk4_7654321', 1700100000, 'gtk4', 'GTK4 toolkit')
+            "#,
+                [],
+            )
+            .unwrap();
+
+        let results = search_by_attr(db.connection(), "gtk").unwrap();
+
+        assert_eq!(results.len(), 5, "Expected 5 results");
+
+        // Tier 1: Exact match first
+        assert_eq!(
+            results[0].attribute_path, "gtk",
+            "Exact match should be first"
+        );
+
+        // Tier 2: Top-level prefixes next (gtk3, gtk4), ordered by date DESC
+        assert_eq!(
+            results[1].attribute_path, "gtk4",
+            "gtk4 (newer) should be second"
+        );
+        assert_eq!(
+            results[2].attribute_path, "gtk3",
+            "gtk3 (older) should be third"
+        );
+
+        // Tier 3: Final component exact match
+        assert_eq!(
+            results[3].attribute_path, "gnome.gtk",
+            "gnome.gtk (final component exact) should be fourth"
+        );
+
+        // Tier 4: Final component prefix match
+        assert_eq!(
+            results[4].attribute_path, "gnome.gtk-doc",
+            "gnome.gtk-doc (final component prefix) should be last"
+        );
     }
 
     #[test]
@@ -804,8 +1290,8 @@ mod tests {
     fn test_get_stats() {
         let (_dir, db) = create_test_db();
         let stats = get_stats(db.connection()).unwrap();
-        assert_eq!(stats.total_ranges, 4);
-        assert_eq!(stats.unique_names, 4); // python-3.11.0, python-3.12.0, python2-2.7.18, nodejs-20.0.0
+        assert_eq!(stats.total_ranges, 6);
+        assert_eq!(stats.unique_names, 6); // python-3.11.0, python-3.12.0, python2-2.7.18, nodejs-20.0.0, qtwebengine-5.15.2, numpy-1.24.0
     }
 
     #[test]
@@ -857,7 +1343,7 @@ mod tests {
     fn test_get_all_unique_attrs() {
         let (_dir, db) = create_test_db();
         let attrs = get_all_unique_attrs(db.connection()).unwrap();
-        assert_eq!(attrs.len(), 3); // nodejs, python, python2
+        assert_eq!(attrs.len(), 5); // nodejs, python, python2, python3Packages.numpy, qt5.qtwebengine
         assert!(attrs.contains(&"python".to_string()));
         assert!(attrs.contains(&"python2".to_string()));
         assert!(attrs.contains(&"nodejs".to_string()));
@@ -878,9 +1364,10 @@ mod tests {
         let (_dir, db) = create_test_db();
         // Test with prefix that matches multiple packages
         let results = complete_package_prefix(db.connection(), "python", 10).unwrap();
-        assert_eq!(results.len(), 2); // python, python2
+        assert_eq!(results.len(), 3); // python, python2, python3Packages.numpy
         assert!(results.contains(&"python".to_string()));
         assert!(results.contains(&"python2".to_string()));
+        assert!(results.contains(&"python3Packages.numpy".to_string()));
     }
 
     #[test]
@@ -913,7 +1400,7 @@ mod tests {
         let (_dir, db) = create_test_db();
         // Empty prefix should return all packages (up to limit)
         let results = complete_package_prefix(db.connection(), "", 10).unwrap();
-        assert_eq!(results.len(), 3); // nodejs, python, python2
+        assert_eq!(results.len(), 5); // nodejs, python, python2, python3Packages.numpy, qt5.qtwebengine
     }
 
     #[test]
@@ -967,7 +1454,7 @@ mod tests {
 
         // Test that normal prefix search still works
         let results = search_by_attr(db.connection(), "python").unwrap();
-        assert_eq!(results.len(), 3); // python (x2 versions) + python2
+        assert_eq!(results.len(), 4); // python (x2 versions) + python2 + python3Packages.numpy
     }
 
     #[test]
@@ -1168,6 +1655,7 @@ mod tests {
             platforms: None,
             source_path: None,
             known_vulnerabilities,
+            store_paths: HashMap::new(),
         }
     }
 

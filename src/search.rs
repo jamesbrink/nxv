@@ -10,14 +10,21 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
+/// Maximum number of results to return, regardless of limit parameter.
+/// This prevents memory exhaustion from requests with limit=0 or very large limits.
+const MAX_RESULTS: usize = 10_000;
+
 /// Sort order for search results.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ValueEnum, utoipa::ToSchema,
 )]
 #[serde(rename_all = "lowercase")]
 pub enum SortOrder {
-    /// Sort by date (newest first).
+    /// Sort by relevance (exact matches first, then prefix matches, then nested matches).
+    /// This is the default for attribute path searches.
     #[default]
+    Relevance,
+    /// Sort by date (newest first).
     Date,
     /// Sort by version (semver-aware).
     Version,
@@ -59,7 +66,7 @@ impl Default for SearchOptions {
     /// - `exact`: `false`
     /// - `desc`: `false`
     /// - `license`: `None`
-    /// - `sort`: `SortOrder::Date`
+    /// - `sort`: `SortOrder::Relevance`
     /// - `reverse`: `false`
     /// - `full`: `false`
     /// - `limit`: `50`
@@ -73,7 +80,7 @@ impl Default for SearchOptions {
     /// assert!(opts.version.is_none());
     /// assert!(!opts.exact && !opts.desc && !opts.reverse && !opts.full);
     /// assert!(opts.license.is_none());
-    /// assert_eq!(opts.sort, crate::search::SortOrder::Date);
+    /// assert_eq!(opts.sort, crate::search::SortOrder::Relevance);
     /// assert_eq!(opts.limit, 50);
     /// assert_eq!(opts.offset, 0);
     /// ```
@@ -84,7 +91,7 @@ impl Default for SearchOptions {
             exact: false,
             desc: false,
             license: None,
-            sort: SortOrder::Date,
+            sort: SortOrder::Relevance,
             reverse: false,
             full: false,
             limit: 50,
@@ -207,9 +214,14 @@ pub fn filter_by_license(
 
 /// Sort results based on sort order.
 ///
+/// For `Relevance` sort, results are kept in database order (already sorted by relevance).
 /// For `Version` sort, uses semver-aware comparison with fallback to string comparison.
 pub fn sort_results(results: &mut [PackageVersion], order: SortOrder, reverse: bool) {
     match order {
+        SortOrder::Relevance => {
+            // Results are already sorted by relevance from the database query.
+            // Don't re-sort, just apply reverse if requested.
+        }
         SortOrder::Date => {
             results.sort_by(|a, b| b.last_commit_date.cmp(&a.last_commit_date));
         }
@@ -284,11 +296,20 @@ pub fn paginate(
 ) -> (Vec<PackageVersion>, usize) {
     let total = results.len();
 
-    let data: Vec<_> = if limit > 0 {
-        results.into_iter().skip(offset).take(limit).collect()
+    // Enforce maximum limit to prevent memory exhaustion.
+    // If limit is 0 (meaning "unlimited"), cap at MAX_RESULTS.
+    // Otherwise, cap the provided limit at MAX_RESULTS.
+    let effective_limit = if limit == 0 {
+        MAX_RESULTS
     } else {
-        results.into_iter().skip(offset).collect()
+        limit.min(MAX_RESULTS)
     };
+
+    let data: Vec<_> = results
+        .into_iter()
+        .skip(offset)
+        .take(effective_limit)
+        .collect();
 
     (data, total)
 }
@@ -328,6 +349,7 @@ mod tests {
             platforms: None,
             source_path: None,
             known_vulnerabilities: None,
+            store_paths: std::collections::HashMap::new(),
         }
     }
 
@@ -468,7 +490,7 @@ mod tests {
         assert!(!opts.desc);
         assert!(!opts.full);
         assert!(!opts.reverse);
-        assert_eq!(opts.sort, SortOrder::Date);
+        assert_eq!(opts.sort, SortOrder::Relevance);
     }
 }
 
@@ -506,6 +528,7 @@ mod proptests {
                 platforms: None,
                 source_path: None,
                 known_vulnerabilities: None,
+                store_paths: std::collections::HashMap::new(),
             }
         }
     }

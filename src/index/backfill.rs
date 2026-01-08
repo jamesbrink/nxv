@@ -15,6 +15,7 @@ use crate::db::Database;
 use crate::error::Result;
 use crate::index::extractor;
 use crate::index::git::NixpkgsRepo;
+use crate::theme::Themed;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashMap;
 use std::path::Path;
@@ -51,6 +52,12 @@ pub struct BackfillConfig {
     pub dry_run: bool,
     /// Use historical mode (traverse git history).
     pub use_history: bool,
+    /// Filter to packages first seen after this date (YYYY-MM-DD).
+    pub since: Option<String>,
+    /// Filter to packages first seen before this date (YYYY-MM-DD).
+    pub until: Option<String>,
+    /// Maximum number of commits to process (historical mode only).
+    pub max_commits: Option<usize>,
 }
 
 impl Default for BackfillConfig {
@@ -58,17 +65,7 @@ impl Default for BackfillConfig {
     ///
     /// The default configuration backfills the `source_path`, `homepage`, and
     /// `known_vulnerabilities` fields, does not impose a processing limit, and
-    /// runs in non-dry, non-historical mode.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// let cfg = BackfillConfig::default();
-    /// assert_eq!(cfg.fields, vec!["source_path".to_string(), "homepage".to_string(), "known_vulnerabilities".to_string()]);
-    /// assert!(cfg.limit.is_none());
-    /// assert!(!cfg.dry_run);
-    /// assert!(!cfg.use_history);
-    /// ```
+    /// runs in non-dry, non-historical mode with no date filtering.
     fn default() -> Self {
         Self {
             fields: vec![
@@ -79,6 +76,9 @@ impl Default for BackfillConfig {
             limit: None,
             dry_run: false,
             use_history: false,
+            since: None,
+            until: None,
+            max_commits: None,
         }
     }
 }
@@ -285,16 +285,30 @@ fn run_backfill_head<P: AsRef<Path>, Q: AsRef<Path>>(
         result.packages_checked += batch.len();
 
         progress.set_position(result.packages_checked as u64);
+        use owo_colors::OwoColorize;
         progress.set_message(format!(
-            "{} updated, {} source, {} home, {} vuln",
-            result.records_updated,
-            result.source_paths_filled,
-            result.homepages_filled,
-            result.vulnerabilities_filled
+            "{} {} {} {} {} {} {} {}",
+            result.records_updated.count(),
+            "updated".dimmed(),
+            result.source_paths_filled.count_found(),
+            "source".dimmed(),
+            result.homepages_filled.count_found(),
+            "home".dimmed(),
+            result.vulnerabilities_filled.count_pending(),
+            "vuln".dimmed()
         ));
     }
 
-    progress.finish_with_message(format!("Done! {} records updated", result.records_updated));
+    {
+        use owo_colors::OwoColorize;
+        progress.finish_with_message(format!(
+            "{} {} {} {}",
+            "Done!".success(),
+            result.records_updated.count(),
+            "records".dimmed(),
+            "updated".dimmed()
+        ));
+    }
 
     Ok(result)
 }
@@ -324,12 +338,11 @@ fn run_backfill_historical<P: AsRef<Path>, Q: AsRef<Path>>(
     config: BackfillConfig,
     shutdown_flag: Arc<AtomicBool>,
 ) -> Result<BackfillResult> {
+    use crate::index::git::WorktreeSession;
+
     let nixpkgs_path = nixpkgs_path.as_ref();
     let db = Database::open(&db_path)?;
     let repo = NixpkgsRepo::open(nixpkgs_path)?;
-
-    // Save original ref to restore later
-    let original_ref = repo.head_ref()?;
 
     // Determine which fields to backfill
     let backfill_source_path =
@@ -339,13 +352,15 @@ fn run_backfill_historical<P: AsRef<Path>, Q: AsRef<Path>>(
     let backfill_vulnerabilities =
         config.fields.is_empty() || config.fields.iter().any(|f| f == "known_vulnerabilities");
 
-    // Get packages grouped by their first_commit
+    // Get packages grouped by their first_commit (with date filtering)
     let packages_by_commit = get_packages_by_commit(
         db.connection(),
         backfill_source_path,
         backfill_homepage,
         backfill_vulnerabilities,
         config.limit,
+        config.since.as_deref(),
+        config.until.as_deref(),
     )?;
 
     if packages_by_commit.is_empty() {
@@ -384,50 +399,83 @@ fn run_backfill_historical<P: AsRef<Path>, Q: AsRef<Path>>(
 
     println!("Traversing git history to extract metadata...");
 
+    // Apply max_commits limit
+    let commits_to_process: Vec<_> = if let Some(max) = config.max_commits {
+        packages_by_commit.into_iter().take(max).collect()
+    } else {
+        packages_by_commit.into_iter().collect()
+    };
+
+    let total_commits = commits_to_process.len();
     let mut result = BackfillResult::default();
+
+    // Use shared ETA tracker with larger window for stability
+    let mut eta_tracker = super::EtaTracker::new(50);
 
     let progress = ProgressBar::new(total_commits as u64);
     progress.set_style(
         ProgressStyle::default_bar()
-            .template("  [{bar:40.cyan/blue}] {pos}/{len} commits ({percent}%) {msg}")
+            .template("  [{bar:40.cyan/blue}] {pos}/{len} commits {msg}")
             .unwrap()
             .progress_chars("█▓▒░  "),
     );
+    progress.enable_steady_tick(std::time::Duration::from_millis(100));
 
-    // Process commits in batches - group nearby commits to reduce checkouts
-    // For now, process each commit individually (can optimize later)
-    for (commit, attr_paths) in &packages_by_commit {
+    // Get first commit to initialize worktree session
+    let first_commit = match commits_to_process.first() {
+        Some((commit, _)) => commit.clone(),
+        None => {
+            progress.finish_with_message("No commits to process");
+            return Ok(result);
+        }
+    };
+
+    // Create worktree session - doesn't modify the main repo
+    let session = match WorktreeSession::new(&repo, &first_commit) {
+        Ok(s) => s,
+        Err(e) => {
+            progress.finish_with_message(format!("Failed to create worktree: {}", e));
+            return Err(e);
+        }
+    };
+
+    // Process commits using the worktree session
+    for (commit, attr_paths) in &commits_to_process {
+        // Start timing this commit
+        eta_tracker.start_commit();
+        eta_tracker.set_remaining((total_commits - result.commits_processed) as u64);
+
         // Check for interruption
         if shutdown_flag.load(Ordering::SeqCst) {
             result.was_interrupted = true;
-            // Restore original ref before returning
-            if let Err(e) = repo.restore_ref(&original_ref) {
-                progress.println(format!("Warning: Failed to restore git state: {}", e));
-            }
             progress.finish_with_message("Interrupted");
             return Ok(result);
+            // WorktreeSession auto-cleans up on drop
         }
 
-        // Checkout the commit
-        if let Err(e) = repo.checkout_commit(commit) {
+        // Checkout the commit in the worktree
+        if let Err(e) = session.checkout(commit) {
             progress.println(format!(
                 "Warning: Failed to checkout {}: {}",
-                &commit[..12],
+                &commit[..12.min(commit.len())],
                 e
             ));
+            eta_tracker.finish_commit();
             continue;
         }
 
-        // Extract metadata for these packages
+        // Extract metadata for these packages from the worktree
         let packages =
-            match extractor::extract_packages_for_attrs(nixpkgs_path, "x86_64-linux", attr_paths) {
+            match extractor::extract_packages_for_attrs(session.path(), "x86_64-linux", attr_paths)
+            {
                 Ok(pkgs) => pkgs,
                 Err(e) => {
                     progress.println(format!(
                         "Warning: Extraction failed for {}: {}",
-                        &commit[..12],
+                        &commit[..12.min(commit.len())],
                         e
                     ));
+                    eta_tracker.finish_commit();
                     continue;
                 }
             };
@@ -462,22 +510,36 @@ fn run_backfill_historical<P: AsRef<Path>, Q: AsRef<Path>>(
         result.packages_checked += attr_paths.len();
         result.commits_processed += 1;
 
+        // Record timing
+        eta_tracker.finish_commit();
+
         progress.set_position(result.commits_processed as u64);
-        progress.set_message(format!(
-            "{} pkgs, {} updated",
-            result.packages_checked, result.records_updated
+        {
+            use owo_colors::OwoColorize;
+            progress.set_message(format!(
+                "{} | {} {} {} {}",
+                eta_tracker.progress_string(total_commits as u64),
+                result.packages_checked.count_found(),
+                "pkgs".dimmed(),
+                result.records_updated.count(),
+                "updated".dimmed()
+            ));
+        }
+    }
+
+    // WorktreeSession auto-cleans up on drop
+    {
+        use owo_colors::OwoColorize;
+        progress.finish_with_message(format!(
+            "{} {} {} {} {} {}",
+            "Done!".success(),
+            result.commits_processed.count(),
+            "commits".dimmed(),
+            result.records_updated.count(),
+            "records".dimmed(),
+            "updated".dimmed()
         ));
     }
-
-    // Restore original ref
-    if let Err(e) = repo.restore_ref(&original_ref) {
-        progress.println(format!("Warning: Failed to restore git state: {}", e));
-    }
-
-    progress.finish_with_message(format!(
-        "Done! {} commits, {} records updated",
-        result.commits_processed, result.records_updated
-    ));
 
     Ok(result)
 }
@@ -537,39 +599,54 @@ fn get_attrs_needing_backfill(
 /// Queries the `package_versions` table for rows where `source_path`, `homepage`, and/or
 /// `known_vulnerabilities` are NULL (based on the boolean flags) and returns a map from each
 /// `first_commit_hash` to the list of `attribute_path`s that first appeared in that commit.
+/// Optionally filters by `first_commit_date` range.
 fn get_packages_by_commit(
     conn: &rusqlite::Connection,
     need_source_path: bool,
     need_homepage: bool,
     need_vulnerabilities: bool,
     limit: Option<usize>,
+    since: Option<&str>,
+    until: Option<&str>,
 ) -> Result<HashMap<String, Vec<String>>> {
-    let mut conditions = Vec::new();
+    let mut field_conditions = Vec::new();
     if need_source_path {
-        conditions.push("source_path IS NULL");
+        field_conditions.push("source_path IS NULL");
     }
     if need_homepage {
-        conditions.push("homepage IS NULL");
+        field_conditions.push("homepage IS NULL");
     }
     if need_vulnerabilities {
-        conditions.push("known_vulnerabilities IS NULL");
+        field_conditions.push("known_vulnerabilities IS NULL");
     }
 
-    if conditions.is_empty() {
+    if field_conditions.is_empty() {
         return Ok(HashMap::new());
     }
 
-    let where_clause = conditions.join(" OR ");
+    // Build WHERE clause with parameterized date filters
+    let mut where_clause = format!("({})", field_conditions.join(" OR "));
+    let mut params: Vec<String> = Vec::new();
+
+    if let Some(since_date) = since {
+        where_clause.push_str(" AND first_commit_date >= ?");
+        params.push(since_date.to_string());
+    }
+    if let Some(until_date) = until {
+        where_clause.push_str(" AND first_commit_date <= ?");
+        params.push(until_date.to_string());
+    }
+
     let limit_clause = limit.map(|l| format!(" LIMIT {}", l)).unwrap_or_default();
 
-    // Get packages with their first_commit_hash, ordered by commit for efficient checkout
+    // Get packages with their first_commit_hash, ordered by commit date for chronological processing
     let sql = format!(
-        "SELECT attribute_path, first_commit_hash FROM package_versions WHERE ({}) ORDER BY first_commit_hash{}",
+        "SELECT attribute_path, first_commit_hash FROM package_versions WHERE {} ORDER BY first_commit_date{}",
         where_clause, limit_clause
     );
 
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map([], |row| {
+    let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?;
 

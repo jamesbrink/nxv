@@ -1,5 +1,6 @@
 //! Output formatting for search results.
 
+pub mod components;
 pub mod json;
 pub mod plain;
 pub mod table;
@@ -23,6 +24,8 @@ pub enum OutputFormat {
 pub struct TableOptions {
     /// Show platforms column.
     pub show_platforms: bool,
+    /// Show store path column (for fetchClosure support).
+    pub show_store_path: bool,
     /// Use ASCII borders instead of Unicode.
     pub ascii: bool,
 }
@@ -32,6 +35,6 @@ pub fn print_results(results: &[PackageVersion], format: OutputFormat, options: 
     match format {
         OutputFormat::Table => table::print_table(results, options),
         OutputFormat::Json => json::print_json(results),
-        OutputFormat::Plain => plain::print_plain(results, options.show_platforms),
+        OutputFormat::Plain => plain::print_plain(results, options),
     }
 }

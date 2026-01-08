@@ -12,6 +12,9 @@ pub enum NxvError {
     #[error("No index found. Run 'nxv update' to download the package index.")]
     NoIndex,
 
+    #[error("Invalid database path: {0}")]
+    InvalidPath(String),
+
     #[error("Index is corrupted: {0}. Run 'nxv update --force' to re-download.")]
     CorruptIndex(String),
 
@@ -67,6 +70,10 @@ pub enum NxvError {
     #[cfg(feature = "indexer")]
     #[error("Configuration error: {0}")]
     Config(String),
+
+    #[cfg(feature = "indexer")]
+    #[error("Worker error: {0}")]
+    Worker(String),
 }
 
 /// Result type alias for nxv operations.
@@ -91,6 +98,16 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("missing table"));
         assert!(msg.contains("--force"));
+    }
+
+    #[test]
+    fn test_incompatible_index_error_message() {
+        let err = NxvError::IncompatibleIndex(
+            "index requires schema version 10 but this build only supports up to 6".to_string(),
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("10"));
+        assert!(msg.contains("6"));
     }
 
     #[test]

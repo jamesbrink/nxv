@@ -27,6 +27,9 @@ use super::AppState;
 use super::error::ApiError;
 use super::types::{self, *};
 
+/// Maximum length for query strings to prevent DoS via oversized inputs.
+const MAX_QUERY_LENGTH: usize = 1000;
+
 /// Execute a database operation with concurrency limiting and timeout.
 ///
 /// This helper:
@@ -149,6 +152,14 @@ pub async fn search_packages(
     State(state): State<Arc<AppState>>,
     Query(params): Query<SearchParams>,
 ) -> Result<Json<ApiResponse<Vec<PackageVersion>>>, ApiError> {
+    // Validate query length to prevent DoS via oversized inputs
+    if params.q.len() > MAX_QUERY_LENGTH {
+        return Err(ApiError::bad_request(format!(
+            "Query too long (max {} characters)",
+            MAX_QUERY_LENGTH
+        )));
+    }
+
     let db_path = state.db_path.clone();
 
     // Cap limit to prevent memory exhaustion from malicious requests
@@ -227,6 +238,14 @@ pub async fn search_description(
     State(state): State<Arc<AppState>>,
     Query(params): Query<DescriptionSearchParams>,
 ) -> Result<Json<ApiResponse<Vec<PackageVersion>>>, ApiError> {
+    // Validate query length to prevent DoS via oversized inputs
+    if params.q.len() > MAX_QUERY_LENGTH {
+        return Err(ApiError::bad_request(format!(
+            "Query too long (max {} characters)",
+            MAX_QUERY_LENGTH
+        )));
+    }
+
     let db_path = state.db_path.clone();
     let query = params.q.clone();
     // Cap limit to prevent memory exhaustion from malicious requests
@@ -623,6 +642,188 @@ pub async fn health_check(State(state): State<Arc<AppState>>) -> Json<HealthResp
         version: version::full_version(),
         index_commit,
     })
+}
+
+/// Escape a string for use in a Nix string literal.
+///
+/// Handles backslash and quote escaping to prevent Nix code injection.
+fn escape_nix_string(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
+        .replace("${", "\\${")
+}
+
+/// Validate that a string looks like a valid Nix store path.
+///
+/// Store paths must start with `/nix/store/` followed by a hash and name.
+/// This validation prevents injection attacks through malformed paths.
+fn is_valid_store_path(path: &str) -> bool {
+    // Must start with /nix/store/
+    if !path.starts_with("/nix/store/") {
+        return false;
+    }
+
+    // Must have content after the prefix (at least the hash)
+    if path.len() <= 11 {
+        return false;
+    }
+
+    // Must not contain characters that could escape the Nix expression
+    // Quote, semicolon, newlines, and dollar-brace could enable injection
+    !path.contains('"')
+        && !path.contains(';')
+        && !path.contains('\n')
+        && !path.contains('\r')
+        && !path.contains("${")
+}
+
+/// Generate fetchClosure expression for a package version.
+///
+/// Returns a ready-to-use Nix expression for `builtins.fetchClosure` if
+/// the store path is available for this package version.
+///
+/// Note: Currently only x86_64-linux store paths are indexed. Other systems
+/// will return an error indicating store paths are not available.
+#[utoipa::path(
+    get,
+    path = "/api/v1/fetch-closure",
+    params(
+        ("attr" = String, Query, description = "Package attribute path"),
+        ("version" = String, Query, description = "Package version"),
+        ("cache_url" = Option<String>, Query, description = "Nix cache URL (default: https://cache.nixos.org)"),
+        ("system" = Option<String>, Query, description = "Target system (default: x86_64-linux). Note: Only x86_64-linux is currently indexed."),
+    ),
+    responses(
+        (status = 200, description = "Fetch closure expression", body = FetchClosureResponse),
+        (status = 404, description = "Package not found"),
+        (status = 503, description = "Index not available"),
+    ),
+    tag = "packages"
+)]
+#[instrument(skip(state), fields(attr = %params.attr, version = %params.version, system = %params.system))]
+pub async fn get_fetch_closure(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<types::FetchClosureParams>,
+) -> Result<Json<types::FetchClosureResponse>, ApiError> {
+    let db_path = state.db_path.clone();
+    let attr = params.attr.clone();
+    let version = params.version.clone();
+    let cache_url = params.cache_url.clone();
+    let system = params.system.clone();
+
+    // Validate requested system is one of the supported architectures
+    const SUPPORTED_SYSTEMS: [&str; 4] = [
+        "x86_64-linux",
+        "aarch64-linux",
+        "x86_64-darwin",
+        "aarch64-darwin",
+    ];
+    if !SUPPORTED_SYSTEMS.contains(&system.as_str()) {
+        tracing::debug!(system = %system, "Unsupported system requested");
+        return Ok(Json(types::FetchClosureResponse {
+            attr: params.attr,
+            version: params.version,
+            system,
+            store_path: None,
+            commit: String::new(),
+            nix_expr: None,
+            error: Some(format!(
+                "Unsupported system '{}'. Supported systems: {}",
+                params.system,
+                SUPPORTED_SYSTEMS.join(", ")
+            )),
+        }));
+    }
+
+    // Get the package version (most recent occurrence)
+    let pkg = run_db_operation(&state, move || {
+        let _span = tracing::info_span!("db_get_version").entered();
+        let db = Database::open_readonly(&db_path)?;
+        queries::get_last_occurrence(db.connection(), &attr, &version)
+    })
+    .await?;
+
+    match pkg {
+        Some(p) => {
+            if let Some(store_path) = p.store_paths.get(&system) {
+                // Validate store path to prevent Nix code injection
+                if !is_valid_store_path(store_path) {
+                    tracing::warn!(
+                        store_path = %store_path,
+                        "Invalid store path in database"
+                    );
+                    return Ok(Json(types::FetchClosureResponse {
+                        attr: params.attr,
+                        version: params.version,
+                        system,
+                        store_path: None,
+                        commit: p.last_commit_hash,
+                        nix_expr: None,
+                        error: Some("Store path in database is invalid or malformed.".to_string()),
+                    }));
+                }
+
+                // Generate fetchClosure expression
+                // Most nixpkgs packages are input-addressed, so we include inputAddressed = true.
+                // This requires users to trust the binary cache (cache.nixos.org by default).
+                //
+                // Note: cache_url is escaped to prevent Nix code injection via the URL parameter.
+                // Store path is validated above and used as-is since Nix requires the exact path.
+                let escaped_cache_url = escape_nix_string(&cache_url);
+                let nix_expr = format!(
+                    r#"builtins.fetchClosure {{
+  fromStore = "{escaped_cache_url}";
+  fromPath = {store_path};
+  inputAddressed = true;
+}}"#
+                );
+
+                Ok(Json(types::FetchClosureResponse {
+                    attr: params.attr,
+                    version: params.version,
+                    system,
+                    store_path: Some(store_path.clone()),
+                    commit: p.last_commit_hash,
+                    nix_expr: Some(nix_expr),
+                    error: None,
+                }))
+            } else {
+                // Store path not available for this system (pre-2020 package, extraction failed, or unsupported system)
+                let available_systems: Vec<_> = p.store_paths.keys().cloned().collect();
+                let error_msg = if available_systems.is_empty() {
+                    "Store path not available. This may be a pre-2020 package or \
+                     store path extraction failed during indexing."
+                        .to_string()
+                } else {
+                    format!(
+                        "Store path not available for system '{}'. Available systems: {}",
+                        system,
+                        available_systems.join(", ")
+                    )
+                };
+                tracing::debug!(system = %system, available = ?available_systems, "Store path not available for requested system");
+                Ok(Json(types::FetchClosureResponse {
+                    attr: params.attr,
+                    version: params.version,
+                    system,
+                    store_path: None,
+                    commit: p.last_commit_hash,
+                    nix_expr: None,
+                    error: Some(error_msg),
+                }))
+            }
+        }
+        None => {
+            tracing::trace!("Version not found");
+            Err(ApiError::not_found(format!(
+                "Version '{}' of '{}' not found",
+                params.version, params.attr
+            )))
+        }
+    }
 }
 
 /// Get server metrics for monitoring.

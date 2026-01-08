@@ -1,12 +1,16 @@
 //! Nix package extraction from nixpkgs commits.
 
-use crate::error::{NxvError, Result};
+use crate::error::Result;
+use crate::index::nix_ffi::with_evaluator;
 use serde::Deserialize;
 use std::path::Path;
+#[cfg(test)]
 use std::process::Command;
+use std::time::Instant;
+use tracing::{instrument, trace};
 
 /// Information about an extracted package.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PackageInfo {
     pub name: String,
@@ -23,10 +27,15 @@ pub struct PackageInfo {
     pub source_path: Option<String>,
     /// Known security vulnerabilities or EOL notices from meta.knownVulnerabilities
     pub known_vulnerabilities: Option<Vec<String>>,
+    /// Store path for the package output (e.g., "/nix/store/hash-name-version")
+    /// Only populated for commits from 2020-01-01 onwards.
+    /// Note: Named "storePath" in Nix output because "outPath" is a special attribute.
+    #[serde(rename = "storePath", default)]
+    pub out_path: Option<String>,
 }
 
 /// Attribute position information for mapping attribute names to files.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AttrPosition {
     pub attr_path: String,
@@ -68,258 +77,12 @@ impl PackageInfo {
 }
 
 /// The nix expression for extracting package information.
-/// This is embedded in the binary to avoid needing external files.
-const EXTRACT_NIX: &str = r#"
-{ nixpkgsPath, system, attrNames ? null }:
-let
-  # Import nixpkgs with current system and permissive config
-  pkgs = import nixpkgsPath {
-    system = system;
-    config = {
-      allowUnfree = true;
-      allowBroken = true;
-      allowInsecure = true;
-      allowUnsupportedSystem = true;
-    };
-  };
-
-  # Force full evaluation and catch any errors - this is critical for lazy evaluation
-  tryDeep = expr:
-    let result = builtins.tryEval (builtins.deepSeq expr expr);
-    in if result.success then result.value else null;
-
-  # Safely extract a string field - converts integers/floats to strings
-  safeString = x: tryDeep (
-    if x == null then null
-    else if builtins.isString x then x
-    else if builtins.isInt x || builtins.isFloat x then builtins.toString x
-    else null
-  );
-
-  # Safely get licenses - force evaluation of each license
-  # Each element access is wrapped in tryEval to handle thunks that throw
-  getLicenses = l: tryDeep (
-    let
-      extractOne = x:
-        let
-          result = builtins.tryEval (
-            if builtins.isAttrs x then (x.spdxId or x.shortName or "unknown")
-            else if builtins.isString x then x
-            else if builtins.isInt x || builtins.isFloat x then builtins.toString x
-            else "unknown"
-          );
-        in if result.success then result.value else "unknown";
-    in
-      if builtins.isList l then map extractOne l
-      else [ (extractOne l) ]
-  );
-
-  # Safely get maintainers - force evaluation of each maintainer
-  # Handle both list of maintainers and single string/maintainer
-  # Each element access is wrapped in tryEval to handle thunks that throw
-  getMaintainers = m: tryDeep (
-    if m == null then null
-    else if builtins.isString m then [ m ]
-    else if builtins.isList m then map (x:
-      let
-        result = builtins.tryEval (
-          if builtins.isAttrs x then (x.github or x.name or "unknown")
-          else if builtins.isString x then x
-          else if builtins.isInt x || builtins.isFloat x then builtins.toString x
-          else "unknown"
-        );
-      in if result.success then result.value else "unknown"
-    ) m
-    else null
-  );
-
-  # Safely get platforms - force evaluation of each platform
-  # Handle both list of platforms and single string/platform
-  # Each element access is wrapped in tryEval to handle thunks that throw
-  getPlatforms = p: tryDeep (
-    if p == null then null
-    else if builtins.isString p then [ p ]
-    else if builtins.isList p then map (x:
-      let
-        result = builtins.tryEval (
-          if builtins.isString x then x
-          else if builtins.isAttrs x then (x.system or "unknown")
-          else if builtins.isInt x || builtins.isFloat x then builtins.toString x
-          else "unknown"
-        );
-      in if result.success then result.value else "unknown"
-    ) p
-    else null
-  );
-
-  # Safely get knownVulnerabilities - list of strings describing security issues
-  # meta.knownVulnerabilities is a list of strings when present
-  getKnownVulnerabilities = v: tryDeep (
-    if v == null then null
-    else if builtins.isList v then
-      let
-        extracted = map (x:
-          let
-            result = builtins.tryEval (
-              if builtins.isString x then x
-              else if builtins.isInt x || builtins.isFloat x then builtins.toString x
-              else null
-            );
-          in if result.success then result.value else null
-        ) v;
-        # Filter out nulls
-        filtered = builtins.filter (x: x != null) extracted;
-      in if builtins.length filtered > 0 then filtered else null
-    else null
-  );
-
-  # Check if something is a derivation (with error handling)
-  isDerivation = x:
-    let result = builtins.tryEval (builtins.isAttrs x && x ? type && x.type == "derivation");
-    in result.success && result.value;
-
-  # Convert any value to string safely
-  toString' = x:
-    if x == null then null
-    else if builtins.isString x then x
-    else builtins.toString x;
-
-  # Get the source file path for a package from meta.position
-  # meta.position format is "/nix/store/.../pkgs/path/file.nix:42" or "/path/to/nixpkgs/pkgs/path/file.nix:42"
-  # We extract the relative path starting from "pkgs/"
-  getSourcePath = meta:
-    let
-      result = builtins.tryEval (
-        let
-          pos = meta.position or null;
-          # Extract file path (remove line number after colon)
-          file = if pos == null then null
-                 else let parts = builtins.split ":" pos;
-                      in if builtins.length parts > 0 then builtins.elemAt parts 0 else null;
-          # Find "pkgs/" in the path and extract from there
-          extractRelative = path:
-            let
-              # Match "pkgs/" and everything after it
-              matches = builtins.match ".*(pkgs/.*)" path;
-            in if matches != null && builtins.length matches > 0
-               then builtins.elemAt matches 0
-               else null;
-        in if file != null then extractRelative file else null
-      );
-    in if result.success then result.value else null;
-
-  # Safely extract package info - each field is independently evaluated
-  getPackageInfo = attrPath: pkg:
-    let
-      meta = pkg.meta or {};
-      name = tryDeep (toString' (pkg.pname or pkg.name or attrPath));
-      version = tryDeep (toString' (pkg.version or "unknown"));
-      sourcePath = getSourcePath meta;
-    in {
-      name = if name != null then name else attrPath;
-      version = if version != null then version else "unknown";
-      attrPath = attrPath;
-      description = safeString (meta.description or null);
-      homepage = safeString (meta.homepage or null);
-      license = if meta ? license then getLicenses meta.license else null;
-      maintainers = if meta ? maintainers then getMaintainers meta.maintainers else null;
-      platforms = if meta ? platforms then getPlatforms meta.platforms else null;
-      sourcePath = safeString sourcePath;
-      knownVulnerabilities = if meta ? knownVulnerabilities then getKnownVulnerabilities meta.knownVulnerabilities else null;
-    };
-
-  # Process each package name with full error isolation
-  # The entire result is forced to catch any remaining lazy errors
-  # Use hasAttr first since tryEval doesn't catch missing attribute errors
-  processAttr = name:
-    let
-      exists = builtins.hasAttr name pkgs;
-      valueResult = if exists then builtins.tryEval pkgs.${name} else { success = false; };
-      value = if valueResult.success then valueResult.value else null;
-      isDeriv = if value != null then isDerivation value else false;
-      info = if isDeriv then getPackageInfo name value else null;
-      # Force the entire info record to catch lazy evaluation errors
-      forcedResult = if info != null then builtins.tryEval (builtins.deepSeq info info) else { success = false; };
-    in if forcedResult.success then forcedResult.value else null;
-
-  # Get list of attribute names and process them
-  names = if attrNames != null then attrNames else builtins.attrNames pkgs;
-  # Wrap entire lambda body in tryEval, returning list directly to avoid field access issues
-  results = builtins.concatMap (name:
-    let
-      # Do all computation inside a single tryEval that returns a list
-      safeResult = builtins.tryEval (
-        let
-          pkg = processAttr name;
-          forced = builtins.deepSeq pkg pkg;
-        in if forced != null then [forced] else []
-      );
-      # Safely extract value with another tryEval
-      extracted = builtins.tryEval (
-        builtins.seq safeResult.success (
-          if safeResult.success then safeResult.value else []
-        )
-      );
-    in if extracted.success then extracted.value else []
-  ) names;
-in
-  results
-"#;
+/// Loaded from external file at compile time for better maintainability.
+const EXTRACT_NIX: &str = include_str!("nix/extract.nix");
 
 /// The nix expression for extracting attribute positions.
-/// Returns an empty list on any evaluation errors for resilience
-/// against older nixpkgs commits that may have evaluation issues.
-const POSITIONS_NIX: &str = r#"
-{ nixpkgsPath, system }:
-let
-  pkgs = import nixpkgsPath {
-    system = system;
-    config = {
-      allowUnfree = true;
-      allowBroken = true;
-      allowInsecure = true;
-      allowUnsupportedSystem = true;
-    };
-  };
-  # Get attr names - this should always succeed if import succeeded
-  attrNamesRes = builtins.tryEval (
-    if builtins.isAttrs pkgs then builtins.attrNames pkgs else []
-  );
-  attrNames = if attrNamesRes.success then attrNamesRes.value else [];
-  # Get position for each attr - force full evaluation with seq
-  getPos = name:
-    let
-      result = builtins.tryEval (
-        let
-          pos = builtins.unsafeGetAttrPos name pkgs;
-          file = if pos == null then null else if pos ? file then pos.file else null;
-          # Force evaluation of file (if it's a string, seq will evaluate it)
-          forcedFile = builtins.seq file file;
-        in { attrPath = name; file = forcedFile; }
-      );
-      # Also force the result record itself
-      forced = if result.success
-        then builtins.tryEval (builtins.seq result.value.attrPath (builtins.seq result.value.file result.value))
-        else { success = false; };
-    in if forced.success then forced.value else null;
-in
-  # Wrap entire lambda body in tryEval, returning list directly to avoid field access issues
-  builtins.concatMap (name:
-    let
-      safeResult = builtins.tryEval (
-        let
-          pos = getPos name;
-          forced = builtins.deepSeq pos pos;
-        in if forced != null then [forced] else []
-      );
-      extracted = builtins.tryEval (
-        builtins.seq safeResult.success (
-          if safeResult.success then safeResult.value else []
-        )
-      );
-    in if extracted.success then extracted.value else []
-  ) attrNames
-"#;
+/// Loaded from external file at compile time for better maintainability.
+const POSITIONS_NIX: &str = include_str!("nix/positions.nix");
 
 /// Extract packages from a nixpkgs checkout at a specific path.
 ///
@@ -333,6 +96,7 @@ pub fn extract_packages<P: AsRef<Path>>(repo_path: P) -> Result<Vec<PackageInfo>
 }
 
 /// Extract packages for a specific list of attribute names and system.
+#[instrument(skip(repo_path, attr_names), fields(attr_count = attr_names.len()))]
 pub fn extract_packages_for_attrs<P: AsRef<Path>>(
     repo_path: P,
     system: &str,
@@ -362,8 +126,9 @@ pub fn extract_packages_for_attrs<P: AsRef<Path>>(
             let attr_file = temp_dir.path().join("attrs.json");
             let json = serde_json::to_string(attr_names)?;
             std::fs::write(&attr_file, &json)?;
+            // Quote the path to handle spaces and special characters
             format!(
-                "builtins.fromJSON (builtins.readFile {})",
+                "builtins.fromJSON (builtins.readFile \"{}\")",
                 attr_file.display()
             )
         } else {
@@ -372,35 +137,41 @@ pub fn extract_packages_for_attrs<P: AsRef<Path>>(
         }
     };
 
-    // Build an expression that imports and calls the extract file
+    // Build an expression that imports and calls the extract file.
+    // Note: Nix import takes a path, not a string, so we don't quote nix_file.
+    // But nixpkgsPath is assigned as a string, so we quote it.
     let expr = format!(
-        "import {} {{ nixpkgsPath = {}; system = \"{}\"; attrNames = {}; }}",
+        "import {} {{ nixpkgsPath = \"{}\"; system = \"{}\"; attrNames = {}; }}",
         nix_file.display(),
         repo_path_str,
         system,
         attr_names_arg
     );
 
-    // Run nix eval
-    let output = Command::new("nix")
-        .args(["eval", "--json", "--impure", "--expr", &expr])
-        .output()?;
+    // Use FFI evaluator with large stack thread
+    let eval_start = Instant::now();
+    let json_output = with_evaluator(move |eval| eval.eval_json(&expr, "<extract>"))?;
+    let eval_time = eval_start.elapsed();
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(NxvError::NixEval(format!(
-            "nix eval failed: {}",
-            stderr.lines().take(5).collect::<Vec<_>>().join("\n")
-        )));
-    }
+    let parse_start = Instant::now();
+    let packages: Vec<PackageInfo> = serde_json::from_str(&json_output)?;
+    let parse_time = parse_start.elapsed();
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let packages: Vec<PackageInfo> = serde_json::from_str(&stdout)?;
+    trace!(
+        system = %system,
+        attr_count = attr_names.len(),
+        packages_found = packages.len(),
+        json_size_bytes = json_output.len(),
+        eval_time_ms = eval_time.as_millis(),
+        parse_time_ms = parse_time.as_millis(),
+        "Nix extraction completed"
+    );
 
     Ok(packages)
 }
 
 /// Extract attribute positions for a nixpkgs checkout and system.
+#[instrument(skip(repo_path))]
 pub fn extract_attr_positions<P: AsRef<Path>>(
     repo_path: P,
     system: &str,
@@ -418,26 +189,29 @@ pub fn extract_attr_positions<P: AsRef<Path>>(
 
     // Build an expression that imports and calls the positions file
     let expr = format!(
-        "import {} {{ nixpkgsPath = {}; system = \"{}\"; }}",
+        "import {} {{ nixpkgsPath = \"{}\"; system = \"{}\"; }}",
         nix_file.display(),
         repo_path_str,
         system
     );
 
-    let output = Command::new("nix")
-        .args(["eval", "--json", "--impure", "--expr", &expr])
-        .output()?;
+    // Use FFI evaluator with large stack thread
+    let eval_start = Instant::now();
+    let json_output = with_evaluator(move |eval| eval.eval_json(&expr, "<positions>"))?;
+    let eval_time = eval_start.elapsed();
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(NxvError::NixEval(format!(
-            "nix eval failed: {}",
-            stderr.lines().take(5).collect::<Vec<_>>().join("\n")
-        )));
-    }
+    let parse_start = Instant::now();
+    let positions: Vec<AttrPosition> = serde_json::from_str(&json_output)?;
+    let parse_time = parse_start.elapsed();
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let positions: Vec<AttrPosition> = serde_json::from_str(&stdout)?;
+    trace!(
+        system = %system,
+        positions_found = positions.len(),
+        json_size_bytes = json_output.len(),
+        eval_time_ms = eval_time.as_millis(),
+        parse_time_ms = parse_time.as_millis(),
+        "Positions extraction completed"
+    );
 
     Ok(positions)
 }
@@ -481,23 +255,16 @@ pub fn extract_at_commit<P: AsRef<Path>>(
     repo_path: P,
     commit_hash: &str,
 ) -> Result<Vec<PackageInfo>> {
-    use crate::index::git::NixpkgsRepo;
+    use crate::index::git::{NixpkgsRepo, WorktreeSession};
 
     let repo = NixpkgsRepo::open(&repo_path)?;
 
-    // Save current HEAD
-    let original_head = repo.head_commit()?;
+    // Create a worktree session - doesn't modify the main repo
+    let session = WorktreeSession::new(&repo, commit_hash)?;
 
-    // Checkout the target commit
-    repo.checkout_commit(commit_hash)?;
-
-    // Extract packages
-    let result = extract_packages(&repo_path);
-
-    // Restore original HEAD (best effort)
-    let _ = repo.checkout_commit(&original_head);
-
-    result
+    // Extract packages from the worktree
+    extract_packages(session.path())
+    // WorktreeSession auto-cleans up on drop
 }
 
 /// Try to extract packages, returning None on failure instead of error.
@@ -534,6 +301,7 @@ mod tests {
             platforms: Some(vec!["x86_64-linux".to_string()]),
             source_path: Some("pkgs/test/default.nix".to_string()),
             known_vulnerabilities: None,
+            out_path: Some("/nix/store/abc123-test-1.0.0".to_string()),
         };
 
         let license_json = pkg.license_json().unwrap();

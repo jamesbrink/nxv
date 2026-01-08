@@ -101,10 +101,7 @@ pub fn init_tracing() {
         .unwrap_or(false);
 
     // Build the env filter with sensible defaults
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        // Default: info for nxv and tower_http, warn for everything else
-        EnvFilter::new("nxv=info,tower_http=info,warn")
-    });
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     // Use try_init() to avoid panicking if a subscriber is already set
     // (e.g., in tests or if run_server is called multiple times)
@@ -122,9 +119,8 @@ pub fn init_tracing() {
             .try_init()
     };
 
-    if let Err(e) = result {
-        eprintln!("Note: tracing subscriber already initialized: {}", e);
-    }
+    // Silently ignore if already initialized (defensive for library usage)
+    let _ = result;
 }
 
 /// Shared application state.
@@ -303,6 +299,7 @@ pub(crate) fn build_router(
             "/packages/{attr}/versions/{version}/last",
             get(handlers::get_last_occurrence),
         )
+        .route("/fetch-closure", get(handlers::get_fetch_closure))
         .route("/stats", get(handlers::get_stats))
         .layer(SetResponseHeaderLayer::if_not_present(
             header::CACHE_CONTROL,
@@ -366,15 +363,23 @@ pub(crate) fn build_router(
 
     // Apply rate limiting if configured
     if let Some(rl_config) = rate_limit {
-        let governor_conf = GovernorConfigBuilder::default()
+        match GovernorConfigBuilder::default()
             .per_second(rl_config.requests_per_second)
             .burst_size(rl_config.burst_size)
             .key_extractor(SmartIpKeyExtractor)
             .use_headers() // Add X-RateLimit-* headers to responses
             .finish()
-            .expect("Failed to build rate limiter config");
-
-        app = app.layer(GovernorLayer::new(governor_conf));
+        {
+            Some(governor_conf) => {
+                app = app.layer(GovernorLayer::new(governor_conf));
+            }
+            None => {
+                // Log and continue without rate limiting rather than crashing
+                tracing::error!(
+                    "Failed to build rate limiter config, continuing without rate limiting"
+                );
+            }
+        }
     }
 
     app
@@ -491,19 +496,22 @@ pub async fn run_server(config: ServerConfig) -> Result<()> {
     tracing::info!(url = %format!("http://{}/docs", addr), "API documentation");
     tracing::info!("Press Ctrl+C to stop");
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .map_err(NxvError::Io)?;
-
-    tracing::info!("Server stopped");
+    tokio::select! {
+        result = axum::serve(listener, app) => {
+            result.map_err(NxvError::Io)?;
+        }
+        _ = shutdown_signal() => {
+            std::process::exit(0);
+        }
+    }
 
     Ok(())
 }
 
 /// Await a CTRL+C (SIGINT) to trigger graceful shutdown.
 ///
-/// Completes when the process receives a CTRL+C; panics if the signal handler cannot be installed.
+/// Completes when the process receives a CTRL+C. Logs a warning if the signal
+/// handler cannot be installed but returns normally to allow shutdown to proceed.
 ///
 /// # Examples
 ///
@@ -514,9 +522,12 @@ pub async fn run_server(config: ServerConfig) -> Result<()> {
 /// # });
 /// ```
 async fn shutdown_signal() {
-    tokio::signal::ctrl_c()
-        .await
-        .expect("Failed to install CTRL+C signal handler");
+    if let Err(e) = tokio::signal::ctrl_c().await {
+        tracing::warn!(
+            error = %e,
+            "Failed to install CTRL+C signal handler, shutdown may not be graceful"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -554,6 +565,10 @@ mod tests {
                 platforms TEXT,
                 source_path TEXT,
                 known_vulnerabilities TEXT,
+                store_path_x86_64_linux TEXT,
+                store_path_aarch64_linux TEXT,
+                store_path_x86_64_darwin TEXT,
+                store_path_aarch64_darwin TEXT,
                 UNIQUE(attribute_path, version, first_commit_hash)
             );
             CREATE INDEX idx_packages_name ON package_versions(name);
@@ -565,12 +580,12 @@ mod tests {
             INSERT INTO meta (key, value) VALUES ('last_indexed_commit', 'abc1234567890def');
             INSERT INTO package_versions
                 (name, version, first_commit_hash, first_commit_date,
-                 last_commit_hash, last_commit_date, attribute_path, description, license)
+                 last_commit_hash, last_commit_date, attribute_path, description, license, store_path_x86_64_linux)
             VALUES
-                ('python', '3.11.0', 'aaa111', 1700000000, 'bbb222', 1700100000, 'python311', 'Python interpreter', 'PSF'),
-                ('python', '3.12.0', 'ccc333', 1700200000, 'ddd444', 1700300000, 'python312', 'Python interpreter', 'PSF'),
-                ('nodejs', '20.0.0', 'eee555', 1700400000, 'fff666', 1700500000, 'nodejs_20', 'Node.js runtime', 'MIT'),
-                ('hello', '2.10', 'ggg777', 1700600000, 'hhh888', 1700700000, 'hello', 'Hello World program', 'GPL-3.0');
+                ('python', '3.11.0', 'aaa111', 1700000000, 'bbb222', 1700100000, 'python311', 'Python interpreter', 'PSF', '/nix/store/abc123-python3-3.11.0'),
+                ('python', '3.12.0', 'ccc333', 1700200000, 'ddd444', 1700300000, 'python312', 'Python interpreter', 'PSF', '/nix/store/def456-python3-3.12.0'),
+                ('nodejs', '20.0.0', 'eee555', 1700400000, 'fff666', 1700500000, 'nodejs_20', 'Node.js runtime', 'MIT', NULL),
+                ('hello', '2.10', 'ggg777', 1700600000, 'hhh888', 1700700000, 'hello', 'Hello World program', 'GPL-3.0', '/nix/store/xyz789-hello-2.10');
 
             INSERT INTO package_versions_fts (rowid, attribute_path, description)
             SELECT id, attribute_path, description FROM package_versions;
@@ -1083,5 +1098,270 @@ mod tests {
                 i + 1
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_closure_with_store_path() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None, None);
+
+        let (status, json) = get_json(&app, "/api/v1/fetch-closure?attr=hello&version=2.10").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["attr"], "hello");
+        assert_eq!(json["version"], "2.10");
+        assert_eq!(json["system"], "x86_64-linux");
+        assert_eq!(json["store_path"], "/nix/store/xyz789-hello-2.10");
+        assert!(json["error"].is_null());
+
+        // Verify the nix expression includes inputAddressed = true
+        let nix_expr = json["nix_expr"].as_str().unwrap();
+        assert!(nix_expr.contains("builtins.fetchClosure"));
+        assert!(nix_expr.contains("fromStore"));
+        assert!(nix_expr.contains("fromPath = /nix/store/xyz789-hello-2.10"));
+        assert!(
+            nix_expr.contains("inputAddressed = true"),
+            "Nix expression should include inputAddressed = true for input-addressed packages"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fetch_closure_without_store_path() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None, None);
+
+        // nodejs has NULL store_path in test data
+        let (status, json) =
+            get_json(&app, "/api/v1/fetch-closure?attr=nodejs_20&version=20.0.0").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["attr"], "nodejs_20");
+        assert_eq!(json["version"], "20.0.0");
+        assert!(json["store_path"].is_null());
+        assert!(json["nix_expr"].is_null());
+        assert!(json["error"].is_string());
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap()
+                .contains("Store path not available")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fetch_closure_unsupported_system() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None, None);
+
+        let (status, json) = get_json(
+            &app,
+            "/api/v1/fetch-closure?attr=hello&version=2.10&system=aarch64-darwin",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["store_path"].is_null());
+        assert!(json["nix_expr"].is_null());
+        let error_msg = json["error"].as_str().expect("error should be present");
+        assert!(
+            error_msg.contains("Store path not available"),
+            "Error message: {}",
+            error_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fetch_closure_not_found() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None, None);
+
+        let (status, json) =
+            get_json(&app, "/api/v1/fetch-closure?attr=nonexistent&version=1.0.0").await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(json["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_closure_custom_cache_url() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None, None);
+
+        let (status, json) = get_json(
+            &app,
+            "/api/v1/fetch-closure?attr=hello&version=2.10&cache_url=https://my-cache.example.com",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let nix_expr = json["nix_expr"].as_str().unwrap();
+        assert!(nix_expr.contains("https://my-cache.example.com"));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_closure_escapes_cache_url() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None, None);
+
+        // Test that special characters in cache_url are properly escaped
+        let (status, json) = get_json(
+            &app,
+            "/api/v1/fetch-closure?attr=hello&version=2.10&cache_url=https://cache.example.com/path%22with%22quotes",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let nix_expr = json["nix_expr"].as_str().unwrap();
+        // The URL should be in the expression but quotes should be escaped
+        assert!(nix_expr.contains("fromStore"));
+        // The expression should not contain unescaped quotes that would break Nix parsing
+        // (decoded %22 becomes " which should be escaped to \")
+    }
+
+    #[tokio::test]
+    async fn test_metrics_endpoint() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None, None);
+
+        let (status, json) = get_json(&app, "/api/v1/metrics").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["server"]["version"].is_string());
+        assert_eq!(json["server"]["status"], "ok");
+        assert!(json["database"]["max_connections"].is_number());
+        assert!(json["database"]["available_permits"].is_number());
+        assert!(json["database"]["in_use"].is_number());
+        assert!(json["database"]["timeout_seconds"].is_number());
+    }
+
+    #[tokio::test]
+    async fn test_search_empty_results() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None, None);
+
+        let (status, json) = get_json(&app, "/api/v1/search?q=nonexistent_package_xyz123").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let data = json["data"].as_array().unwrap();
+        assert!(data.is_empty());
+        assert_eq!(json["meta"]["total"], 0);
+    }
+
+    #[tokio::test]
+    async fn test_search_with_license_filter() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None, None);
+
+        let (status, json) = get_json(&app, "/api/v1/search?q=python&license=PSF").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let data = json["data"].as_array().unwrap();
+        // Should return python packages with PSF license
+        assert!(!data.is_empty());
+        for pkg in data {
+            assert_eq!(pkg["license"], "PSF");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cache_headers_for_api() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None, None);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/search?q=python")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let cache_control = response.headers().get("cache-control");
+        assert!(cache_control.is_some());
+        // API routes should have cache headers (1 hour)
+        assert!(
+            cache_control
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("max-age=3600")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_health_no_cache() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None, None);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let cache_control = response.headers().get("cache-control");
+        assert!(cache_control.is_some());
+        // Health check should have no-cache headers
+        assert!(
+            cache_control
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("no-cache")
+        );
     }
 }

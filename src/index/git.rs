@@ -5,7 +5,8 @@ use chrono::{DateTime, TimeZone, Utc};
 use git2::{Oid, Repository, Sort};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use tracing::instrument;
+use std::time::Instant;
+use tracing::{instrument, trace};
 
 /// The earliest commit date we support for indexing.
 /// Before this date, nixpkgs had a different structure that doesn't work
@@ -142,6 +143,8 @@ impl WorktreeSession {
     /// the checkout and discards any local changes.
     #[instrument(skip(self))]
     pub fn checkout(&self, commit_hash: &str) -> Result<()> {
+        let checkout_start = Instant::now();
+
         // Force checkout - no need for git clean since nix eval doesn't modify files
         let output = Command::new("git")
             .args(["checkout", "-f", commit_hash])
@@ -161,6 +164,12 @@ impl WorktreeSession {
                 stderr.lines().take(3).collect::<Vec<_>>().join(" ")
             ))));
         }
+
+        trace!(
+            commit = %commit_hash,
+            checkout_time_ms = checkout_start.elapsed().as_millis(),
+            "Worktree checkout completed"
+        );
 
         Ok(())
     }
@@ -375,6 +384,8 @@ impl NixpkgsRepo {
     /// For merge commits, compares against first parent only to get actual PR changes.
     #[instrument(skip(self))]
     pub fn get_commit_changed_paths(&self, commit_hash: &str) -> Result<Vec<String>> {
+        let diff_start = Instant::now();
+
         // For merge commits, compare against first parent (^1) to get just the PR changes.
         // For regular commits, this also works correctly.
         let output = Command::new("git")
@@ -388,7 +399,7 @@ impl NixpkgsRepo {
             .output()?;
 
         // If ^1 fails (e.g., initial commit), fall back to diff-tree
-        if !output.status.success() {
+        let paths = if !output.status.success() {
             let fallback = Command::new("git")
                 .current_dir(&self.path)
                 .args(["diff-tree", "--name-status", "-r", commit_hash])
@@ -400,10 +411,19 @@ impl NixpkgsRepo {
                 )));
             }
 
-            return Self::parse_diff_output(&String::from_utf8_lossy(&fallback.stdout));
-        }
+            Self::parse_diff_output(&String::from_utf8_lossy(&fallback.stdout))?
+        } else {
+            Self::parse_diff_output(&String::from_utf8_lossy(&output.stdout))?
+        };
 
-        Self::parse_diff_output(&String::from_utf8_lossy(&output.stdout))
+        trace!(
+            commit = %commit_hash,
+            changed_files = paths.len(),
+            diff_time_ms = diff_start.elapsed().as_millis(),
+            "Git diff completed"
+        );
+
+        Ok(paths)
     }
 
     /// Parse git diff --name-status output into a list of paths.

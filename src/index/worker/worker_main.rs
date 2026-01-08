@@ -153,6 +153,28 @@ fn worker_loop(reader: &mut LineReader, writer: &mut LineWriter) -> io::Result<(
 /// This function never returns normally - it either exits successfully
 /// or panics on unrecoverable errors.
 pub fn run_worker_main() -> ! {
+    // Install a custom panic hook to handle broken pipe gracefully.
+    // Workers inherit stderr from the parent, so when tee exits on Ctrl+C,
+    // stderr is broken and write panics would cause abort().
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let is_broken_pipe = info
+            .payload()
+            .downcast_ref::<String>()
+            .map(|s| s.contains("Broken pipe") || s.contains("os error 32"))
+            .unwrap_or(false)
+            || info
+                .payload()
+                .downcast_ref::<&str>()
+                .map(|s| s.contains("Broken pipe") || s.contains("os error 32"))
+                .unwrap_or(false);
+
+        if is_broken_pipe {
+            std::process::exit(0);
+        }
+        default_hook(info);
+    }));
+
     // Set up signal handlers
     // Ignore SIGPIPE - we handle pipe errors via io::Error
     unsafe {
@@ -184,7 +206,11 @@ pub fn run_worker_main() -> ! {
     match worker_loop(&mut reader, &mut writer) {
         Ok(()) => std::process::exit(0),
         Err(e) => {
-            eprintln!("Worker error: {}", e);
+            // Use write_all instead of eprintln! to handle broken pipe gracefully
+            let _ = std::io::Write::write_all(
+                &mut std::io::stderr(),
+                format!("Worker error: {}\n", e).as_bytes(),
+            );
             std::process::exit(1);
         }
     }

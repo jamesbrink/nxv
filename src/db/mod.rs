@@ -7,8 +7,8 @@ use crate::error::{NxvError, Result};
 use queries::PackageVersion;
 use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
-use std::time::Duration;
-use tracing::instrument;
+use std::time::{Duration, Instant};
+use tracing::{instrument, trace};
 
 /// Default timeout for SQLite busy handler (in seconds).
 /// When the database is locked, SQLite will retry for this duration before returning SQLITE_BUSY.
@@ -579,8 +579,12 @@ impl Database {
     #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
     #[instrument(skip(self, packages), fields(batch_size = packages.len()))]
     pub fn insert_package_ranges_batch(&mut self, packages: &[PackageVersion]) -> Result<usize> {
+        let batch_start = Instant::now();
         let tx = self.conn.transaction()?;
+        let tx_start_time = batch_start.elapsed();
+
         let mut inserted = 0;
+        let mut duplicates = 0;
 
         {
             let mut stmt = tx.prepare_cached(
@@ -617,11 +621,29 @@ impl Database {
                     pkg.store_paths.get("x86_64-darwin"),
                     pkg.store_paths.get("aarch64-darwin"),
                 ])?;
-                inserted += changes;
+                if changes > 0 {
+                    inserted += changes;
+                } else {
+                    duplicates += 1;
+                }
             }
         }
 
+        let insert_time = batch_start.elapsed();
         tx.commit()?;
+        let total_time = batch_start.elapsed();
+
+        trace!(
+            batch_size = packages.len(),
+            inserted = inserted,
+            duplicates = duplicates,
+            tx_start_ms = tx_start_time.as_millis(),
+            insert_ms = insert_time.as_millis(),
+            commit_ms = (total_time - insert_time).as_millis(),
+            total_ms = total_time.as_millis(),
+            "Batch insert completed"
+        );
+
         Ok(inserted)
     }
 

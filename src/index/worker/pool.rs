@@ -13,8 +13,8 @@ use crate::index::extractor::{AttrPosition, PackageInfo};
 use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
-use tracing::instrument;
+use std::time::{Duration, Instant};
+use tracing::{instrument, trace};
 
 /// Configuration for the worker pool.
 #[derive(Debug, Clone)]
@@ -107,6 +107,7 @@ impl Worker {
         repo_path: &Path,
         attrs: &[String],
     ) -> Result<Vec<PackageInfo>> {
+        let request_start = Instant::now();
         self.ensure_ready()?;
 
         let proc = self
@@ -120,10 +121,24 @@ impl Worker {
             repo_path.to_string_lossy().to_string(),
             attrs.to_vec(),
         );
+        let send_start = Instant::now();
         proc.send(&request)?;
+        let send_time = send_start.elapsed();
 
         // Receive result
+        let recv_start = Instant::now();
         let response = proc.recv()?;
+        let recv_time = recv_start.elapsed();
+
+        trace!(
+            worker_id = self.id,
+            system = %system,
+            attr_count = attrs.len(),
+            send_time_ms = send_time.as_millis(),
+            recv_time_ms = recv_time.as_millis(),
+            total_ipc_time_ms = request_start.elapsed().as_millis(),
+            "Worker IPC request/response"
+        );
         let packages = match response {
             Some(WorkResponse::Result { packages }) => packages,
             Some(WorkResponse::Error { message }) => {
@@ -464,8 +479,20 @@ impl WorkerPool {
     ) -> Vec<Result<Vec<PackageInfo>>> {
         use std::thread;
 
+        let parallel_start = Instant::now();
+
+        // Log worker assignments
+        for (i, system) in systems.iter().enumerate() {
+            let worker_idx = i % self.workers.len();
+            trace!(
+                system = %system,
+                worker_idx = worker_idx,
+                "Assigning system to worker"
+            );
+        }
+
         // Use scoped threads to borrow from self
-        thread::scope(|s| {
+        let results: Vec<_> = thread::scope(|s| {
             let handles: Vec<_> = systems
                 .iter()
                 .enumerate()
@@ -490,7 +517,24 @@ impl WorkerPool {
                         .unwrap_or_else(|_| Err(NxvError::Worker("Worker thread panicked".into())))
                 })
                 .collect()
-        })
+        });
+
+        let success_count = results.iter().filter(|r| r.is_ok()).count();
+        let total_packages: usize = results
+            .iter()
+            .filter_map(|r| r.as_ref().ok())
+            .map(|pkgs| pkgs.len())
+            .sum();
+
+        trace!(
+            systems = systems.len(),
+            success_count = success_count,
+            total_packages = total_packages,
+            parallel_time_ms = parallel_start.elapsed().as_millis(),
+            "Parallel extraction completed"
+        );
+
+        results
     }
 
     /// Extract attribute positions for file-to-attribute mapping.

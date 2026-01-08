@@ -39,6 +39,34 @@ use cli::{Cli, Commands};
 /// nxv::main();
 /// ```
 fn main() {
+    // Install a custom panic hook to handle broken pipe gracefully.
+    // When piped to programs like `tee` that exit on Ctrl+C, writes to stderr
+    // fail with EPIPE. The println!/eprintln! macros panic on write failure,
+    // and when the default panic handler tries to print to stderr (also broken),
+    // Rust calls abort(). This hook catches broken pipe panics and exits cleanly.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        // Check if this is a broken pipe panic
+        let is_broken_pipe = info
+            .payload()
+            .downcast_ref::<String>()
+            .map(|s| s.contains("Broken pipe") || s.contains("os error 32"))
+            .unwrap_or(false)
+            || info
+                .payload()
+                .downcast_ref::<&str>()
+                .map(|s| s.contains("Broken pipe") || s.contains("os error 32"))
+                .unwrap_or(false);
+
+        if is_broken_pipe {
+            // Exit cleanly - don't try to print anything
+            std::process::exit(0);
+        }
+
+        // For other panics, use the default handler
+        default_hook(info);
+    }));
+
     // Ignore SIGPIPE to prevent crashes when piped to programs that exit early (e.g., tee, head)
     #[cfg(unix)]
     unsafe {

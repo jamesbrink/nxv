@@ -75,7 +75,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use tracing::{debug, info_span, instrument};
+use tracing::{debug, info_span, instrument, trace};
 
 /// Configuration for the indexer.
 #[derive(Debug, Clone)]
@@ -1345,6 +1345,14 @@ impl Indexer {
                 "Processing commit"
             );
 
+            // Trace: show which files triggered extraction and target attrs
+            trace!(
+                commit = %commit.short_hash,
+                changed_files = changed_paths.len(),
+                target_attrs = ?target_list,
+                "Commit changed files mapped to target attributes"
+            );
+
             // Extract packages for all systems
             let mut aggregates: HashMap<String, PackageAggregate> = HashMap::new();
 
@@ -1380,7 +1388,15 @@ impl Indexer {
             // Process results from all systems
             for (system, packages_result) in extraction_results {
                 let packages = match packages_result {
-                    Ok(pkgs) => pkgs,
+                    Ok(pkgs) => {
+                        trace!(
+                            commit = %commit.short_hash,
+                            system = %system,
+                            packages_extracted = pkgs.len(),
+                            "System extraction completed"
+                        );
+                        pkgs
+                    }
                     Err(e) => {
                         result.extraction_failures += 1;
                         tracing::warn!(
@@ -1419,6 +1435,13 @@ impl Indexer {
             }
 
             result.packages_found += aggregates.len() as u64;
+
+            trace!(
+                commit = %commit.short_hash,
+                unique_packages = aggregates.len(),
+                open_ranges = open_ranges.len(),
+                "Aggregation complete"
+            );
 
             // Track which packages we saw in this commit
             let mut seen_keys: HashSet<String> = HashSet::new();
@@ -1476,6 +1499,15 @@ impl Indexer {
                 .map(|(key, _)| key.clone())
                 .collect();
 
+            if !disappeared.is_empty() {
+                trace!(
+                    commit = %commit.short_hash,
+                    disappeared_count = disappeared.len(),
+                    disappeared_keys = ?disappeared,
+                    "Closing ranges for disappeared packages"
+                );
+            }
+
             for key in disappeared {
                 if let Some(range) = open_ranges.remove(&key)
                     && let (Some(prev_hash), Some(prev_date)) =
@@ -1496,9 +1528,18 @@ impl Indexer {
             if (commit_idx + 1).is_multiple_of(self.config.checkpoint_interval)
                 || commit_idx + 1 == commits.len()
             {
+                let checkpoint_start = Instant::now();
+
                 if !pending_inserts.is_empty() {
+                    let insert_start = Instant::now();
+                    let insert_count = pending_inserts.len();
                     result.ranges_created +=
                         db.insert_package_ranges_batch(&pending_inserts)? as u64;
+                    trace!(
+                        insert_count = insert_count,
+                        insert_time_ms = insert_start.elapsed().as_millis(),
+                        "Database batch insert completed"
+                    );
                     pending_inserts.clear();
                 }
 
@@ -1561,6 +1602,13 @@ impl Indexer {
                     }
                     checkpoints_since_gc = 0;
                 }
+
+                trace!(
+                    commit_idx = commit_idx + 1,
+                    checkpoint_time_ms = checkpoint_start.elapsed().as_millis(),
+                    open_ranges = open_ranges.len(),
+                    "Checkpoint completed"
+                );
             }
         }
 

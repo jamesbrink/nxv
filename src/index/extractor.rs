@@ -6,7 +6,8 @@ use serde::Deserialize;
 use std::path::Path;
 #[cfg(test)]
 use std::process::Command;
-use tracing::instrument;
+use std::time::Instant;
+use tracing::{instrument, trace};
 
 /// Information about an extracted package.
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
@@ -148,8 +149,23 @@ pub fn extract_packages_for_attrs<P: AsRef<Path>>(
     );
 
     // Use FFI evaluator with large stack thread
+    let eval_start = Instant::now();
     let json_output = with_evaluator(move |eval| eval.eval_json(&expr, "<extract>"))?;
+    let eval_time = eval_start.elapsed();
+
+    let parse_start = Instant::now();
     let packages: Vec<PackageInfo> = serde_json::from_str(&json_output)?;
+    let parse_time = parse_start.elapsed();
+
+    trace!(
+        system = %system,
+        attr_count = attr_names.len(),
+        packages_found = packages.len(),
+        json_size_bytes = json_output.len(),
+        eval_time_ms = eval_time.as_millis(),
+        parse_time_ms = parse_time.as_millis(),
+        "Nix extraction completed"
+    );
 
     Ok(packages)
 }
@@ -180,8 +196,22 @@ pub fn extract_attr_positions<P: AsRef<Path>>(
     );
 
     // Use FFI evaluator with large stack thread
+    let eval_start = Instant::now();
     let json_output = with_evaluator(move |eval| eval.eval_json(&expr, "<positions>"))?;
+    let eval_time = eval_start.elapsed();
+
+    let parse_start = Instant::now();
     let positions: Vec<AttrPosition> = serde_json::from_str(&json_output)?;
+    let parse_time = parse_start.elapsed();
+
+    trace!(
+        system = %system,
+        positions_found = positions.len(),
+        json_size_bytes = json_output.len(),
+        eval_time_ms = eval_time.as_millis(),
+        parse_time_ms = parse_time.as_millis(),
+        "Positions extraction completed"
+    );
 
     Ok(positions)
 }

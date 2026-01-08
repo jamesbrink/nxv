@@ -1668,6 +1668,17 @@ impl Indexer {
     }
 }
 
+/// Infrastructure files that affect many packages but rarely indicate version changes.
+///
+/// These files are excluded from the file-to-attribute mapping because:
+/// 1. `all-packages.nix` imports/exports all packages, so any change triggers 18k+ targets
+/// 2. `aliases.nix` just defines aliases, not actual package versions
+/// 3. Changes to actual package files are still detected via path-based fallback heuristics
+const INFRASTRUCTURE_FILES: &[&str] = &[
+    "pkgs/top-level/all-packages.nix",
+    "pkgs/top-level/aliases.nix",
+];
+
 fn build_file_attr_map(
     repo_path: &Path,
     systems: &[String],
@@ -1689,6 +1700,7 @@ fn build_file_attr_map(
     for position in positions {
         if let Some(file) = position.file
             && let Some(relative) = normalize_position_file(repo_path, &file)
+            && !INFRASTRUCTURE_FILES.contains(&relative.as_str())
         {
             map.entry(relative).or_default().push(position.attr_path);
         }

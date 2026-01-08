@@ -1144,7 +1144,12 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
     // Set up Ctrl+C handler
     let shutdown_flag = indexer.shutdown_flag();
     ctrlc::set_handler(move || {
-        eprintln!("\nReceived Ctrl+C, requesting graceful shutdown...");
+        // Use write! instead of eprintln! to handle broken pipe gracefully
+        // (e.g., when piped to `tee` which exits on Ctrl+C)
+        let _ = std::io::Write::write_all(
+            &mut std::io::stderr(),
+            b"\nReceived Ctrl+C, requesting graceful shutdown...\n",
+        );
         shutdown_flag.store(true, Ordering::SeqCst);
     })
     .expect("Error setting Ctrl+C handler");
@@ -1250,7 +1255,12 @@ fn cmd_backfill(cli: &Cli, args: &cli::BackfillArgs) -> Result<()> {
     let shutdown_flag = create_shutdown_flag();
     let flag_clone = shutdown_flag.clone();
     ctrlc::set_handler(move || {
-        eprintln!("\nReceived Ctrl+C, requesting graceful shutdown...");
+        // Use write! instead of eprintln! to handle broken pipe gracefully
+        // (e.g., when piped to `tee` which exits on Ctrl+C)
+        let _ = std::io::Write::write_all(
+            &mut std::io::stderr(),
+            b"\nReceived Ctrl+C, requesting graceful shutdown...\n",
+        );
         flag_clone.store(true, Ordering::SeqCst);
     })
     .expect("Error setting Ctrl+C handler");

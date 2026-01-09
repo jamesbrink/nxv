@@ -1299,6 +1299,69 @@ impl Indexer {
             let all_attrs: Option<&Vec<String>> =
                 file_attr_map.get("pkgs/top-level/all-packages.nix");
 
+            // Check for infrastructure files and parse their diffs to extract affected attrs
+            let mut needs_full_extraction = false;
+            for infra_file in INFRASTRUCTURE_FILES {
+                if changed_paths.contains(&infra_file.to_string()) {
+                    // Get the diff for this infrastructure file
+                    match repo.get_file_diff(&commit.hash, infra_file) {
+                        Ok(diff) => {
+                            if let Some(extracted_attrs) = extract_attrs_from_diff(&diff) {
+                                // Validate extracted attrs against known package names
+                                for attr in extracted_attrs {
+                                    if let Some(all_attrs_list) = all_attrs {
+                                        if all_attrs_list.contains(&attr) {
+                                            target_attr_paths.insert(attr);
+                                        }
+                                    } else {
+                                        // No all_attrs available, trust the extracted attr
+                                        target_attr_paths.insert(attr);
+                                    }
+                                }
+
+                                trace!(
+                                    commit = %commit.short_hash,
+                                    file = %infra_file,
+                                    attrs_extracted = target_attr_paths.len(),
+                                    "Extracted attrs from infrastructure file diff"
+                                );
+                            } else {
+                                // extract_attrs_from_diff returned None (large diff or fallback needed)
+                                debug!(
+                                    commit = %commit.short_hash,
+                                    file = %infra_file,
+                                    "Large diff in infrastructure file, triggering full extraction"
+                                );
+                                needs_full_extraction = true;
+                            }
+                        }
+                        Err(e) => {
+                            trace!(
+                                commit = %commit.short_hash,
+                                file = %infra_file,
+                                error = %e,
+                                "Failed to get diff for infrastructure file"
+                            );
+                        }
+                    }
+                }
+            }
+
+            // If a large infrastructure file change triggered full extraction,
+            // extract all packages from all-packages.nix
+            if needs_full_extraction
+                && let Some(all_attrs_list) = all_attrs
+            {
+                for attr in all_attrs_list {
+                    target_attr_paths.insert(attr.clone());
+                }
+                debug!(
+                    commit = %commit.short_hash,
+                    total_attrs = target_attr_paths.len(),
+                    "Full extraction triggered due to large infrastructure diff"
+                );
+            }
+
             for path in &changed_paths {
                 if let Some(attr_paths) = file_attr_map.get(path) {
                     for attr in attr_paths {
@@ -1690,6 +1753,188 @@ const INFRASTRUCTURE_FILES: &[&str] = &[
     "pkgs/top-level/all-packages.nix",
     "pkgs/top-level/aliases.nix",
 ];
+
+/// Maximum number of lines in a diff before we fall back to full extraction.
+/// Large diffs typically indicate bulk updates where parsing individual attributes
+/// is less efficient than extracting everything.
+const DIFF_FALLBACK_THRESHOLD: usize = 100;
+
+/// Parse a git diff and extract affected attribute names.
+///
+/// This function extracts attribute names from diff lines that match common
+/// nixpkgs patterns:
+/// - Assignment: `  attrName = ...`
+/// - callPackage: `  attrName = callPackage ...`
+/// - Override: `  attrName = prev.pkg.override ...`
+/// - Inherit: `  inherit (foo) attr1 attr2 attr3;`
+///
+/// Returns `None` if the diff should trigger a full extraction (too large or unparseable).
+fn extract_attrs_from_diff(diff: &str) -> Option<Vec<String>> {
+    let mut attrs: Vec<String> = Vec::new();
+    let mut line_count = 0;
+
+    for line in diff.lines() {
+        // Skip diff header lines
+        if line.starts_with("@@")
+            || line.starts_with("diff ")
+            || line.starts_with("index ")
+            || line.starts_with("---")
+            || line.starts_with("+++")
+        {
+            continue;
+        }
+
+        // Only process added/modified/removed lines
+        if !line.starts_with('+') && !line.starts_with('-') {
+            continue;
+        }
+
+        line_count += 1;
+
+        // Get the content after +/- prefix
+        let content = &line[1..];
+
+        // Try assignment pattern: `  attrName = ...`
+        if let Some(attr_name) = extract_assignment_attr(content) {
+            if !is_non_package_attr(&attr_name) {
+                attrs.push(attr_name);
+            }
+            continue;
+        }
+
+        // Try inherit pattern: `  inherit (foo) attr1 attr2;`
+        if let Some(inherited_attrs) = extract_inherit_attrs(content) {
+            for attr_name in inherited_attrs {
+                if !is_non_package_attr(&attr_name) {
+                    attrs.push(attr_name);
+                }
+            }
+        }
+    }
+
+    // If diff is too large, signal fallback
+    if line_count > DIFF_FALLBACK_THRESHOLD {
+        tracing::debug!(
+            line_count,
+            attrs_found = attrs.len(),
+            "Large diff detected, suggesting fallback to full extraction"
+        );
+        return None;
+    }
+
+    // Sort and deduplicate
+    attrs.sort();
+    attrs.dedup();
+
+    Some(attrs)
+}
+
+/// Extract attribute name from an assignment line like `  attrName = ...`
+fn extract_assignment_attr(line: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+
+    // Find the `=` sign
+    let eq_pos = trimmed.find('=')?;
+
+    // Get the part before `=` and trim it
+    let before_eq = trimmed[..eq_pos].trim();
+
+    // Validate: should be a single valid Nix identifier
+    // Valid Nix identifiers: start with letter or _, followed by letters, numbers, _, -
+    if before_eq.is_empty() {
+        return None;
+    }
+
+    let first_char = before_eq.chars().next()?;
+    if !first_char.is_ascii_alphabetic() && first_char != '_' {
+        return None;
+    }
+
+    // Check that the whole identifier is valid
+    if before_eq
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        Some(before_eq.to_string())
+    } else {
+        None
+    }
+}
+
+/// Extract attribute names from an inherit line like `  inherit (foo) attr1 attr2 attr3;`
+fn extract_inherit_attrs(line: &str) -> Option<Vec<String>> {
+    let trimmed = line.trim_start();
+
+    // Check if it starts with "inherit"
+    if !trimmed.starts_with("inherit") {
+        return None;
+    }
+
+    let rest = trimmed.strip_prefix("inherit")?.trim_start();
+
+    // If there's a parenthesized source, skip past it
+    let attrs_part = if rest.starts_with('(') {
+        // Find the closing parenthesis
+        let close_paren = rest.find(')')?;
+        rest[close_paren + 1..].trim_start()
+    } else {
+        rest
+    };
+
+    // Remove trailing semicolon if present
+    let attrs_str = attrs_part.trim_end_matches(';').trim();
+
+    // Split by whitespace and filter valid identifiers
+    let attrs: Vec<String> = attrs_str
+        .split_whitespace()
+        .filter(|s| {
+            !s.is_empty()
+                && s.chars()
+                    .next()
+                    .map(|c| c.is_ascii_alphabetic() || c == '_')
+                    .unwrap_or(false)
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        })
+        .map(|s| s.to_string())
+        .collect();
+
+    if attrs.is_empty() {
+        None
+    } else {
+        Some(attrs)
+    }
+}
+
+/// Check if an attribute name is a known non-package attribute.
+/// These are helper functions, let bindings, or other structural elements.
+fn is_non_package_attr(name: &str) -> bool {
+    // Common prefixes/patterns that aren't packages
+    let non_package_patterns = [
+        "inherit",
+        "let",
+        "in",
+        "with",
+        "if",
+        "then",
+        "else",
+        "import",
+        "callPackages", // Note: plural version is a function, not a package
+        "self",
+        "super",
+        "prev",
+        "final",
+        "__",
+    ];
+
+    for pattern in non_package_patterns {
+        if name == pattern || name.starts_with(pattern) {
+            return true;
+        }
+    }
+
+    false
+}
 
 fn build_file_attr_map(
     repo_path: &Path,
@@ -2368,5 +2613,122 @@ mod tests {
             let chromium = queries::search_by_name(db.connection(), "chromium", true).unwrap();
             assert_eq!(chromium.len(), 1);
         }
+    }
+
+    #[test]
+    fn test_extract_assignment_attr() {
+        // Simple assignment
+        assert_eq!(
+            extract_assignment_attr("  hello = callPackage ../applications/misc/hello { };"),
+            Some("hello".to_string())
+        );
+
+        // Assignment with hyphens
+        assert_eq!(
+            extract_assignment_attr("  gnome-shell = callPackage ../desktops/gnome/shell { };"),
+            Some("gnome-shell".to_string())
+        );
+
+        // Assignment with underscore
+        assert_eq!(
+            extract_assignment_attr("  node_20 = callPackage ../development/interpreters/node { };"),
+            Some("node_20".to_string())
+        );
+
+        // Assignment without leading spaces
+        assert_eq!(
+            extract_assignment_attr("firefox = wrapFirefox firefox-unwrapped { };"),
+            Some("firefox".to_string())
+        );
+
+        // Non-assignment (comment)
+        assert_eq!(
+            extract_assignment_attr("  # hello = old version"),
+            None
+        );
+
+        // Non-assignment (no equals sign)
+        assert_eq!(extract_assignment_attr("  hello world"), None);
+
+        // Invalid identifier start
+        assert_eq!(extract_assignment_attr("  123abc = bad"), None);
+    }
+
+    #[test]
+    fn test_extract_inherit_attrs() {
+        // Simple inherit with source
+        assert_eq!(
+            extract_inherit_attrs("  inherit (prev) hello world;"),
+            Some(vec!["hello".to_string(), "world".to_string()])
+        );
+
+        // Inherit with multiple attrs (order preserved from input)
+        assert_eq!(
+            extract_inherit_attrs("  inherit (gnome) gnome-shell mutter gjs;"),
+            Some(vec![
+                "gnome-shell".to_string(),
+                "mutter".to_string(),
+                "gjs".to_string()
+            ])
+        );
+
+        // Inherit without source (plain inherit)
+        assert_eq!(
+            extract_inherit_attrs("  inherit foo bar baz;"),
+            Some(vec!["foo".to_string(), "bar".to_string(), "baz".to_string()])
+        );
+
+        // Not an inherit statement
+        assert_eq!(extract_inherit_attrs("  hello = world;"), None);
+
+        // Empty inherit
+        assert_eq!(extract_inherit_attrs("  inherit;"), None);
+    }
+
+    #[test]
+    fn test_extract_attrs_from_diff() {
+        let diff = r#"diff --git a/pkgs/top-level/all-packages.nix b/pkgs/top-level/all-packages.nix
+index abc123..def456 100644
+--- a/pkgs/top-level/all-packages.nix
++++ b/pkgs/top-level/all-packages.nix
+@@ -1234,7 +1234,7 @@
+-  thunderbird = wrapThunderbird thunderbird-unwrapped { };
++  thunderbird = wrapThunderbird thunderbird-unwrapped { enableFoo = true; };
+-  firefox = wrapFirefox firefox-unwrapped { };
++  firefox = wrapFirefox firefox-unwrapped { version = "120.0"; };
+"#;
+
+        let attrs = extract_attrs_from_diff(diff).expect("Should extract attrs");
+        assert!(attrs.contains(&"thunderbird".to_string()));
+        assert!(attrs.contains(&"firefox".to_string()));
+        assert_eq!(attrs.len(), 2); // Should deduplicate
+    }
+
+    #[test]
+    fn test_extract_attrs_from_diff_large_triggers_fallback() {
+        // Create a diff with more than DIFF_FALLBACK_THRESHOLD lines
+        let mut diff = String::from("diff --git a/test b/test\n--- a/test\n+++ b/test\n");
+        for i in 0..150 {
+            diff.push_str(&format!("+  pkg{} = callPackage {{ }};\n", i));
+        }
+
+        // Should return None to trigger fallback
+        assert!(extract_attrs_from_diff(&diff).is_none());
+    }
+
+    #[test]
+    fn test_is_non_package_attr() {
+        // Non-package patterns
+        assert!(is_non_package_attr("inherit"));
+        assert!(is_non_package_attr("let"));
+        assert!(is_non_package_attr("self"));
+        assert!(is_non_package_attr("__private"));
+        assert!(is_non_package_attr("callPackages")); // Note: plural
+
+        // Package patterns (should return false)
+        assert!(!is_non_package_attr("hello"));
+        assert!(!is_non_package_attr("firefox"));
+        assert!(!is_non_package_attr("callPackage")); // Note: singular is OK
+        assert!(!is_non_package_attr("gnome-shell"));
     }
 }

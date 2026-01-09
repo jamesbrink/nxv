@@ -1107,6 +1107,55 @@ impl NixpkgsRepo {
 
         Ok(())
     }
+
+    /// Get the diff content for a specific file at a given commit.
+    ///
+    /// This returns the actual diff text (with +/- lines) for the specified file,
+    /// which can be parsed to extract affected attribute names from infrastructure files.
+    ///
+    /// # Arguments
+    /// * `commit_hash` - The commit to get the diff for
+    /// * `file_path` - The path to the file to get the diff for (e.g., "pkgs/top-level/all-packages.nix")
+    ///
+    /// # Returns
+    /// The diff content as a string, or an error if the operation fails.
+    #[instrument(skip(self))]
+    pub fn get_file_diff(&self, commit_hash: &str, file_path: &str) -> Result<String> {
+        // Compare against first parent for merge commits
+        let output = Command::new("git")
+            .current_dir(&self.path)
+            .args([
+                "diff",
+                "-U0", // Unified diff with 0 context lines (just the changes)
+                &format!("{}^1", commit_hash),
+                commit_hash,
+                "--",
+                file_path,
+            ])
+            .output()?;
+
+        // If ^1 fails (e.g., initial commit), fall back to showing the file
+        if !output.status.success() {
+            let fallback = Command::new("git")
+                .current_dir(&self.path)
+                .args(["show", &format!("{}:{}", commit_hash, file_path)])
+                .output()?;
+
+            if fallback.status.success() {
+                // Return the whole file content prefixed with + (treat as additions)
+                let content = String::from_utf8_lossy(&fallback.stdout);
+                return Ok(content
+                    .lines()
+                    .map(|l| format!("+{}", l))
+                    .collect::<Vec<_>>()
+                    .join("\n"));
+            }
+
+            return Ok(String::new());
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
 }
 
 #[cfg(test)]

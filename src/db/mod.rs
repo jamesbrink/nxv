@@ -28,7 +28,7 @@ pub const STORE_PATH_SYSTEMS: [&str; 4] = [
 
 /// Minimum schema version this build can read.
 /// Indexes with min_schema_version > this value are incompatible.
-pub const MIN_READABLE_SCHEMA: u32 = 3;
+pub const MIN_READABLE_SCHEMA: u32 = 4;
 
 /// Database connection wrapper.
 pub struct Database {

@@ -97,9 +97,10 @@ impl Database {
 
         // Check min_schema_version if set by the indexer (for future schema changes).
         // Falls back to schema_version for indexes that don't have min_schema_version yet.
-        let min_version_str = self
-            .get_meta("min_schema_version")?
-            .or_else(|| self.get_meta("schema_version").ok().flatten());
+        let min_version_str = match self.get_meta("min_schema_version")? {
+            Some(v) => Some(v),
+            None => self.get_meta("schema_version")?,
+        };
         let min_version_str = min_version_str.as_deref().unwrap_or("0");
         let min_schema_version: u32 = min_version_str.parse().map_err(|_| {
             NxvError::CorruptIndex(format!(
@@ -110,7 +111,8 @@ impl Database {
 
         if min_schema_version > MIN_READABLE_SCHEMA {
             return Err(NxvError::CorruptIndex(format!(
-                "index requires schema version {} but this build only supports up to {}",
+                "index requires schema version {} but this build only supports up to {}. \
+                 Please upgrade nxv to use this index.",
                 min_schema_version, MIN_READABLE_SCHEMA
             )));
         }

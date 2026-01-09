@@ -396,6 +396,22 @@ pub fn generate_full_index<P: AsRef<Path>, Q: AsRef<Path>>(
     // Get database info and update metadata before compression
     let db = Database::open(db_path)?;
     let last_commit = db.get_meta("last_indexed_commit")?.unwrap_or_default();
+
+    // Validate min_version against the database's schema version
+    if let Some(min_ver) = min_version {
+        let schema_version: u32 = db
+            .get_meta("schema_version")?
+            .unwrap_or_else(|| "0".to_string())
+            .parse()
+            .unwrap_or(0);
+        if min_ver > schema_version {
+            return Err(NxvError::Config(format!(
+                "--min-version ({}) cannot be greater than database schema version ({})",
+                min_ver, schema_version
+            )));
+        }
+    }
+
     // Set the indexed date to now (publish time) so it matches the manifest
     db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
     // Write min_schema_version to database for direct-download validation
@@ -907,6 +923,29 @@ mod tests {
         let db = Database::open(&decompressed_path).unwrap();
         let min_ver = db.get_meta("min_schema_version").unwrap();
         assert_eq!(min_ver, Some("3".to_string()));
+    }
+
+    #[test]
+    fn test_generate_full_index_no_min_schema_version_when_none() {
+        use crate::remote::download::decompress_zstd;
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let output_dir = dir.path().join("output");
+
+        create_test_db(&db_path);
+
+        // Generate with min_version=None
+        generate_full_index(&db_path, &output_dir, None, false, None).unwrap();
+
+        // Decompress and verify min_schema_version was NOT written
+        let compressed_path = output_dir.join(INDEX_DB_NAME);
+        let decompressed_path = dir.path().join("decompressed.db");
+        decompress_zstd(&compressed_path, &decompressed_path, false).unwrap();
+
+        let db = Database::open(&decompressed_path).unwrap();
+        let min_ver = db.get_meta("min_schema_version").unwrap();
+        assert_eq!(min_ver, None);
     }
 
     #[test]

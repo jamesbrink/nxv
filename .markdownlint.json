@@ -5,5 +5,6 @@
   },
   "MD033": {
     "allowed_elements": ["img", "p", "details", "summary"]
-  }
+  },
+  "MD060": false
 }

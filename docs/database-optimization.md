@@ -24,9 +24,9 @@ Measured with `--true-cold` flag (OS cache purged before each cold measurement).
 
 ### Full Table (`package_versions`) - Cold/Warm Cache
 
-| Query | Cold (ms) | Warm (ms) | Rows |
-|-------|-----------|-----------|------|
-| `exact_attr(python3)` | 27.82 | 0.77 | 253 |
+| Query                   | Cold (ms) | Warm (ms) | Rows    |
+| ----------------------- | --------- | --------- | ------- |
+| `exact_attr(python3)`   | 27.82     | 0.77      | 253     |
 | `exact_attr(firefox)` | 27.06 | 0.86 | 273 |
 | `exact_attr(nodejs)` | 29.22 | 0.86 | 277 |
 | `exact_attr(gcc)` | 3.04 | 0.15 | 21 |
@@ -105,9 +105,9 @@ Measured with `--true-cold` flag (OS cache purged before each cold measurement).
 
 ### Slim Table (`package_versions`) - 196K rows
 
-| Query | Cold (ms) | Warm (ms) | Rows |
-|-------|-----------|-----------|------|
-| `exact_attr(python3)` | 0.44 | 0.02 | 12 |
+| Query                   | Cold (ms) | Warm (ms) | Rows    |
+| ----------------------- | --------- | --------- | ------- |
+| `exact_attr(python3)`   | 0.44      | 0.02      | 12      |
 | `exact_attr(firefox)` | 1.46 | 0.22 | 39 |
 | `exact_attr(nodejs)` | 1.10 | 0.12 | 28 |
 | `exact_attr(gcc)` | 0.91 | 0.07 | 10 |
@@ -136,9 +136,9 @@ Measured with `--true-cold` flag (OS cache purged before each cold measurement).
 
 ## Performance Comparison: Full vs Slim
 
-| Query | Full Cold | Full Warm | Slim Cold | Slim Warm | Cold Speedup | Warm Speedup |
-|-------|-----------|-----------|-----------|-----------|--------------|--------------|
-| `exact_attr(python3)` | 27.82ms | 0.77ms | 0.44ms | 0.02ms | **63.2x** | **38.5x** |
+| Query                      | Full Cold  | Full Warm | Slim Cold | Slim Warm | Cold Speedup | Warm Speedup |
+| -------------------------- | ---------- | --------- | --------- | --------- | ------------ | ------------ |
+| `exact_attr(python3)`      | 27.82ms    | 0.77ms    | 0.44ms    | 0.02ms    | **63.2x**    | **38.5x**    |
 | `name_prefix(python)` | 12,508ms | 3,058ms | 155ms | 148ms | **80.9x** | **20.7x** |
 | `attr_prefix(python)` | 3,858ms | 9,625ms | 210ms | 207ms | **18.4x** | **46.5x** |
 | `relevance_search(python)` | 1,617ms | 1,625ms | 52ms | 51ms | **31.0x** | **32.1x** |

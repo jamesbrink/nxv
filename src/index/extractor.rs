@@ -504,7 +504,8 @@ mod tests {
                     .find(|p| p.name == "int-version-pkg")
                     .unwrap();
                 assert_eq!(
-                    int_ver.version.as_deref(), Some("61"),
+                    int_ver.version.as_deref(),
+                    Some("61"),
                     "Integer version should be converted to string"
                 );
             }
@@ -878,8 +879,8 @@ mod tests {
 "#;
         std::fs::write(path.join("default.nix"), default_nix).unwrap();
 
-        let packages = extract_packages_for_attrs(path, "x86_64-linux", &["hello".to_string()])
-            .unwrap();
+        let packages =
+            extract_packages_for_attrs(path, "x86_64-linux", &["hello".to_string()]).unwrap();
 
         assert_eq!(packages.len(), 1);
         let hello = &packages[0];
@@ -928,15 +929,19 @@ mod tests {
         }
 
         // Load fixture
-        let fixture_path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/regression_packages.json");
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/regression_packages.json");
         let fixture_content = fs::read_to_string(&fixture_path)
             .unwrap_or_else(|e| panic!("Failed to read fixture file {:?}: {}", fixture_path, e));
         let fixture: RegressionFixture =
             serde_json::from_str(&fixture_content).expect("Failed to parse fixture JSON");
 
         // Extract packages
-        let attr_paths: Vec<String> = fixture.packages.iter().map(|p| p.attr_path.clone()).collect();
+        let attr_paths: Vec<String> = fixture
+            .packages
+            .iter()
+            .map(|p| p.attr_path.clone())
+            .collect();
         let packages = extract_packages_for_attrs(
             std::path::Path::new(&nixpkgs_path),
             "x86_64-linux",
@@ -956,10 +961,7 @@ mod tests {
             let pkg = match package_map.get(&test_pkg.attr_path) {
                 Some(p) => p,
                 None => {
-                    failures.push(format!(
-                        "{}: Package not extracted",
-                        test_pkg.attr_path
-                    ));
+                    failures.push(format!("{}: Package not extracted", test_pkg.attr_path));
                     continue;
                 }
             };

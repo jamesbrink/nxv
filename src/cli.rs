@@ -653,6 +653,7 @@ impl Cli {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+    use serial_test::serial;
 
     #[test]
     fn test_cli_parsing() {
@@ -729,6 +730,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(env)]
     fn test_update_public_key() {
         let args = Cli::try_parse_from(["nxv", "update", "--public-key", "RWTest123"]).unwrap();
         match args.command {

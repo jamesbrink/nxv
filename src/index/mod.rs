@@ -1349,9 +1349,7 @@ impl Indexer {
 
             // If a large infrastructure file change triggered full extraction,
             // extract all packages from all-packages.nix
-            if needs_full_extraction
-                && let Some(all_attrs_list) = all_attrs
-            {
+            if needs_full_extraction && let Some(all_attrs_list) = all_attrs {
                 for attr in all_attrs_list {
                     target_attr_paths.insert(attr.clone());
                 }
@@ -1493,7 +1491,11 @@ impl Indexer {
                 };
 
                 for pkg in packages {
-                    let key = format!("{}::{}", pkg.attribute_path, pkg.version.as_deref().unwrap_or(""));
+                    let key = format!(
+                        "{}::{}",
+                        pkg.attribute_path,
+                        pkg.version.as_deref().unwrap_or("")
+                    );
                     if let Some(existing) = aggregates.get_mut(&key) {
                         existing.merge(pkg, &system);
                     } else {
@@ -1899,11 +1901,7 @@ fn extract_inherit_attrs(line: &str) -> Option<Vec<String>> {
         .map(|s| s.to_string())
         .collect();
 
-    if attrs.is_empty() {
-        None
-    } else {
-        Some(attrs)
-    }
+    if attrs.is_empty() { None } else { Some(attrs) }
 }
 
 /// Check if an attribute name is a known non-package attribute.
@@ -2631,7 +2629,9 @@ mod tests {
 
         // Assignment with underscore
         assert_eq!(
-            extract_assignment_attr("  node_20 = callPackage ../development/interpreters/node { };"),
+            extract_assignment_attr(
+                "  node_20 = callPackage ../development/interpreters/node { };"
+            ),
             Some("node_20".to_string())
         );
 
@@ -2642,10 +2642,7 @@ mod tests {
         );
 
         // Non-assignment (comment)
-        assert_eq!(
-            extract_assignment_attr("  # hello = old version"),
-            None
-        );
+        assert_eq!(extract_assignment_attr("  # hello = old version"), None);
 
         // Non-assignment (no equals sign)
         assert_eq!(extract_assignment_attr("  hello world"), None);
@@ -2675,7 +2672,11 @@ mod tests {
         // Inherit without source (plain inherit)
         assert_eq!(
             extract_inherit_attrs("  inherit foo bar baz;"),
-            Some(vec!["foo".to_string(), "bar".to_string(), "baz".to_string()])
+            Some(vec![
+                "foo".to_string(),
+                "bar".to_string(),
+                "baz".to_string()
+            ])
         );
 
         // Not an inherit statement

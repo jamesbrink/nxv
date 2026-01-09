@@ -16,7 +16,7 @@ const DEFAULT_BUSY_TIMEOUT_SECS: u64 = 5;
 
 /// Current schema version.
 #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
-const SCHEMA_VERSION: u32 = 4;
+const SCHEMA_VERSION: u32 = 3;
 
 /// Supported systems for store paths.
 pub const STORE_PATH_SYSTEMS: [&str; 4] = [
@@ -221,7 +221,7 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_packages_first_date ON package_versions(first_commit_date DESC);
             CREATE INDEX IF NOT EXISTS idx_packages_last_date ON package_versions(last_commit_date DESC);
 
-            -- Covering indexes for optimized search queries (added in v7)
+            -- Covering indexes for optimized search queries
             -- These allow ORDER BY to use the index directly without a separate sort
             CREATE INDEX IF NOT EXISTS idx_attr_date_covering ON package_versions(
                 attribute_path, last_commit_date DESC, name, version
@@ -377,10 +377,9 @@ impl Database {
             )?;
         }
 
-        if current_version < 4 {
-            // Migration v3 -> v4: Add checkpoint table, store_path columns, and covering indexes
-            // This combines multiple incremental migrations into a single v3->v4 upgrade.
-
+        // Ensure all schema elements exist (runs unconditionally for idempotent upgrades)
+        // This handles v3 databases that may be missing newer columns/tables
+        {
             // Create checkpoint_open_ranges table with all columns including per-arch store paths
             self.conn.execute_batch(
                 r#"

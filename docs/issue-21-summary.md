@@ -62,9 +62,19 @@ Instead of extracting all 18,000 packages or none:
 - Added QA scripts: `pre_reindex_qa.sh`, `post_reindex_validation.sh`
 - Added CI quality gate in `publish-index.yml`
 
-### Phase 4: Reindex Required
+### Phase 4: First Commit Extraction Fix
 
-A full reindex from 2017 is required to apply the fixes. The current database was truncated to July 24, 2023 (last known-good date).
+During initial reindex testing, discovered that `index_full` only extracted packages from **changed files** on the first commit, missing the baseline state (~18,000 packages).
+
+**Fix:**
+- Set `needs_full_extraction = commit_idx == 0` to trigger full extraction on first commit
+- Removed `INFRASTRUCTURE_FILES` exclusion from `build_file_attr_map` so `all_attrs` is available
+
+**Result:** Before fix: 14 top-level packages. After fix: 6,483 top-level packages from first 2 commits.
+
+### Phase 5: Reindex In Progress
+
+A full reindex from 2017 is underway with all fixes applied. Verified that commits and versions match actual nixpkgs source.
 
 ## Files Changed
 

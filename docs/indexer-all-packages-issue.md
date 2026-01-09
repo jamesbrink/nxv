@@ -1,17 +1,19 @@
 # Indexer Issue: Missing Package Updates from all-packages.nix
 
-**Status:** Phases 1-5 implementation complete, pending manual reindex
+**Status:** Phases 1-5 implementation complete, full reindex in progress
 **Related Issue:** [#21 - Incomplete set and wrong hashes?](https://github.com/jamesbrink/nxv/issues/21)
 **Date:** 2026-01-09
-**Last Updated:** 2026-01-09 (All implementation complete)
+**Last Updated:** 2026-01-09 (First commit extraction fix added, reindex started)
 
 ## Executive Summary
 
-Investigation revealed **two separate issues** affecting the nxv indexer:
+Investigation revealed **three separate issues** affecting the nxv indexer:
 
 1. **all-packages.nix issue** (primary): When `all-packages.nix` changes, the indexer can't determine which packages were affected due to the `INFRASTRUCTURE_FILES` exclusion. This caused the post-July 2023 data gap.
 
 2. **Wrapper version issue** (secondary): Some packages (neovim, weechat) are wrappers that don't expose `.version`, resulting in "unknown" versions. This affects 33,760 packages (39%) but is a separate issue.
+
+3. **First commit extraction bug** (discovered during reindex): The first commit of `index_full` only extracted packages from changed files, not the baseline state. This caused ~18,000 top-level packages to be missed entirely. Fixed by forcing full extraction on `commit_idx == 0`.
 
 **Pre-July 2023 data quality**: 95-99% extraction success rate for most months. Data is largely usable.
 
@@ -472,10 +474,17 @@ After truncation (2026-01-09):
   - Added quality checks to `publish-index.yml`
   - Validates critical packages, version rates, and extraction quality
 
-- [ ] **4.4** Full reindex from 2017 (manual)
+- [x] **4.4** First commit extraction fix
+  - Fixed bug where first commit only extracted changed files, not baseline state
+  - Added `needs_full_extraction = commit_idx == 0` to capture all packages
+  - Removed INFRASTRUCTURE_FILES exclusion from `build_file_attr_map`
+  - Before fix: 14 top-level packages; After fix: 6,483 top-level packages
+
+- [ ] **4.5** Full reindex from 2017 (in progress)
   - Run: `./scripts/pre_reindex_qa.sh --nixpkgs /path/to/nixpkgs`
   - Then: `cargo run --features indexer --release -- index --nixpkgs /path/to/nixpkgs --full`
   - Then: `./scripts/post_reindex_validation.sh`
+  - **Current progress:** Indexing from 2017, verified commits and versions match nixpkgs
 
 ### Phase 5: Documentation & Cleanup (Completed)
 

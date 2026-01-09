@@ -1054,8 +1054,12 @@
           </div>
         `;
           resultsInfo.style.display = 'none';
+          updateUrl('');
           return;
         }
+
+        // Update URL with current search parameters
+        updateUrl(query);
 
         container.innerHTML =
           '<div class="loading"><div class="spinner"></div><p>Searching...</p></div>';
@@ -1537,9 +1541,71 @@
         }
       });
 
+      // URL parameter handling
+      const initFromUrl = () => {
+        const urlParams = new URLSearchParams(window.location.search);
+        const q = urlParams.get('q');
+        const version = urlParams.get('version');
+        const exact = urlParams.get('exact');
+        const sort = urlParams.get('sort');
+        const platform = urlParams.get('platform');
+
+        if (q) {
+          searchInput.value = q;
+        }
+        if (version) {
+          document.getElementById('versionFilter').value = version;
+          versionAutoPopulated = false;
+        }
+        if (exact === 'true') {
+          document.getElementById('exactMatch').checked = true;
+        }
+        if (sort && ['relevance', 'date', 'name', 'version'].includes(sort)) {
+          document.getElementById('sortOrder').value = sort;
+        }
+        if (platform) {
+          document.getElementById('archFilter').value = platform;
+        }
+
+        // Trigger search if query exists
+        if (q && q.trim()) {
+          search(q);
+        }
+      };
+
+      const updateUrl = (query) => {
+        const params = new URLSearchParams();
+        if (query && query.trim()) {
+          params.set('q', query.trim());
+        }
+        const version = document.getElementById('versionFilter').value.trim();
+        if (version && !versionAutoPopulated) {
+          params.set('version', version);
+        }
+        if (document.getElementById('exactMatch').checked) {
+          params.set('exact', 'true');
+        }
+        const sort = document.getElementById('sortOrder').value;
+        if (sort !== 'relevance') {
+          params.set('sort', sort);
+        }
+        const platform = document.getElementById('archFilter').value;
+        if (platform) {
+          params.set('platform', platform);
+        }
+
+        const newUrl = params.toString()
+          ? `${window.location.pathname}?${params.toString()}`
+          : window.location.pathname;
+        window.history.replaceState({}, '', newUrl);
+      };
+
       // Initialize
       loadStats();
-      searchInput.focus();
+      initFromUrl();
+      if (!searchInput.value) {
+        searchInput.focus();
+      }
     </script>
   </body>
 </html>

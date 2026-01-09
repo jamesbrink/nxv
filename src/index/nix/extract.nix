@@ -209,9 +209,37 @@ let
   # Handles: semver (1.2.3), dates (2021-07-29), compact dates (202202), etc.
   extractVersionFromName = name:
     let
+      # Strip common file extensions before pattern matching
+      # Handles: .tgz, .tar.gz, .tar.bz2, .tar.xz, .zip, .src, .orig
+      stripExtension = s:
+        let
+          extensions = [
+            "\\.tar\\.gz$" "\\.tar\\.bz2$" "\\.tar\\.xz$" "\\.tar\\.zst$"
+            "\\.tgz$" "\\.tbz2$" "\\.txz$"
+            "\\.zip$" "\\.gz$" "\\.bz2$" "\\.xz$"
+            "\\.src$" "\\.orig$" "\\.source$"
+          ];
+          stripOne = str: ext:
+            let m = builtins.match "(.*)${ext}" str;
+            in if m != null then builtins.elemAt m 0 else str;
+          stripAll = str: exts:
+            if builtins.length exts == 0 then str
+            else stripAll (stripOne str (builtins.elemAt exts 0)) (builtins.tail exts);
+        in stripAll s extensions;
+
+      cleanName = stripExtension name;
+
       # Try various patterns in order of specificity
       patterns = [
-        # Semver with optional letter suffix: name-1.2.3, name-1.2.3a
+        # Version with internal hyphen and suffix: name-0.9.8.6-0.rc1, name-1.0-beta1
+        ".*-([0-9]+\\.[0-9]+(\\.[0-9]+)*-[0-9a-z.]+)$"
+        # Pre-release versions: name-0.99.1pre130312, name-1.0alpha2
+        ".*-([0-9]+\\.[0-9]+(\\.[0-9]+)*[a-z]+[0-9]+)$"
+        # Milestone versions: name-0.0.m8, name-1.0.rc1 (letter after dot)
+        ".*-([0-9]+\\.[0-9]+\\.[a-z]+[0-9]*)$"
+        # Semver with letter+digit suffix: name-1.2.3rc1, name-2.0beta2
+        ".*-([0-9]+\\.[0-9]+(\\.[0-9]+)*[a-z]+[0-9]*)$"
+        # Semver with optional single letter suffix: name-1.2.3, name-1.2.3a
         ".*-([0-9]+\\.[0-9]+(\\.[0-9]+)*[a-z]?)$"
         # v-prefixed version: name-v1.2.3
         ".*-v([0-9]+\\.[0-9]+(\\.[0-9]+)*)$"
@@ -233,7 +261,7 @@ let
 
       tryPattern = pattern:
         let
-          match = builtins.match pattern name;
+          match = builtins.match pattern cleanName;
         in
           if match != null && builtins.length match > 0
           then builtins.elemAt match 0

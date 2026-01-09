@@ -14,19 +14,18 @@ pub const DEFAULT_MANIFEST_URL: &str =
 /// Check if a manifest's index is compatible with this client.
 ///
 /// Returns an error if the index requires a newer schema version than we support.
+/// Only checks when min_version is explicitly set in the manifest.
+/// Old manifests without min_version rely on post-download database validation.
 fn check_manifest_compatibility(manifest: &Manifest) -> Result<()> {
-    // min_version indicates the minimum client version needed to read this index.
-    // If not set, fall back to version (for backward compat with old manifests).
-    let required_version = manifest.min_version.unwrap_or(manifest.version);
-
-    if required_version > MIN_READABLE_SCHEMA {
-        return Err(NxvError::IncompatibleIndex(format!(
-            "index requires schema version {} but this build only supports up to {}. \
-             Please upgrade nxv to use this index.",
-            required_version, MIN_READABLE_SCHEMA
-        )));
+    if let Some(required_version) = manifest.min_version {
+        if required_version > MIN_READABLE_SCHEMA {
+            return Err(NxvError::IncompatibleIndex(format!(
+                "index requires schema version {} but this build only supports up to {}. \
+                 Please upgrade nxv to use this index.",
+                required_version, MIN_READABLE_SCHEMA
+            )));
+        }
     }
-
     Ok(())
 }
 

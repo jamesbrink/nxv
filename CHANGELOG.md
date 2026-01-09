@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - `--force` flag now properly bypasses schema validation during update
-- Incremental indexing now handles merge commits and `pkgs/by-name` paths correctly
+- Incremental indexing now handles merge commits and `pkgs/by-name` paths
 
 ## [0.1.3] - 2026-01-04
 
@@ -36,14 +36,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Blocking database calls now use `spawn_blocking` to prevent async runtime starvation
+- Blocking database calls now use `spawn_blocking` to prevent runtime starvation
 - Rate limiting and security hardening for API endpoints
 
 ## [0.1.2] - 2026-01-03
 
 ### Added
 
-- Dynamic tab completion for package names in bash/zsh/fish
+- Dynamic tab completion for package names in bash, zsh, and fish
 - `/release-notes` command for pre-release checks
 - `last_indexed_date` field in stats output
 
@@ -54,57 +54,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- DevShell now uses `bashInteractive` for proper readline/completion support
+- DevShell now uses `bashInteractive` for proper readline and completion support
 
 ## [0.1.1] - 2026-01-03
 
 ### Added
 
-- Cross-platform release builds (Linux x86_64/aarch64, macOS x86_64/ARM64)
+- Cross-platform release builds for Linux x86_64, Linux aarch64, macOS x86_64,
+  and macOS ARM64
 - Static musl binaries for Linux
 
 ### Fixed
 
 - crates.io version check for first-time publish
-- Excluded large files (nixpkgs, publish artifacts) from crate package
+- Excluded large files from crate package
 
 ## [0.1.0] - 2024-12-30
 
 ### Added
 
 - Initial release of nxv (Nix Versions)
-- **Search functionality**
-  - Search packages by name (prefix match)
-  - Exact name matching with `--exact` flag
-  - Version filtering with `--version` flag
-  - Description search using FTS5 with `--desc` flag
-  - License filtering with `--license` flag
-  - Multiple output formats: table (default), JSON, plain text
-  - Sort options: date, version, name
-  - Result limiting with `--limit`
-  - Platform display with `--show-platforms`
-- **Version history**
-  - View all versions of a package with `nxv history <package>`
-  - Show specific version availability with `nxv history <package> <version>`
-- **Index management**
-  - Download pre-built index with `nxv update`
-  - Force full re-download with `nxv update --force`
-  - Delta update support (infrastructure ready)
-- **Index statistics**
-  - View index info with `nxv info`
-  - Shows database size, commit range, package counts
-- **Shell completions**
-  - Generate completions with `nxv completions <shell>`
-  - Supports bash, zsh, fish, powershell, elvish
-- **Bloom filter**
-  - Fast O(1) negative lookups for exact name searches
-  - Instant "package not found" for typos
-- **Indexer** (feature-gated)
-  - Build index from local nixpkgs clone with `nxv index`
-  - Incremental indexing from last indexed commit
-  - Full rebuild with `--full` flag
-  - Checkpoint/resume support with Ctrl+C handling
-  - Progress bars during indexing
+
+#### Search
+
+- Search packages by name with prefix matching
+- Exact name matching with `--exact` flag
+- Version filtering with `--version` flag
+- Description search using FTS5 with `--desc` flag
+- License filtering with `--license` flag
+- Multiple output formats: table (default), JSON, plain text
+- Sort options: date, version, name
+- Result limiting with `--limit`
+- Platform display with `--show-platforms`
+
+#### Version History
+
+- View all versions of a package with `nxv history <package>`
+- Show specific version availability with `nxv history <package> <version>`
+
+#### Index Management
+
+- Download pre-built index with `nxv update`
+- Force full re-download with `nxv update --force`
+- Delta update support (infrastructure ready)
+
+#### Index Statistics
+
+- View index info with `nxv stats`
+- Shows database size, commit range, and package counts
+
+#### Shell Completions
+
+- Generate completions with `nxv completions <shell>`
+- Supports bash, zsh, fish, powershell, and elvish
+
+#### Bloom Filter
+
+- Fast O(1) negative lookups for exact name searches
+- Instant "package not found" response for typos
+
+#### Indexer (feature-gated)
+
+- Build index from local nixpkgs clone with `nxv index`
+- Incremental indexing from last indexed commit
+- Full rebuild with `--full` flag
+- Checkpoint and resume support with Ctrl+C handling
+- Progress bars during indexing
 
 ### Technical Details
 
@@ -112,7 +127,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Zstd compression for index distribution
 - SHA256 verification for downloads
 - Rust 2024 edition
-- 10MB release binary size
+- 10 MB release binary size
 
 [unreleased]: https://github.com/jamesbrink/nxv/compare/v0.1.3...HEAD
 [0.1.3]: https://github.com/jamesbrink/nxv/compare/v0.1.2...v0.1.3

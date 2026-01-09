@@ -2731,4 +2731,125 @@ index abc123..def456 100644
         assert!(!is_non_package_attr("callPackage")); // Note: singular is OK
         assert!(!is_non_package_attr("gnome-shell"));
     }
+
+    // Phase 1 tests: Version extraction and version_source tracking
+
+    #[test]
+    fn test_package_aggregate_with_version() {
+        let pkg = extractor::PackageInfo {
+            name: "hello".to_string(),
+            version: Some("2.12.1".to_string()),
+            version_source: Some("direct".to_string()),
+            attribute_path: "hello".to_string(),
+            description: Some("A program that prints Hello, world".to_string()),
+            license: None,
+            homepage: None,
+            maintainers: None,
+            platforms: None,
+            source_path: None,
+            known_vulnerabilities: None,
+            out_path: None,
+        };
+
+        let aggregate = PackageAggregate::new(pkg, "x86_64-linux");
+
+        assert_eq!(aggregate.name, "hello");
+        assert_eq!(aggregate.version, "2.12.1");
+        assert_eq!(aggregate.version_source, Some("direct".to_string()));
+    }
+
+    #[test]
+    fn test_package_aggregate_with_none_version() {
+        let pkg = extractor::PackageInfo {
+            name: "breakpointHook".to_string(),
+            version: None,
+            version_source: None,
+            attribute_path: "breakpointHook".to_string(),
+            description: Some("A build hook".to_string()),
+            license: None,
+            homepage: None,
+            maintainers: None,
+            platforms: None,
+            source_path: None,
+            known_vulnerabilities: None,
+            out_path: None,
+        };
+
+        let aggregate = PackageAggregate::new(pkg, "x86_64-linux");
+
+        assert_eq!(aggregate.name, "breakpointHook");
+        assert_eq!(aggregate.version, ""); // Should default to empty string
+        assert_eq!(aggregate.version_source, None);
+    }
+
+    #[test]
+    fn test_package_aggregate_version_source_propagates() {
+        // Test that version_source is properly propagated through the system
+        let pkg = extractor::PackageInfo {
+            name: "neovim".to_string(),
+            version: Some("0.9.5".to_string()),
+            version_source: Some("unwrapped".to_string()), // Version came from unwrapped
+            attribute_path: "neovim".to_string(),
+            description: Some("Vim-fork focused on extensibility".to_string()),
+            license: None,
+            homepage: None,
+            maintainers: None,
+            platforms: None,
+            source_path: None,
+            known_vulnerabilities: None,
+            out_path: None,
+        };
+
+        let aggregate = PackageAggregate::new(pkg, "x86_64-linux");
+
+        assert_eq!(aggregate.version_source, Some("unwrapped".to_string()));
+
+        // Test conversion to OpenRange preserves version_source
+        let open_range = OpenRange {
+            name: aggregate.name.clone(),
+            version: aggregate.version.clone(),
+            version_source: aggregate.version_source.clone(),
+            first_commit_hash: "def456".to_string(),
+            first_commit_date: Utc::now(),
+            attribute_path: aggregate.attribute_path.clone(),
+            description: aggregate.description.clone(),
+            license: None,
+            homepage: None,
+            maintainers: None,
+            platforms: None,
+            source_path: None,
+            known_vulnerabilities: None,
+            store_paths: HashMap::new(),
+        };
+
+        assert_eq!(open_range.version_source, Some("unwrapped".to_string()));
+
+        // Test conversion to PackageVersion preserves version_source
+        let pkg_version = open_range.to_package_version("ghi789", Utc::now());
+        assert_eq!(pkg_version.version_source, Some("unwrapped".to_string()));
+    }
+
+    #[test]
+    fn test_package_aggregate_name_extracted_version() {
+        // Test that version extracted from name is tracked
+        let pkg = extractor::PackageInfo {
+            name: "python-3.11.7".to_string(),
+            version: Some("3.11.7".to_string()),
+            version_source: Some("name".to_string()), // Version came from name parsing
+            attribute_path: "python311".to_string(),
+            description: Some("Python interpreter".to_string()),
+            license: None,
+            homepage: None,
+            maintainers: None,
+            platforms: None,
+            source_path: None,
+            known_vulnerabilities: None,
+            out_path: None,
+        };
+
+        let aggregate = PackageAggregate::new(pkg, "x86_64-linux");
+
+        assert_eq!(aggregate.version, "3.11.7");
+        assert_eq!(aggregate.version_source, Some("name".to_string()));
+    }
 }

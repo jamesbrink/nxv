@@ -746,4 +746,145 @@ mod tests {
             }
         }
     }
+
+    /// Test the version extraction fallback chain: direct -> unwrapped -> passthru -> name
+    /// This verifies the Phase 1 version extraction improvements work correctly.
+    #[test]
+    fn test_version_extraction_fallback_chain() {
+        let nix_check = Command::new("nix").arg("--version").output();
+        if nix_check.is_err() || !nix_check.unwrap().status.success() {
+            eprintln!("Skipping: nix not available");
+            return;
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path();
+        std::fs::create_dir_all(path.join("pkgs")).unwrap();
+
+        // Create test packages with different version extraction scenarios
+        let default_nix = r#"
+{ system, config }:
+{
+  # Direct version - should use "direct" source
+  directVersion = {
+    pname = "direct-pkg";
+    version = "1.0.0";
+    type = "derivation";
+    meta = { description = "Package with direct version"; };
+  };
+
+  # Wrapper pattern - version from unwrapped
+  wrapperPkg = {
+    pname = "wrapper-pkg";
+    type = "derivation";
+    unwrapped = {
+      version = "2.0.0";
+    };
+    meta = { description = "Wrapper without direct version"; };
+  };
+
+  # Passthru pattern - version from passthru.unwrapped
+  passthruPkg = {
+    pname = "passthru-pkg";
+    type = "derivation";
+    passthru = {
+      unwrapped = {
+        version = "3.0.0";
+      };
+    };
+    meta = { description = "Package with passthru unwrapped version"; };
+  };
+
+  # Name-based version - version extracted from pname
+  namePkg = {
+    pname = "name-pkg-4.0.0";
+    type = "derivation";
+    meta = { description = "Package with version in name"; };
+  };
+
+  # Truly versionless - no version anywhere
+  versionlessPkg = {
+    pname = "versionless-hook";
+    type = "derivation";
+    meta = { description = "A build hook with no version"; };
+  };
+}
+"#;
+        std::fs::write(path.join("default.nix"), default_nix).unwrap();
+
+        let packages = extract_packages_for_attrs(path, "x86_64-linux", &[]).unwrap();
+
+        // Test direct version extraction
+        let direct = packages.iter().find(|p| p.name == "direct-pkg");
+        assert!(direct.is_some(), "Should find direct-pkg");
+        let direct = direct.unwrap();
+        assert_eq!(direct.version.as_deref(), Some("1.0.0"));
+        assert_eq!(direct.version_source.as_deref(), Some("direct"));
+
+        // Test wrapper version extraction
+        let wrapper = packages.iter().find(|p| p.name == "wrapper-pkg");
+        assert!(wrapper.is_some(), "Should find wrapper-pkg");
+        let wrapper = wrapper.unwrap();
+        assert_eq!(wrapper.version.as_deref(), Some("2.0.0"));
+        assert_eq!(wrapper.version_source.as_deref(), Some("unwrapped"));
+
+        // Test passthru version extraction
+        let passthru = packages.iter().find(|p| p.name == "passthru-pkg");
+        assert!(passthru.is_some(), "Should find passthru-pkg");
+        let passthru = passthru.unwrap();
+        assert_eq!(passthru.version.as_deref(), Some("3.0.0"));
+        assert_eq!(passthru.version_source.as_deref(), Some("passthru"));
+
+        // Test name-based version extraction
+        let name_pkg = packages.iter().find(|p| p.name == "name-pkg-4.0.0");
+        assert!(name_pkg.is_some(), "Should find name-pkg-4.0.0");
+        let name_pkg = name_pkg.unwrap();
+        assert_eq!(name_pkg.version.as_deref(), Some("4.0.0"));
+        assert_eq!(name_pkg.version_source.as_deref(), Some("name"));
+
+        // Test versionless package
+        let versionless = packages.iter().find(|p| p.name == "versionless-hook");
+        assert!(versionless.is_some(), "Should find versionless-hook");
+        let versionless = versionless.unwrap();
+        assert!(
+            versionless.version.is_none() || versionless.version.as_deref() == Some(""),
+            "Versionless package should have None or empty version"
+        );
+    }
+
+    /// Test that version_source field is properly populated
+    #[test]
+    fn test_version_source_field_populated() {
+        let nix_check = Command::new("nix").arg("--version").output();
+        if nix_check.is_err() || !nix_check.unwrap().status.success() {
+            eprintln!("Skipping: nix not available");
+            return;
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path();
+        std::fs::create_dir_all(path.join("pkgs")).unwrap();
+
+        let default_nix = r#"
+{ system, config }:
+{
+  hello = {
+    pname = "hello";
+    version = "2.12.1";
+    type = "derivation";
+    meta = { description = "Hello world"; };
+  };
+}
+"#;
+        std::fs::write(path.join("default.nix"), default_nix).unwrap();
+
+        let packages = extract_packages_for_attrs(path, "x86_64-linux", &["hello".to_string()])
+            .unwrap();
+
+        assert_eq!(packages.len(), 1);
+        let hello = &packages[0];
+        assert_eq!(hello.name, "hello");
+        assert_eq!(hello.version.as_deref(), Some("2.12.1"));
+        assert_eq!(hello.version_source.as_deref(), Some("direct"));
+    }
 }

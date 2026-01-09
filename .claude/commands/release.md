@@ -28,9 +28,7 @@ If `git status` shows uncommitted changes, stop and inform the user.
 1. Get the current version from `Cargo.toml`.
 2. Get the last tag with `git describe --tags --abbrev=0`.
 3. Get commits since last tag with `git log --oneline <last-tag>..HEAD`.
-4. Get today's UTC timestamp with `date -u +%Y-%m-%dT%H:%M:%SZ`.
-5. Check the `created` timestamp in `flake.nix` Docker config.
-6. Read current `CHANGELOG.md` to see unreleased section.
+4. Read current `CHANGELOG.md` to see unreleased section.
 
 ## Phase 3: Determine Version
 
@@ -71,17 +69,16 @@ Release Notes:
 Files to modify:
   1. Cargo.toml - bump version to A.B.C
   2. CHANGELOG.md - move Unreleased items to [A.B.C] section
-  3. flake.nix - update Docker timestamp
 
 Actions after commit:
-  4. Commit with message "chore: bump version to A.B.C for release"
-  5. Create and push tag vA.B.C
+  3. Commit with message "chore: release A.B.C"
+  4. Create and push tag vA.B.C
 
 CI/CD will then:
   - Build static binaries (Linux x86_64/aarch64, macOS x86_64/ARM64)
   - Create GitHub Release with binaries and checksums
   - Publish to crates.io
-  - Push Docker image to ghcr.io/jamesbrink/nxv
+  - Push Docker image to ghcr.io/jamesbrink/nxv (timestamp derived from commit)
   - Publish to FlakeHub
 
 Proceed? Enter version number to confirm, or "abort" to cancel.
@@ -109,18 +106,14 @@ Move the `[Unreleased]` section contents to a new version section:
    - Change `[unreleased]` link to compare against new tag.
    - Add new version link.
 
-### Step 3: Update flake.nix
-
-Update the Docker `created` timestamp to today's UTC date.
-
-### Step 4: Commit changes
+### Step 3: Commit changes
 
 ```bash
-git add Cargo.toml CHANGELOG.md flake.nix
-git commit -m "chore: bump version to A.B.C for release"
+git add Cargo.toml CHANGELOG.md
+git commit -m "chore: release A.B.C"
 ```
 
-### Step 5: Create and push tag
+### Step 4: Create and push tag
 
 ```bash
 git tag vA.B.C
@@ -128,7 +121,7 @@ git push origin main
 git push origin vA.B.C
 ```
 
-### Step 6: Report completion
+### Step 5: Report completion
 
 Provide link to [GitHub Actions][actions] and remind user to monitor the
 release workflow.
@@ -141,4 +134,4 @@ release workflow.
 - Stop immediately if any pre-flight check fails.
 - The changelog must be updated as part of the release.
 - Version bumps must follow semver conventions.
-- The `created` timestamp in `flake.nix` only affects Docker image metadata.
+- Docker image timestamp is derived automatically from git commit date.

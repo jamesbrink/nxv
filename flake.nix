@@ -28,6 +28,10 @@
         overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs { inherit system overlays; };
 
+        # Derive Docker timestamp from git commit (format: 20260108123456 -> 2026-01-08T12:34:56Z)
+        lastModified = self.lastModifiedDate;
+        dockerTimestamp = "${builtins.substring 0 4 lastModified}-${builtins.substring 4 2 lastModified}-${builtins.substring 6 2 lastModified}T${builtins.substring 8 2 lastModified}:${builtins.substring 10 2 lastModified}:${builtins.substring 12 2 lastModified}Z";
+
         # Use stable Rust toolchain
         rustToolchain = pkgs.rust-bin.stable.latest.default.override {
           extensions = [ "rust-src" "rust-analyzer" ];
@@ -287,7 +291,7 @@
         nxv-docker = if pkgs.stdenv.isLinux then pkgs.dockerTools.buildLayeredImage {
           name = "nxv";
           tag = crateInfo.version;
-          created = "2026-01-04T19:31:15Z";
+          created = dockerTimestamp;
 
           contents = [
             nxv-indexer

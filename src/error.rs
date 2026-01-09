@@ -15,6 +15,9 @@ pub enum NxvError {
     #[error("Index is corrupted: {0}. Run 'nxv update --force' to re-download.")]
     CorruptIndex(String),
 
+    #[error("Incompatible index: {0}")]
+    IncompatibleIndex(String),
+
     #[error("Network error: {0}")]
     Network(#[from] reqwest::Error),
 

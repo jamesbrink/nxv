@@ -110,7 +110,7 @@ impl Database {
         })?;
 
         if min_schema_version > MIN_READABLE_SCHEMA {
-            return Err(NxvError::CorruptIndex(format!(
+            return Err(NxvError::IncompatibleIndex(format!(
                 "index requires schema version {} but this build only supports up to {}. \
                  Please upgrade nxv to use this index.",
                 min_schema_version, MIN_READABLE_SCHEMA

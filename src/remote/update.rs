@@ -20,7 +20,7 @@ fn check_manifest_compatibility(manifest: &Manifest) -> Result<()> {
     let required_version = manifest.min_version.unwrap_or(manifest.version);
 
     if required_version > MIN_READABLE_SCHEMA {
-        return Err(NxvError::CorruptIndex(format!(
+        return Err(NxvError::IncompatibleIndex(format!(
             "index requires schema version {} but this build only supports up to {}. \
              Please upgrade nxv to use this index.",
             required_version, MIN_READABLE_SCHEMA
@@ -120,6 +120,9 @@ pub fn check_for_updates<P: AsRef<Path>>(
         public_key,
         timeout_secs,
     )?;
+
+    // Early compatibility check - warn user before they attempt to update
+    check_manifest_compatibility(&manifest)?;
 
     // Check if local index exists
     let db_path = db_path.as_ref();

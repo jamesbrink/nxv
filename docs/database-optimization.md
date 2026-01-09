@@ -6,7 +6,7 @@
 
 - **Last indexed commit:** `d1da305`
 - **Coverage:** 2017-01-02 → 2023-05-30 (indexing still in progress)
-- **Schema version:** 7
+- **Schema version:** 4
 
 ### Database Size
 

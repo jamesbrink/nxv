@@ -16,7 +16,7 @@ const DEFAULT_BUSY_TIMEOUT_SECS: u64 = 5;
 
 /// Current schema version.
 #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
-const SCHEMA_VERSION: u32 = 7;
+const SCHEMA_VERSION: u32 = 4;
 
 /// Supported systems for store paths.
 pub const STORE_PATH_SYSTEMS: [&str; 4] = [
@@ -378,7 +378,10 @@ impl Database {
         }
 
         if current_version < 4 {
-            // Migration v3 -> v4: Add checkpoint_open_ranges table
+            // Migration v3 -> v4: Add checkpoint table, store_path columns, and covering indexes
+            // This combines multiple incremental migrations into a single v3->v4 upgrade.
+
+            // Create checkpoint_open_ranges table with all columns including per-arch store paths
             self.conn.execute_batch(
                 r#"
                 CREATE TABLE IF NOT EXISTS checkpoint_open_ranges (
@@ -395,14 +398,16 @@ impl Database {
                     platforms TEXT,
                     source_path TEXT,
                     known_vulnerabilities TEXT,
-                    store_path TEXT
+                    store_path TEXT,
+                    store_path_x86_64_linux TEXT,
+                    store_path_aarch64_linux TEXT,
+                    store_path_x86_64_darwin TEXT,
+                    store_path_aarch64_darwin TEXT
                 );
                 "#,
             )?;
-        }
 
-        if current_version < 5 {
-            // Migration v4 -> v5: Add store_path column for fetchClosure support
+            // Add store_path column to package_versions if not present
             let has_store_path: bool = self
                 .conn
                 .query_row(
@@ -419,27 +424,7 @@ impl Database {
                 )?;
             }
 
-            // Also add to checkpoint_open_ranges if not present
-            let checkpoint_has_store_path: bool = self
-                .conn
-                .query_row(
-                    "SELECT COUNT(*) > 0 FROM pragma_table_info('checkpoint_open_ranges') WHERE name='store_path'",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap_or(false);
-
-            if !checkpoint_has_store_path {
-                self.conn.execute(
-                    "ALTER TABLE checkpoint_open_ranges ADD COLUMN store_path TEXT",
-                    [],
-                )?;
-            }
-        }
-
-        if current_version < 6 {
-            // Migration v5 -> v6: Add per-architecture store_path columns
-            // Add columns to package_versions
+            // Add per-architecture store_path columns to package_versions
             for system in STORE_PATH_SYSTEMS {
                 let col_name = format!("store_path_{}", system.replace('-', "_"));
                 let has_col: bool = self
@@ -464,51 +449,12 @@ impl Database {
 
             // Migrate existing store_path data to store_path_x86_64_linux
             // (since previous indexer used x86_64-linux as default)
-            let has_old_store_path: bool = self
-                .conn
-                .query_row(
-                    "SELECT COUNT(*) > 0 FROM pragma_table_info('package_versions') WHERE name='store_path'",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap_or(false);
+            self.conn.execute(
+                "UPDATE package_versions SET store_path_x86_64_linux = store_path WHERE store_path IS NOT NULL AND store_path_x86_64_linux IS NULL",
+                [],
+            )?;
 
-            if has_old_store_path {
-                self.conn.execute(
-                    "UPDATE package_versions SET store_path_x86_64_linux = store_path WHERE store_path IS NOT NULL AND store_path_x86_64_linux IS NULL",
-                    [],
-                )?;
-            }
-
-            // Add columns to checkpoint_open_ranges
-            for system in STORE_PATH_SYSTEMS {
-                let col_name = format!("store_path_{}", system.replace('-', "_"));
-                let has_col: bool = self
-                    .conn
-                    .query_row(
-                        &format!(
-                            "SELECT COUNT(*) > 0 FROM pragma_table_info('checkpoint_open_ranges') WHERE name='{}'",
-                            col_name
-                        ),
-                        [],
-                        |row| row.get(0),
-                    )
-                    .unwrap_or(false);
-
-                if !has_col {
-                    self.conn.execute(
-                        &format!(
-                            "ALTER TABLE checkpoint_open_ranges ADD COLUMN {} TEXT",
-                            col_name
-                        ),
-                        [],
-                    )?;
-                }
-            }
-        }
-
-        if current_version < 7 {
-            // Migration v6 -> v7: Add covering indexes for optimized search queries
+            // Add covering indexes for optimized search queries
             // These indexes allow ORDER BY to use the index directly without a separate sort step
             self.conn.execute_batch(
                 r#"

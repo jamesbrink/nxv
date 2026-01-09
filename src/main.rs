@@ -1149,7 +1149,6 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
 
     let nixpkgs_path = paths::expand_tilde(&args.nixpkgs_path);
     eprintln!("Indexing nixpkgs from {:?}", nixpkgs_path);
-    eprintln!("Checkpoint interval: {} commits", args.checkpoint_interval);
 
     let config = IndexerConfig {
         checkpoint_interval: args.checkpoint_interval,
@@ -1184,10 +1183,8 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
     .expect("Error setting Ctrl+C handler");
 
     let result = if args.full {
-        eprintln!("Performing full rebuild...");
         indexer.index_full(&nixpkgs_path, &cli.db_path)?
     } else {
-        eprintln!("Performing incremental index...");
         indexer.index_incremental(&nixpkgs_path, &cli.db_path)?
     };
 

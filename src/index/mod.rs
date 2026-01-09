@@ -799,6 +799,12 @@ impl Indexer {
 
         let mut db = Database::open(&db_path)?;
 
+        eprintln!("Performing full index rebuild...");
+        eprintln!(
+            "Checkpoint interval: {} commits",
+            self.config.checkpoint_interval
+        );
+
         // Get indexable commits touching package paths
         let mut commits = repo.get_indexable_commits_touching_paths(
             &["pkgs"],
@@ -896,6 +902,12 @@ impl Indexer {
 
         match last_commit {
             Some(hash) => {
+                eprintln!("Performing incremental index from commit {}...", &hash[..7]);
+                eprintln!(
+                    "Checkpoint interval: {} commits",
+                    self.config.checkpoint_interval
+                );
+
                 // Get current HEAD
                 let head_hash = repo.head_commit()?;
 

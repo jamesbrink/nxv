@@ -205,17 +205,103 @@ let
        then path
        else null;
 
+  # Extract version from package name using regex patterns
+  # Handles: semver (1.2.3), dates (2021-07-29), compact dates (202202), etc.
+  extractVersionFromName = name:
+    let
+      # Try various patterns in order of specificity
+      patterns = [
+        # Semver with optional letter suffix: name-1.2.3, name-1.2.3a
+        ".*-([0-9]+\\.[0-9]+(\\.[0-9]+)*[a-z]?)$"
+        # v-prefixed version: name-v1.2.3
+        ".*-v([0-9]+\\.[0-9]+(\\.[0-9]+)*)$"
+        # ISO date: name-2021-07-29
+        ".*-([0-9]{4}-[0-9]{2}-[0-9]{2})$"
+        # Compact date: name-202202, name-20220215
+        ".*-([0-9]{6,8})$"
+        # Java-style: name-7u111b01
+        ".*-([0-9]+u[0-9]+[a-z][0-9]*)$"
+        # Release prefix: name-r10e
+        ".*-(r[0-9]+[a-z]?)$"
+        # Alphanumeric: name-9100h, name-21a
+        ".*-([0-9]+[a-z][0-9]*)$"
+        # Git hash (7-12 chars): name-08ae128
+        ".*-([a-f0-9]{7,12})$"
+        # Single number: name-42
+        ".*-([0-9]+)$"
+      ];
+
+      tryPattern = pattern:
+        let
+          match = builtins.match pattern name;
+        in
+          if match != null && builtins.length match > 0
+          then builtins.elemAt match 0
+          else null;
+
+      # Try each pattern until one matches
+      findVersion = pats:
+        if builtins.length pats == 0 then null
+        else
+          let
+            result = tryPattern (builtins.elemAt pats 0);
+          in
+            if result != null then result
+            else findVersion (builtins.tail pats);
+
+      extracted = tryDeep (findVersion patterns);
+    in
+      if extracted != null then extracted else null;
+
+  # Get version with fallback chain and source tracking
+  # Returns: { version = "1.2.3"; source = "direct"|"unwrapped"|"passthru"|"name"|null; }
+  getVersionWithSource = pkg: name:
+    let
+      # 1. Try direct pkg.version
+      directVersion = tryDeep (pkg.version or null);
+      directResult = if directVersion != null && directVersion != ""
+        then { version = toString' directVersion; source = "direct"; }
+        else null;
+
+      # 2. Try pkg.unwrapped.version (wrapper pattern)
+      unwrappedVersion = tryDeep ((pkg.unwrapped.version or null));
+      unwrappedResult = if unwrappedVersion != null && unwrappedVersion != ""
+        then { version = toString' unwrappedVersion; source = "unwrapped"; }
+        else null;
+
+      # 3. Try pkg.passthru.unwrapped.version
+      passthruVersion = tryDeep ((pkg.passthru.unwrapped.version or null));
+      passthruResult = if passthruVersion != null && passthruVersion != ""
+        then { version = toString' passthruVersion; source = "passthru"; }
+        else null;
+
+      # 4. Try extracting from package name
+      nameVersion = if name != null then extractVersionFromName name else null;
+      nameResult = if nameVersion != null
+        then { version = nameVersion; source = "name"; }
+        else null;
+
+      # Return first successful result, or null
+      result =
+        if directResult != null then directResult
+        else if unwrappedResult != null then unwrappedResult
+        else if passthruResult != null then passthruResult
+        else if nameResult != null then nameResult
+        else { version = null; source = null; };
+    in result;
+
   # Safely extract package info - each field is independently evaluated
   getPackageInfo = attrPath: pkg:
     let
       meta = pkg.meta or {};
       name = tryDeep (toString' (pkg.pname or pkg.name or attrPath));
-      version = tryDeep (toString' (pkg.version or "unknown"));
+      versionInfo = getVersionWithSource pkg name;
       sourcePath = getSourcePath meta;
       storePath = getStorePath pkg;
     in {
       name = if name != null then name else attrPath;
-      version = if version != null then version else "unknown";
+      version = versionInfo.version;
+      versionSource = versionInfo.source;
       attrPath = attrPath;
       description = safeString (meta.description or null);
       homepage = safeString (meta.homepage or null);

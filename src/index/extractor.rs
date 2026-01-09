@@ -14,7 +14,11 @@ use tracing::{instrument, trace};
 #[serde(rename_all = "camelCase")]
 pub struct PackageInfo {
     pub name: String,
-    pub version: String,
+    /// Package version. None if version could not be extracted from any source.
+    pub version: Option<String>,
+    /// Source of the version information: "direct", "unwrapped", "passthru", "name", or null.
+    /// Tracks how the version was extracted for debugging and quality tracking.
+    pub version_source: Option<String>,
     #[serde(rename = "attrPath")]
     pub attribute_path: String,
     pub description: Option<String>,
@@ -292,7 +296,8 @@ mod tests {
     fn test_package_info_json_serialization() {
         let pkg = PackageInfo {
             name: "test".to_string(),
-            version: "1.0.0".to_string(),
+            version: Some("1.0.0".to_string()),
+            version_source: Some("direct".to_string()),
             attribute_path: "test".to_string(),
             description: Some("A test package".to_string()),
             license: Some(vec!["MIT".to_string(), "Apache-2.0".to_string()]),
@@ -346,7 +351,7 @@ mod tests {
                 // Verify package structure
                 for pkg in packages.iter().take(5) {
                     assert!(!pkg.name.is_empty());
-                    assert!(!pkg.version.is_empty());
+                    assert!(pkg.version.is_some() && !pkg.version.as_ref().unwrap().is_empty());
                     assert!(!pkg.attribute_path.is_empty());
                 }
             }
@@ -460,7 +465,7 @@ mod tests {
 
                 // Verify normal package
                 let normal = packages.iter().find(|p| p.name == "normal-pkg").unwrap();
-                assert_eq!(normal.version, "1.0.0");
+                assert_eq!(normal.version.as_deref(), Some("1.0.0"));
                 assert!(normal.maintainers.is_some());
                 assert!(normal.platforms.is_some());
 
@@ -469,7 +474,7 @@ mod tests {
                     .iter()
                     .find(|p| p.name == "string-maintainer-pkg")
                     .unwrap();
-                assert_eq!(string_maint.version, "2.0.0");
+                assert_eq!(string_maint.version.as_deref(), Some("2.0.0"));
                 let maint = string_maint.maintainers.as_ref().unwrap();
                 assert_eq!(maint.len(), 1);
                 assert!(maint[0].contains("David Kleuker"));
@@ -479,7 +484,7 @@ mod tests {
                     .iter()
                     .find(|p| p.name == "string-platform-pkg")
                     .unwrap();
-                assert_eq!(string_plat.version, "3.0.0");
+                assert_eq!(string_plat.version.as_deref(), Some("3.0.0"));
                 let plat = string_plat.platforms.as_ref().unwrap();
                 assert_eq!(plat.len(), 1);
                 assert_eq!(plat[0], "x86_64-linux");
@@ -489,7 +494,7 @@ mod tests {
                     .iter()
                     .find(|p| p.name == "both-strings-pkg")
                     .unwrap();
-                assert_eq!(both.version, "4.0.0");
+                assert_eq!(both.version.as_deref(), Some("4.0.0"));
                 assert!(both.maintainers.is_some());
                 assert!(both.platforms.is_some());
 
@@ -499,7 +504,7 @@ mod tests {
                     .find(|p| p.name == "int-version-pkg")
                     .unwrap();
                 assert_eq!(
-                    int_ver.version, "61",
+                    int_ver.version.as_deref(), Some("61"),
                     "Integer version should be converted to string"
                 );
             }

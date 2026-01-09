@@ -47,6 +47,10 @@ pub struct PackageVersion {
     pub id: i64,
     pub name: String,
     pub version: String,
+    /// Source of version information: "direct", "unwrapped", "passthru", "name", or None.
+    /// Tracks how the version was extracted for debugging and quality tracking.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version_source: Option<String>,
     pub first_commit_hash: String,
     pub first_commit_date: DateTime<Utc>,
     pub last_commit_hash: String,
@@ -144,6 +148,7 @@ impl PackageVersion {
             id: row.get("id")?,
             name: row.get("name")?,
             version: row.get("version")?,
+            version_source: row.get("version_source").ok().flatten(),
             first_commit_hash: row.get("first_commit_hash")?,
             first_commit_date,
             last_commit_hash: row.get("last_commit_hash")?,
@@ -1643,6 +1648,7 @@ mod tests {
             id: 1,
             name: "test".to_string(),
             version: "1.0.0".to_string(),
+            version_source: None,
             first_commit_hash: "abc1234567890".to_string(),
             first_commit_date: Utc.timestamp_opt(1500000000, 0).unwrap(),
             last_commit_hash: "def1234567890".to_string(),

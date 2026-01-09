@@ -16,6 +16,8 @@ pub mod worker;
 pub struct CheckpointRange {
     pub name: String,
     pub version: String,
+    /// Source of version information: "direct", "unwrapped", "passthru", "name", or None.
+    pub version_source: Option<String>,
     pub first_commit_hash: String,
     pub first_commit_date: chrono::DateTime<chrono::Utc>,
     pub attribute_path: String,
@@ -138,6 +140,8 @@ impl Default for IndexerConfig {
 struct OpenRange {
     name: String,
     version: String,
+    /// Source of version information: "direct", "unwrapped", "passthru", "name", or None.
+    version_source: Option<String>,
     first_commit_hash: String,
     first_commit_date: DateTime<Utc>,
     attribute_path: String,
@@ -175,6 +179,7 @@ impl OpenRange {
             id: 0,
             name: self.name.clone(),
             version: self.version.clone(),
+            version_source: self.version_source.clone(),
             first_commit_hash: self.first_commit_hash.clone(),
             first_commit_date: self.first_commit_date,
             last_commit_hash: last_commit_hash.to_string(),
@@ -196,6 +201,7 @@ impl OpenRange {
         CheckpointRange {
             name: self.name.clone(),
             version: self.version.clone(),
+            version_source: self.version_source.clone(),
             first_commit_hash: self.first_commit_hash.clone(),
             first_commit_date: self.first_commit_date,
             attribute_path: self.attribute_path.clone(),
@@ -215,6 +221,7 @@ impl OpenRange {
         Self {
             name: cr.name,
             version: cr.version,
+            version_source: cr.version_source,
             first_commit_hash: cr.first_commit_hash,
             first_commit_date: cr.first_commit_date,
             attribute_path: cr.attribute_path,
@@ -319,6 +326,8 @@ impl OpenRange {
 struct PackageAggregate {
     name: String,
     version: String,
+    /// Source of version information: "direct", "unwrapped", "passthru", "name", or None.
+    version_source: Option<String>,
     attribute_path: String,
     description: Option<String>,
     homepage: Option<String>,
@@ -378,7 +387,9 @@ impl PackageAggregate {
 
         Self {
             name: pkg.name,
-            version: pkg.version,
+            // Use empty string for packages without version
+            version: pkg.version.unwrap_or_default(),
+            version_source: pkg.version_source,
             attribute_path: pkg.attribute_path,
             description: pkg.description,
             homepage: pkg.homepage,
@@ -1419,7 +1430,7 @@ impl Indexer {
                 };
 
                 for pkg in packages {
-                    let key = format!("{}::{}", pkg.attribute_path, pkg.version);
+                    let key = format!("{}::{}", pkg.attribute_path, pkg.version.as_deref().unwrap_or(""));
                     if let Some(existing) = aggregates.get_mut(&key) {
                         existing.merge(pkg, &system);
                     } else {
@@ -1474,6 +1485,7 @@ impl Indexer {
                         OpenRange {
                             name: aggregate.name.clone(),
                             version: aggregate.version.clone(),
+                            version_source: aggregate.version_source.clone(),
                             first_commit_hash: commit.hash.clone(),
                             first_commit_date: commit.date,
                             attribute_path: aggregate.attribute_path.clone(),
@@ -2033,6 +2045,7 @@ mod tests {
         let range = OpenRange {
             name: "hello".to_string(),
             version: "1.0.0".to_string(),
+            version_source: None,
             first_commit_hash: "abc123".to_string(),
             first_commit_date: Utc::now(),
             attribute_path: "hello".to_string(),
@@ -2210,6 +2223,7 @@ mod tests {
                 id: 0,
                 name: "python".to_string(),
                 version: "3.11.0".to_string(),
+                version_source: None,
                 first_commit_hash: "aaa111".to_string(),
                 first_commit_date: Utc.timestamp_opt(1700000000, 0).unwrap(),
                 last_commit_hash: "bbb222".to_string(),
@@ -2228,6 +2242,7 @@ mod tests {
                 id: 0,
                 name: "nodejs".to_string(),
                 version: "20.0.0".to_string(),
+                version_source: None,
                 first_commit_hash: "ccc333".to_string(),
                 first_commit_date: Utc.timestamp_opt(1700200000, 0).unwrap(),
                 last_commit_hash: "ddd444".to_string(),
@@ -2280,6 +2295,7 @@ mod tests {
                 id: 0,
                 name: "firefox".to_string(),
                 version: "120.0".to_string(),
+                version_source: None,
                 first_commit_hash: "first123".to_string(),
                 first_commit_date: Utc.timestamp_opt(1700000000, 0).unwrap(),
                 last_commit_hash: "first123".to_string(),
@@ -2317,6 +2333,7 @@ mod tests {
                 id: 0,
                 name: "chromium".to_string(),
                 version: "120.0".to_string(),
+                version_source: None,
                 first_commit_hash: "second456".to_string(),
                 first_commit_date: Utc.timestamp_opt(1700100000, 0).unwrap(),
                 last_commit_hash: "second456".to_string(),

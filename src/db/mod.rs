@@ -16,7 +16,7 @@ const DEFAULT_BUSY_TIMEOUT_SECS: u64 = 5;
 
 /// Current schema version.
 #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 4;
 
 /// Supported systems for store paths.
 pub const STORE_PATH_SYSTEMS: [&str; 4] = [
@@ -195,6 +195,7 @@ impl Database {
                 id INTEGER PRIMARY KEY,
                 name TEXT NOT NULL,
                 version TEXT NOT NULL,
+                version_source TEXT,
                 first_commit_hash TEXT NOT NULL,
                 first_commit_date INTEGER NOT NULL,
                 last_commit_hash TEXT NOT NULL,
@@ -235,6 +236,7 @@ impl Database {
                 key TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 version TEXT NOT NULL,
+                version_source TEXT,
                 first_commit_hash TEXT NOT NULL,
                 first_commit_date INTEGER NOT NULL,
                 attribute_path TEXT NOT NULL,
@@ -544,13 +546,13 @@ impl Database {
             let mut stmt = tx.prepare_cached(
                 r#"
                 INSERT OR IGNORE INTO package_versions
-                    (name, version, first_commit_hash, first_commit_date,
+                    (name, version, version_source, first_commit_hash, first_commit_date,
                      last_commit_hash, last_commit_date, attribute_path,
                      description, license, homepage, maintainers, platforms, source_path,
                      known_vulnerabilities,
                      store_path_x86_64_linux, store_path_aarch64_linux,
                      store_path_x86_64_darwin, store_path_aarch64_darwin)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
             )?;
 
@@ -558,6 +560,7 @@ impl Database {
                 let changes = stmt.execute(rusqlite::params![
                     pkg.name,
                     pkg.version,
+                    pkg.version_source,
                     pkg.first_commit_hash,
                     pkg.first_commit_date.timestamp(),
                     pkg.last_commit_hash,
@@ -621,12 +624,12 @@ impl Database {
             let mut stmt = tx.prepare_cached(
                 r#"
                 INSERT INTO checkpoint_open_ranges
-                    (key, name, version, first_commit_hash, first_commit_date,
+                    (key, name, version, version_source, first_commit_hash, first_commit_date,
                      attribute_path, description, license, homepage, maintainers,
                      platforms, source_path, known_vulnerabilities,
                      store_path_x86_64_linux, store_path_aarch64_linux,
                      store_path_x86_64_darwin, store_path_aarch64_darwin)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
             )?;
 
@@ -635,6 +638,7 @@ impl Database {
                     key,
                     range.name,
                     range.version,
+                    range.version_source,
                     range.first_commit_hash,
                     range.first_commit_date.timestamp(),
                     range.attribute_path,
@@ -672,7 +676,7 @@ impl Database {
 
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT key, name, version, first_commit_hash, first_commit_date,
+            SELECT key, name, version, version_source, first_commit_hash, first_commit_date,
                    attribute_path, description, license, homepage, maintainers,
                    platforms, source_path, known_vulnerabilities,
                    store_path_x86_64_linux, store_path_aarch64_linux,
@@ -683,19 +687,19 @@ impl Database {
 
         let rows = stmt.query_map([], |row| {
             let key: String = row.get(0)?;
-            let timestamp: i64 = row.get(4)?;
+            let timestamp: i64 = row.get(5)?;
 
             let mut store_paths = HashMap::new();
-            if let Some(path) = row.get::<_, Option<String>>(13)? {
+            if let Some(path) = row.get::<_, Option<String>>(14)? {
                 store_paths.insert("x86_64-linux".to_string(), path);
             }
-            if let Some(path) = row.get::<_, Option<String>>(14)? {
+            if let Some(path) = row.get::<_, Option<String>>(15)? {
                 store_paths.insert("aarch64-linux".to_string(), path);
             }
-            if let Some(path) = row.get::<_, Option<String>>(15)? {
+            if let Some(path) = row.get::<_, Option<String>>(16)? {
                 store_paths.insert("x86_64-darwin".to_string(), path);
             }
-            if let Some(path) = row.get::<_, Option<String>>(16)? {
+            if let Some(path) = row.get::<_, Option<String>>(17)? {
                 store_paths.insert("aarch64-darwin".to_string(), path);
             }
 
@@ -704,16 +708,17 @@ impl Database {
                 crate::index::CheckpointRange {
                     name: row.get(1)?,
                     version: row.get(2)?,
-                    first_commit_hash: row.get(3)?,
+                    version_source: row.get(3)?,
+                    first_commit_hash: row.get(4)?,
                     first_commit_date: Utc.timestamp_opt(timestamp, 0).single().unwrap_or_default(),
-                    attribute_path: row.get(5)?,
-                    description: row.get(6)?,
-                    license: row.get(7)?,
-                    homepage: row.get(8)?,
-                    maintainers: row.get(9)?,
-                    platforms: row.get(10)?,
-                    source_path: row.get(11)?,
-                    known_vulnerabilities: row.get(12)?,
+                    attribute_path: row.get(6)?,
+                    description: row.get(7)?,
+                    license: row.get(8)?,
+                    homepage: row.get(9)?,
+                    maintainers: row.get(10)?,
+                    platforms: row.get(11)?,
+                    source_path: row.get(12)?,
+                    known_vulnerabilities: row.get(13)?,
                     store_paths,
                 },
             ))
@@ -853,6 +858,7 @@ mod tests {
                 id: 0,
                 name: "python".to_string(),
                 version: "3.11.0".to_string(),
+                version_source: None,
                 first_commit_hash: "abc1234567890".to_string(),
                 first_commit_date: now,
                 last_commit_hash: "def1234567890".to_string(),
@@ -871,6 +877,7 @@ mod tests {
                 id: 0,
                 name: "nodejs".to_string(),
                 version: "20.0.0".to_string(),
+                version_source: None,
                 first_commit_hash: "ghi1234567890".to_string(),
                 first_commit_date: now,
                 last_commit_hash: "jkl1234567890".to_string(),
@@ -913,6 +920,7 @@ mod tests {
             id: 0,
             name: "python".to_string(),
             version: "3.11.0".to_string(),
+            version_source: None,
             first_commit_hash: "abc1234567890".to_string(),
             first_commit_date: now,
             last_commit_hash: "def1234567890".to_string(),
@@ -963,6 +971,7 @@ mod tests {
             id: 0,
             name: "python".to_string(),
             version: "3.11.0".to_string(),
+            version_source: None,
             first_commit_hash: "abc1234567890".to_string(),
             first_commit_date: now,
             last_commit_hash: "def1234567890".to_string(),
@@ -1007,6 +1016,7 @@ mod tests {
                 id: 0,
                 name: format!("package{}", i),
                 version: format!("1.0.{}", i),
+                version_source: None,
                 first_commit_hash: format!("abc{:040}", i),
                 first_commit_date: now,
                 last_commit_hash: format!("def{:040}", i),

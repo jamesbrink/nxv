@@ -128,6 +128,7 @@ mod tests {
             id: 1,
             name: "python".to_string(),
             version: "3.11.0".to_string(),
+            version_source: None,
             first_commit_hash: "abc1234567890".to_string(),
             first_commit_date: Utc::now(),
             last_commit_hash: "def1234567890".to_string(),

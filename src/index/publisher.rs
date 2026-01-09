@@ -384,6 +384,7 @@ pub fn generate_full_index<P: AsRef<Path>, Q: AsRef<Path>>(
     output_dir: Q,
     url_prefix: Option<&str>,
     show_progress: bool,
+    min_version: Option<u32>,
 ) -> Result<(IndexFile, String)> {
     let db_path = db_path.as_ref();
     let output_dir = output_dir.as_ref();
@@ -392,12 +393,32 @@ pub fn generate_full_index<P: AsRef<Path>, Q: AsRef<Path>>(
 
     let compressed_path = output_dir.join(INDEX_DB_NAME);
 
-    // Get database info and update last_indexed_date to publish time
+    // Get database info and update metadata before compression
     let db = Database::open(db_path)?;
     let last_commit = db.get_meta("last_indexed_commit")?.unwrap_or_default();
+
+    // Validate min_version against the database's schema version
+    if let Some(min_ver) = min_version {
+        let schema_version: u32 = db
+            .get_meta("schema_version")?
+            .unwrap_or_else(|| "0".to_string())
+            .parse()
+            .unwrap_or(0);
+        if min_ver > schema_version {
+            return Err(NxvError::Config(format!(
+                "--min-version ({}) cannot be greater than database schema version ({})",
+                min_ver, schema_version
+            )));
+        }
+    }
+
     // Set the indexed date to now (publish time) so it matches the manifest
     db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
-    // Flush WAL to ensure the meta update is in the main DB file before compression
+    // Write min_schema_version to database for direct-download validation
+    if let Some(min_ver) = min_version {
+        db.set_meta("min_schema_version", &min_ver.to_string())?;
+    }
+    // Flush WAL to ensure meta updates are in the main DB file before compression
     db.checkpoint()?;
     let input_size = fs::metadata(db_path)?.len();
 
@@ -590,18 +611,23 @@ pub fn generate_delta_pack<P: AsRef<Path>, Q: AsRef<Path>>(
 }
 
 /// Generate a manifest file for the index.
+///
+/// `min_version` specifies the minimum schema version required to read this index.
+/// If `None`, older clients will fall back to checking the database's schema_version.
 pub fn generate_manifest<P: AsRef<Path>>(
     output_dir: P,
     full_index: IndexFile,
     latest_commit: &str,
     deltas: Vec<DeltaFile>,
     bloom_filter: IndexFile,
+    min_version: Option<u32>,
 ) -> Result<()> {
     let output_dir = output_dir.as_ref();
     let manifest_path = output_dir.join("manifest.json");
 
     let manifest = Manifest {
         version: 1,
+        min_version,
         latest_commit: latest_commit.to_string(),
         latest_commit_date: Utc::now().to_rfc3339(),
         full_index,
@@ -708,6 +734,7 @@ pub fn publish_index<P: AsRef<Path>, Q: AsRef<Path>>(
     url_prefix: Option<&str>,
     show_progress: bool,
     secret_key: Option<&str>,
+    min_version: Option<u32>,
 ) -> Result<()> {
     let db_path = db_path.as_ref();
     let output_dir = output_dir.as_ref();
@@ -718,7 +745,7 @@ pub fn publish_index<P: AsRef<Path>, Q: AsRef<Path>>(
         eprintln!("Generating compressed index...");
     }
     let (full_index, last_commit) =
-        generate_full_index(db_path, output_dir, url_prefix, show_progress)?;
+        generate_full_index(db_path, output_dir, url_prefix, show_progress, min_version)?;
 
     if show_progress {
         eprintln!();
@@ -736,6 +763,7 @@ pub fn publish_index<P: AsRef<Path>, Q: AsRef<Path>>(
         &last_commit,
         vec![],
         bloom_filter.clone(),
+        min_version,
     )?;
 
     // Sign the manifest if a secret key was provided
@@ -847,7 +875,7 @@ mod tests {
         create_test_db(&db_path);
 
         let (index_file, last_commit) =
-            generate_full_index(&db_path, &output_dir, None, false).unwrap();
+            generate_full_index(&db_path, &output_dir, None, false, None).unwrap();
 
         assert!(!index_file.sha256.is_empty());
         assert!(index_file.size_bytes > 0);
@@ -869,9 +897,55 @@ mod tests {
 
         let url_prefix = "https://example.com/releases";
         let (index_file, _) =
-            generate_full_index(&db_path, &output_dir, Some(url_prefix), false).unwrap();
+            generate_full_index(&db_path, &output_dir, Some(url_prefix), false, None).unwrap();
 
         assert_eq!(index_file.url, format!("{}/{}", url_prefix, INDEX_DB_NAME));
+    }
+
+    #[test]
+    fn test_generate_full_index_writes_min_schema_version() {
+        use crate::remote::download::decompress_zstd;
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let output_dir = dir.path().join("output");
+
+        create_test_db(&db_path);
+
+        // Generate with min_version=3
+        generate_full_index(&db_path, &output_dir, None, false, Some(3)).unwrap();
+
+        // Decompress and verify min_schema_version was written
+        let compressed_path = output_dir.join(INDEX_DB_NAME);
+        let decompressed_path = dir.path().join("decompressed.db");
+        decompress_zstd(&compressed_path, &decompressed_path, false).unwrap();
+
+        let db = Database::open(&decompressed_path).unwrap();
+        let min_ver = db.get_meta("min_schema_version").unwrap();
+        assert_eq!(min_ver, Some("3".to_string()));
+    }
+
+    #[test]
+    fn test_generate_full_index_no_min_schema_version_when_none() {
+        use crate::remote::download::decompress_zstd;
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let output_dir = dir.path().join("output");
+
+        create_test_db(&db_path);
+
+        // Generate with min_version=None
+        generate_full_index(&db_path, &output_dir, None, false, None).unwrap();
+
+        // Decompress and verify min_schema_version was NOT written
+        let compressed_path = output_dir.join(INDEX_DB_NAME);
+        let decompressed_path = dir.path().join("decompressed.db");
+        decompress_zstd(&compressed_path, &decompressed_path, false).unwrap();
+
+        let db = Database::open(&decompressed_path).unwrap();
+        let min_ver = db.get_meta("min_schema_version").unwrap();
+        assert_eq!(min_ver, None);
     }
 
     #[test]
@@ -915,7 +989,15 @@ mod tests {
             size_bytes: 500,
         };
 
-        generate_manifest(output_dir, full_index, "latest123", vec![], bloom_filter).unwrap();
+        generate_manifest(
+            output_dir,
+            full_index,
+            "latest123",
+            vec![],
+            bloom_filter,
+            None,
+        )
+        .unwrap();
 
         let manifest_path = output_dir.join("manifest.json");
         assert!(manifest_path.exists());
@@ -926,6 +1008,42 @@ mod tests {
         assert_eq!(parsed.version, 1);
         assert_eq!(parsed.full_index.url, "nxv-index-full.db.zst");
         assert_eq!(parsed.latest_commit, "latest123");
+        assert_eq!(parsed.min_version, None);
+    }
+
+    #[test]
+    fn test_generate_manifest_with_min_version() {
+        let dir = tempdir().unwrap();
+        let output_dir = dir.path();
+
+        let full_index = IndexFile {
+            url: "index.db.zst".to_string(),
+            sha256: "abc123".to_string(),
+            size_bytes: 1000,
+        };
+        let bloom_filter = IndexFile {
+            url: "bloom.bin".to_string(),
+            sha256: "def456".to_string(),
+            size_bytes: 500,
+        };
+
+        // Generate manifest with explicit min_version
+        generate_manifest(
+            output_dir,
+            full_index,
+            "commit123",
+            vec![],
+            bloom_filter,
+            Some(3),
+        )
+        .unwrap();
+
+        let manifest_path = output_dir.join("manifest.json");
+        let content = fs::read_to_string(&manifest_path).unwrap();
+        let parsed: Manifest = serde_json::from_str(&content).unwrap();
+
+        assert_eq!(parsed.version, 1);
+        assert_eq!(parsed.min_version, Some(3));
     }
 
     #[test]
@@ -1094,7 +1212,7 @@ mod tests {
         create_test_db(&db_path);
 
         // Publish without signing
-        publish_index(&db_path, &output_dir, None, false, None).unwrap();
+        publish_index(&db_path, &output_dir, None, false, None, None).unwrap();
 
         // Verify all artifacts except signature
         assert!(output_dir.join(INDEX_DB_NAME).exists());

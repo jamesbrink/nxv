@@ -15,6 +15,9 @@ pub enum NxvError {
     #[error("Index is corrupted: {0}. Run 'nxv update --force' to re-download.")]
     CorruptIndex(String),
 
+    #[error("Incompatible index: {0}")]
+    IncompatibleIndex(String),
+
     #[error("Network error: {0}")]
     Network(#[from] reqwest::Error),
 
@@ -60,6 +63,10 @@ pub enum NxvError {
     #[cfg(feature = "indexer")]
     #[error("Signing error: {0}")]
     Signing(String),
+
+    #[cfg(feature = "indexer")]
+    #[error("Configuration error: {0}")]
+    Config(String),
 }
 
 /// Result type alias for nxv operations.

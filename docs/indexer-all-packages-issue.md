@@ -1,9 +1,9 @@
 # Indexer Issue: Missing Package Updates from all-packages.nix
 
-**Status:** Phases 1-3 complete, pending reindex (Phase 4)
+**Status:** Phases 1-5 implementation complete, pending manual reindex
 **Related Issue:** [#21 - Incomplete set and wrong hashes?](https://github.com/jamesbrink/nxv/issues/21)
 **Date:** 2026-01-09
-**Last Updated:** 2026-01-09 (Phase 3 completed)
+**Last Updated:** 2026-01-09 (All implementation complete)
 
 ## Executive Summary
 
@@ -390,7 +390,7 @@ After truncation (2026-01-09):
 - `src/index/nix/extract.nix` - Package metadata extraction, version fallback chain
 - `src/index/git.rs` - Git operations including `get_file_diff()` for diff content
 - `src/index/extractor.rs` - PackageInfo struct with `version_source` field
-- `src/db/mod.rs` - Schema with `version_source` column (schema v4)
+- `src/db/mod.rs` - Schema v4 with `version_source` column and migration from v3
 - `src/db/queries.rs` - PackageVersion struct with `version_source` field
 
 ## Next Steps
@@ -460,24 +460,40 @@ After truncation (2026-01-09):
 
 ### Phase 4: Database & Reindex
 
-- [ ] **4.1** Nuke existing database
-  - Fresh start with improved extraction logic
+- [x] **4.1** Pre-reindex QA gate
+  - Created `scripts/pre_reindex_qa.sh`
+  - Checks: fmt, clippy, tests, nix syntax, regression tests
 
-- [ ] **4.2** Full reindex from 2017
-  - With all extraction improvements in place
-  - Monitor metrics during indexing
+- [x] **4.2** Post-reindex validation
+  - Created `scripts/post_reindex_validation.sh`
+  - Checks: DB stats, version_source distribution, NixHub comparison
 
-- [ ] **4.3** Post-reindex validation
-  - Run validation script against NixHub
-  - Target: >95% completeness for major packages
-  - Verify no regressions from known-good test set
+- [x] **4.3** CI quality gate
+  - Added quality checks to `publish-index.yml`
+  - Validates critical packages, version rates, and extraction quality
 
-### Phase 5: Documentation & Cleanup
+- [ ] **4.4** Full reindex from 2017 (manual)
+  - Run: `./scripts/pre_reindex_qa.sh --nixpkgs /path/to/nixpkgs`
+  - Then: `cargo run --features indexer --release -- index --nixpkgs /path/to/nixpkgs --full`
+  - Then: `./scripts/post_reindex_validation.sh`
 
-- [ ] **5.1** Update CLAUDE.md with new extraction logic
-- [ ] **5.2** Document version extraction fallback chain
-- [ ] **5.3** Add troubleshooting guide for common issues
-- [ ] **5.4** Close GitHub issue #21 with summary
+### Phase 5: Documentation & Cleanup (Completed)
+
+- [x] **5.1** Update CLAUDE.md with new extraction logic
+  - Added version fallback chain, all-packages.nix handling
+  - Updated schema version to v4 with migrations
+
+- [x] **5.2** Document version extraction fallback chain
+  - Documented in CLAUDE.md under "Indexer" section
+  - Detailed in `docs/troubleshooting.md`
+
+- [x] **5.3** Add troubleshooting guide for common issues
+  - Created `docs/troubleshooting.md`
+  - Covers: missing versions, unknown values, version_source analysis
+
+- [x] **5.4** GitHub issue #21 summary
+  - Created `docs/issue-21-summary.md`
+  - Ready to post when reindex is validated
 
 ## References
 

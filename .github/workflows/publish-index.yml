@@ -190,6 +190,47 @@ jobs:
           echo "new_packages=${NEW_PACKAGES}" >> $GITHUB_OUTPUT
           echo "New packages: ${NEW_PACKAGES}"
 
+      - name: Quality gate - Index validation
+        if: ${{ steps.clone-strategy.outputs.strategy != 'skip' }}
+        id: quality-gate
+        run: |
+          echo "Running post-indexing quality checks..."
+
+          # Check 1: Verify critical packages have versions
+          CRITICAL_PACKAGES="firefox chromium thunderbird python3 nodejs rustc go gcc"
+          FAILED=0
+
+          for pkg in $CRITICAL_PACKAGES; do
+            VERSION_COUNT=$(sqlite3 ~/.local/share/nxv/index.db "SELECT COUNT(DISTINCT version) FROM package_versions WHERE attribute_path = '$pkg' AND version != 'unknown' AND version != '';" 2>/dev/null || echo "0")
+            if [ "$VERSION_COUNT" -eq 0 ]; then
+              echo "::warning::Critical package '$pkg' has no versions extracted"
+              FAILED=1
+            else
+              echo "Package $pkg: $VERSION_COUNT versions"
+            fi
+          done
+
+          # Check 2: Verify version_source distribution is reasonable
+          DIRECT_PCT=$(sqlite3 ~/.local/share/nxv/index.db "SELECT ROUND(COUNT(*) * 100.0 / (SELECT COUNT(*) FROM package_versions), 1) FROM package_versions WHERE version_source = 'direct';" 2>/dev/null || echo "0")
+          echo "Direct version extraction rate: ${DIRECT_PCT}%"
+
+          if (( $(echo "$DIRECT_PCT < 50" | bc -l) )); then
+            echo "::warning::Direct version extraction rate is low (${DIRECT_PCT}%)"
+          fi
+
+          # Check 3: Verify unknown version rate is acceptable
+          UNKNOWN_PCT=$(sqlite3 ~/.local/share/nxv/index.db "SELECT ROUND(COUNT(*) * 100.0 / (SELECT COUNT(*) FROM package_versions), 1) FROM package_versions WHERE version = 'unknown' OR version IS NULL OR version = '';" 2>/dev/null || echo "0")
+          echo "Unknown version rate: ${UNKNOWN_PCT}%"
+
+          if (( $(echo "$UNKNOWN_PCT > 15" | bc -l) )); then
+            echo "::warning::High unknown version rate (${UNKNOWN_PCT}%)"
+          fi
+
+          # Set outputs
+          echo "quality_passed=$( [ $FAILED -eq 0 ] && echo 'true' || echo 'false' )" >> $GITHUB_OUTPUT
+          echo "direct_pct=${DIRECT_PCT}" >> $GITHUB_OUTPUT
+          echo "unknown_pct=${UNKNOWN_PCT}" >> $GITHUB_OUTPUT
+
       - name: Generate publishable artifacts
         if: ${{ steps.clone-strategy.outputs.strategy != 'skip' }}
         env:
@@ -237,12 +278,20 @@ jobs:
         run: |
           echo "## Index Update Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Statistics" >> $GITHUB_STEP_SUMMARY
           echo "- **Clone depth:** ${{ steps.clone-strategy.outputs.depth }}" >> $GITHUB_STEP_SUMMARY
           echo "- **New packages:** ${{ steps.stats-after.outputs.new_packages }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Total packages:** ${{ steps.stats-after.outputs.packages_after }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Index size:** $(du -h publish/index.db.zst | cut -f1)" >> $GITHUB_STEP_SUMMARY
           echo "- **Bloom filter size:** $(du -h publish/bloom.bin 2>/dev/null | cut -f1 || echo 'N/A')" >> $GITHUB_STEP_SUMMARY
-          echo "- **Release:** [$INDEX_RELEASE_TAG](https://github.com/${{ github.repository }}/releases/tag/$INDEX_RELEASE_TAG)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Quality Metrics" >> $GITHUB_STEP_SUMMARY
+          echo "- **Direct version extraction:** ${{ steps.quality-gate.outputs.direct_pct }}%" >> $GITHUB_STEP_SUMMARY
+          echo "- **Unknown version rate:** ${{ steps.quality-gate.outputs.unknown_pct }}%" >> $GITHUB_STEP_SUMMARY
+          echo "- **Quality gate:** ${{ steps.quality-gate.outputs.quality_passed == 'true' && 'Passed' || 'Warning' }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Release" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tag:** [$INDEX_RELEASE_TAG](https://github.com/${{ github.repository }}/releases/tag/$INDEX_RELEASE_TAG)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo '```json' >> $GITHUB_STEP_SUMMARY
           cat publish/manifest.json >> $GITHUB_STEP_SUMMARY

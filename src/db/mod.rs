@@ -379,6 +379,25 @@ impl Database {
             )?;
         }
 
+        if current_version < 4 {
+            // Migration v3 -> v4: Add version_source column
+            let has_version_source: bool = self
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM pragma_table_info('package_versions') WHERE name='version_source'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+
+            if !has_version_source {
+                self.conn.execute(
+                    "ALTER TABLE package_versions ADD COLUMN version_source TEXT",
+                    [],
+                )?;
+            }
+        }
+
         // Ensure all schema elements exist (runs unconditionally for idempotent upgrades)
         // This handles v3 databases that may be missing newer columns/tables
         {
@@ -389,6 +408,7 @@ impl Database {
                     key TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
                     version TEXT NOT NULL,
+                    version_source TEXT,
                     first_commit_hash TEXT NOT NULL,
                     first_commit_date INTEGER NOT NULL,
                     attribute_path TEXT NOT NULL,

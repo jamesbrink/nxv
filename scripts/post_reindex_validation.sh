@@ -1,0 +1,272 @@
+#!/usr/bin/env bash
+# Post-reindex validation script
+# Run this after completing a full reindex to validate data quality.
+#
+# Usage:
+#   ./scripts/post_reindex_validation.sh [options]
+#
+# Options:
+#   --db PATH           Path to nxv database (default: ~/.local/share/nxv/index.db)
+#   --nixpkgs PATH      Path to nixpkgs clone (enables git verification)
+#   --output DIR        Directory to save validation reports
+#   --quick             Run quick validation (fewer packages)
+#   --full              Run comprehensive validation (all edge cases)
+#
+# Exit codes:
+#   0 - Validation passed (>= 80% completeness target)
+#   1 - Validation failed or errors occurred
+
+set -euo pipefail
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+# Default values
+DB_PATH="${HOME}/.local/share/nxv/index.db"
+NIXPKGS_PATH=""
+OUTPUT_DIR=""
+MODE="standard"
+
+# Quality targets
+TARGET_COMPLETENESS=80  # Minimum % completeness vs NixHub
+TARGET_POST_2023_COMPLETENESS=70  # Post-July 2023 data (was broken)
+MAX_COMMIT_MISMATCHES=50  # Maximum acceptable commit hash mismatches
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --db)
+            DB_PATH="$2"
+            shift 2
+            ;;
+        --nixpkgs)
+            NIXPKGS_PATH="$2"
+            shift 2
+            ;;
+        --output)
+            OUTPUT_DIR="$2"
+            shift 2
+            ;;
+        --quick)
+            MODE="quick"
+            shift
+            ;;
+        --full)
+            MODE="full"
+            shift
+            ;;
+        *)
+            echo "Unknown option: $1"
+            exit 1
+            ;;
+    esac
+done
+
+echo "=========================================="
+echo "NXV Post-Reindex Validation"
+echo "=========================================="
+echo ""
+echo "Database: $DB_PATH"
+echo "Mode: $MODE"
+if [[ -n "$NIXPKGS_PATH" ]]; then
+    echo "Nixpkgs: $NIXPKGS_PATH"
+fi
+echo ""
+
+# Check database exists
+if [[ ! -f "$DB_PATH" ]]; then
+    echo -e "${RED}ERROR: Database not found: $DB_PATH${NC}"
+    exit 1
+fi
+
+# Create output directory if specified
+if [[ -n "$OUTPUT_DIR" ]]; then
+    mkdir -p "$OUTPUT_DIR"
+fi
+
+FAILED=0
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Helper function to run validation
+run_validation() {
+    local name="$1"
+    local args="$2"
+    local output_file="${3:-}"
+
+    echo -e "${BLUE}Running: $name${NC}"
+
+    local cmd="python3 ${SCRIPT_DIR}/validate_against_nixhub.py --db $DB_PATH $args"
+
+    if [[ -n "$output_file" && -n "$OUTPUT_DIR" ]]; then
+        cmd="$cmd --output ${OUTPUT_DIR}/${output_file}"
+    fi
+
+    eval "$cmd"
+    echo ""
+}
+
+# Test 1: Basic database stats
+echo "=========================================="
+echo "1. Database Statistics"
+echo "=========================================="
+echo ""
+
+# Get stats using sqlite3
+TOTAL_RECORDS=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM package_versions;")
+UNIQUE_PACKAGES=$(sqlite3 "$DB_PATH" "SELECT COUNT(DISTINCT attribute_path) FROM package_versions;")
+UNIQUE_VERSIONS=$(sqlite3 "$DB_PATH" "SELECT COUNT(DISTINCT attribute_path || ':' || version) FROM package_versions;")
+LAST_COMMIT=$(sqlite3 "$DB_PATH" "SELECT value FROM meta WHERE key = 'last_indexed_commit';")
+LAST_DATE=$(sqlite3 "$DB_PATH" "SELECT datetime(value, 'unixepoch') FROM meta WHERE key = 'last_indexed_date';")
+
+echo "Total records: $TOTAL_RECORDS"
+echo "Unique packages: $UNIQUE_PACKAGES"
+echo "Unique package-versions: $UNIQUE_VERSIONS"
+echo "Last indexed commit: $LAST_COMMIT"
+echo "Last indexed date: $LAST_DATE"
+echo ""
+
+# Check for reasonable numbers
+if [[ $TOTAL_RECORDS -lt 1000000 ]]; then
+    echo -e "${YELLOW}WARNING: Total records ($TOTAL_RECORDS) seems low${NC}"
+    echo "  Expected at least 1,000,000 records for a full index"
+fi
+
+# Test 2: Version source distribution
+echo "=========================================="
+echo "2. Version Source Distribution"
+echo "=========================================="
+echo ""
+
+sqlite3 "$DB_PATH" "
+SELECT
+    COALESCE(version_source, 'NULL') as source,
+    COUNT(*) as count,
+    ROUND(COUNT(*) * 100.0 / (SELECT COUNT(*) FROM package_versions), 1) as pct
+FROM package_versions
+GROUP BY version_source
+ORDER BY count DESC;
+"
+echo ""
+
+# Test 3: Unknown version check
+echo "=========================================="
+echo "3. Unknown Version Analysis"
+echo "=========================================="
+echo ""
+
+UNKNOWN_COUNT=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM package_versions WHERE version = 'unknown' OR version IS NULL OR version = '';")
+UNKNOWN_PCT=$(sqlite3 "$DB_PATH" "SELECT ROUND(COUNT(*) * 100.0 / (SELECT COUNT(*) FROM package_versions), 1) FROM package_versions WHERE version = 'unknown' OR version IS NULL OR version = '';")
+
+echo "Records with unknown/empty version: $UNKNOWN_COUNT ($UNKNOWN_PCT%)"
+
+if (( $(echo "$UNKNOWN_PCT > 10" | bc -l) )); then
+    echo -e "${YELLOW}WARNING: High unknown version rate ($UNKNOWN_PCT%)${NC}"
+    echo "  Target: < 10%"
+fi
+echo ""
+
+# Test 4: Post-July 2023 data check
+echo "=========================================="
+echo "4. Post-July 2023 Data Coverage"
+echo "=========================================="
+echo ""
+
+POST_2023_COUNT=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM package_versions WHERE first_commit_date >= strftime('%s', '2023-07-25');")
+POST_2023_UNIQUE=$(sqlite3 "$DB_PATH" "SELECT COUNT(DISTINCT attribute_path) FROM package_versions WHERE first_commit_date >= strftime('%s', '2023-07-25');")
+
+echo "Records after July 25, 2023: $POST_2023_COUNT"
+echo "Unique packages after July 25, 2023: $POST_2023_UNIQUE"
+
+if [[ $POST_2023_COUNT -lt 100000 ]]; then
+    echo -e "${YELLOW}WARNING: Post-July 2023 record count ($POST_2023_COUNT) seems low${NC}"
+    echo "  This was the period affected by the all-packages.nix issue"
+fi
+echo ""
+
+# Test 5: NixHub validation
+echo "=========================================="
+echo "5. NixHub Comparison"
+echo "=========================================="
+echo ""
+
+case $MODE in
+    quick)
+        VALIDATION_ARGS="--packages hello,git,curl,vim,python3"
+        ;;
+    full)
+        VALIDATION_ARGS="--comprehensive"
+        ;;
+    *)
+        VALIDATION_ARGS="--edge-cases"
+        ;;
+esac
+
+# Add nixpkgs verification if available
+if [[ -n "$NIXPKGS_PATH" ]]; then
+    VALIDATION_ARGS="$VALIDATION_ARGS --nixpkgs $NIXPKGS_PATH --verify-commits"
+fi
+
+run_validation "NixHub comparison" "$VALIDATION_ARGS" "nixhub_validation.json"
+
+# Test 6: Critical packages spot check
+echo "=========================================="
+echo "6. Critical Packages Spot Check"
+echo "=========================================="
+echo ""
+
+CRITICAL_PACKAGES="firefox,chromium,thunderbird,python3,nodejs,rustc,go,gcc"
+echo "Checking: $CRITICAL_PACKAGES"
+echo ""
+
+for pkg in ${CRITICAL_PACKAGES//,/ }; do
+    VERSION_COUNT=$(sqlite3 "$DB_PATH" "SELECT COUNT(DISTINCT version) FROM package_versions WHERE attribute_path = '$pkg' AND version != 'unknown' AND version != '';")
+    LATEST=$(sqlite3 "$DB_PATH" "SELECT version FROM package_versions WHERE attribute_path = '$pkg' AND version != 'unknown' ORDER BY first_commit_date DESC LIMIT 1;")
+
+    if [[ $VERSION_COUNT -gt 0 ]]; then
+        echo -e "  $pkg: ${GREEN}$VERSION_COUNT versions${NC} (latest: $LATEST)"
+    else
+        echo -e "  $pkg: ${RED}NO VERSIONS${NC}"
+        FAILED=1
+    fi
+done
+echo ""
+
+# Test 7: Pre vs Post July 2023 comparison
+echo "=========================================="
+echo "7. Pre vs Post July 2023 Comparison"
+echo "=========================================="
+echo ""
+
+echo "Pre-July 2023 validation:"
+run_validation "Pre-July 2023" "--packages firefox,chromium,python3,nodejs,git --before 2023-07-25"
+
+echo "Post-July 2023 validation:"
+run_validation "Post-July 2023" "--packages firefox,chromium,python3,nodejs,git --after 2023-07-25"
+
+# Summary
+echo "=========================================="
+echo "VALIDATION SUMMARY"
+echo "=========================================="
+echo ""
+
+if [[ $FAILED -eq 0 ]]; then
+    echo -e "${GREEN}Validation completed successfully!${NC}"
+    echo ""
+    echo "Next steps:"
+    echo "  1. Review the detailed reports above"
+    echo "  2. If completeness >= $TARGET_COMPLETENESS%, index is ready for use"
+    echo "  3. Run: nxv publish --url-prefix <url> --secret-key <key>"
+    if [[ -n "$OUTPUT_DIR" ]]; then
+        echo ""
+        echo "Reports saved to: $OUTPUT_DIR/"
+    fi
+    exit 0
+else
+    echo -e "${RED}Some validation checks failed!${NC}"
+    echo ""
+    echo "Please review the issues above before publishing."
+    exit 1
+fi

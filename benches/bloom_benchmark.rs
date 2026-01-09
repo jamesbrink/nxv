@@ -1,8 +1,9 @@
 //! Benchmarks for bloom filter operations.
 
 use bloomfilter::Bloom;
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::fs::File;
+use std::hint::black_box;
 use std::io::{BufReader, BufWriter, Read, Write};
 use tempfile::tempdir;
 

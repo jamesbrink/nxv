@@ -1,7 +1,8 @@
 //! Benchmarks for search query performance.
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use rusqlite::Connection;
+use std::hint::black_box;
 use tempfile::tempdir;
 
 /// Create a test database with sample data.

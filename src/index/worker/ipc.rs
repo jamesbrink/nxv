@@ -47,7 +47,7 @@ impl AsRawFd for PipeFd {
 impl Read for PipeFd {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         loop {
-            match nix::unistd::read(self.fd.as_raw_fd(), buf) {
+            match nix::unistd::read(&self.fd, buf) {
                 Ok(n) => return Ok(n),
                 Err(nix::errno::Errno::EINTR) => continue, // Retry on interrupt
                 // Convert nix::errno::Errno to std::io::Error via raw OS error code

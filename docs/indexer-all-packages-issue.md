@@ -1,9 +1,9 @@
 # Indexer Issue: Missing Package Updates from all-packages.nix
 
-**Status:** Research complete, ready for implementation
+**Status:** Phase 1 & 2 implemented, pending reindex
 **Related Issue:** [#21 - Incomplete set and wrong hashes?](https://github.com/jamesbrink/nxv/issues/21)
 **Date:** 2026-01-09
-**Last Updated:** 2026-01-09
+**Last Updated:** 2026-01-09 (Phase 1 & 2 completed)
 
 ## Executive Summary
 
@@ -385,10 +385,13 @@ After truncation (2026-01-09):
 
 ## Files Involved
 
-- `src/index/mod.rs` - Main indexer logic, `INFRASTRUCTURE_FILES` constant
+- `src/index/mod.rs` - Main indexer logic, `INFRASTRUCTURE_FILES` constant, diff parsing
 - `src/index/nix/positions.nix` - Position extraction using `unsafeGetAttrPos`
-- `src/index/nix/extract.nix` - Package metadata extraction
-- `src/index/git.rs` - Git operations including diff retrieval
+- `src/index/nix/extract.nix` - Package metadata extraction, version fallback chain
+- `src/index/git.rs` - Git operations including `get_file_diff()` for diff content
+- `src/index/extractor.rs` - PackageInfo struct with `version_source` field
+- `src/db/mod.rs` - Schema with `version_source` column (schema v4)
+- `src/db/queries.rs` - PackageVersion struct with `version_source` field
 
 ## Next Steps
 
@@ -401,39 +404,40 @@ After truncation (2026-01-09):
 - [x] Identify wrapper version issue as separate problem
 - [x] Analyze unknown version patterns (99% recoverable from name)
 
-### Phase 1: Version Extraction Improvements
+### Phase 1: Version Extraction Improvements (Completed)
 
-- [ ] **1.1** Add wrapper version fallback in `extract.nix`
+- [x] **1.1** Add wrapper version fallback in `extract.nix`
   - Try `pkg.version` (direct)
   - Try `pkg.unwrapped.version`
   - Try `pkg.passthru.unwrapped.version`
 
-- [ ] **1.2** Add name-based version extraction fallback
+- [x] **1.2** Add name-based version extraction fallback
   - Parse version from package name (e.g., `hello-2.12` → `2.12`)
   - Handles 99% of previously "unknown" versions
   - Patterns: semver, dates (YYYY-MM-DD), YYYYMMDD, single numbers
 
-- [ ] **1.3** Skip storing records with no extractable version
-  - Don't pollute DB with truly versionless packages (build hooks, etc.)
-  - Reduces DB size and improves search quality
+- [x] **1.3** Keep packages with no extractable version
+  - Store with NULL version rather than skipping
+  - Ensures all packages are tracked even without version info
 
-- [ ] **1.4** Add `version_source` field to track extraction method
-  - Values: `direct`, `unwrapped`, `passthru`, `name`, `none`
+- [x] **1.4** Add `version_source` field to track extraction method
+  - Values: `direct`, `unwrapped`, `passthru`, `name`, or NULL
   - Helps debug issues without re-indexing
 
-### Phase 2: all-packages.nix Diff Parsing
+### Phase 2: all-packages.nix Diff Parsing (Completed)
 
-- [ ] **2.1** Implement diff parsing for INFRASTRUCTURE_FILES
-  - Parse `git diff` output to extract affected attribute names
-  - Regex patterns for: assignment, callPackage, inherit, override
+- [x] **2.1** Implement diff parsing for INFRASTRUCTURE_FILES
+  - Added `get_file_diff()` method to NixpkgsRepo
+  - Parse git diff output to extract affected attribute names
+  - String parsing for: assignment (`attr =`), inherit patterns
 
-- [ ] **2.2** Add fallback for large/unparseable diffs
-  - If >100 lines changed or 0 attrs extracted, do full extraction
+- [x] **2.2** Add fallback for large/unparseable diffs
+  - If >100 lines changed, triggers full extraction
   - Handles bulk updates and structural changes
 
-- [ ] **2.3** Add metrics logging for diff parsing
-  - Track success rate, attrs extracted per commit
-  - Log failures for debugging
+- [x] **2.3** Add metrics logging for diff parsing
+  - Log attrs extracted per commit at trace level
+  - Log fallback triggers at debug level
 
 ### Phase 3: Validation & Testing
 

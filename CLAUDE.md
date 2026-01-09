@@ -123,7 +123,13 @@ A NixOS module is provided for running nxv as a systemd service:
 
 ## Releasing
 
-**IMPORTANT: Always run `/release-notes` before creating a release.** This runs all pre-flight checks (fmt, clippy, tests, nix flake check, clean git status) and generates release notes.
+**Use `/release` to prepare and execute a release.** This skill:
+1. Runs pre-flight checks (fmt, clippy, tests, nix flake check, clean git status)
+2. Generates release notes from git history
+3. Shows a complete summary of what will happen
+4. Asks for explicit confirmation with the version number
+5. Bumps version, updates Docker timestamp, commits, and tags
+6. CI/CD handles the rest (builds, GitHub release, crates.io, Docker, FlakeHub)
 
 ## CI/CD & Index Publishing
 

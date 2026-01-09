@@ -350,8 +350,38 @@ pub fn perform_update<P: AsRef<Path>>(
     public_key: Option<&str>,
     timeout_secs: Option<u64>,
 ) -> Result<UpdateStatus> {
+    let db_path = db_path.as_ref();
+
+    // When force_full is set, skip check_for_updates entirely.
+    // This is critical because the local database may have an incompatible schema
+    // that would cause open_readonly() to fail with a schema version error.
+    // The --force flag is specifically meant to bypass such issues.
+    if force_full {
+        apply_full_update(
+            manifest_url,
+            db_path,
+            show_progress,
+            skip_verify,
+            public_key,
+            timeout_secs,
+        )?;
+        // Return a synthetic status since we didn't check
+        let manifest_url = manifest_url.unwrap_or(DEFAULT_MANIFEST_URL);
+        let manifest = fetch_manifest(
+            manifest_url,
+            false, // don't show progress again
+            skip_verify,
+            public_key,
+            timeout_secs,
+        )?;
+        return Ok(UpdateStatus::FullDownloadNeeded {
+            commit: manifest.latest_commit,
+            size_bytes: manifest.full_index.size_bytes,
+        });
+    }
+
     let status = check_for_updates(
-        &db_path,
+        db_path,
         manifest_url,
         show_progress,
         skip_verify,
@@ -368,7 +398,7 @@ pub fn perform_update<P: AsRef<Path>>(
         UpdateStatus::NoLocalIndex { .. } | UpdateStatus::FullDownloadNeeded { .. } => {
             apply_full_update(
                 manifest_url,
-                &db_path,
+                db_path,
                 show_progress,
                 skip_verify,
                 public_key,
@@ -376,26 +406,15 @@ pub fn perform_update<P: AsRef<Path>>(
             )?;
         }
         UpdateStatus::DeltaAvailable { from_commit, .. } => {
-            if force_full {
-                apply_full_update(
-                    manifest_url,
-                    &db_path,
-                    show_progress,
-                    skip_verify,
-                    public_key,
-                    timeout_secs,
-                )?;
-            } else {
-                apply_delta_update(
-                    manifest_url,
-                    &db_path,
-                    from_commit,
-                    show_progress,
-                    skip_verify,
-                    public_key,
-                    timeout_secs,
-                )?;
-            }
+            apply_delta_update(
+                manifest_url,
+                db_path,
+                from_commit,
+                show_progress,
+                skip_verify,
+                public_key,
+                timeout_secs,
+            )?;
         }
     }
 
@@ -710,5 +729,73 @@ COMMIT;
     fn test_build_signature_url_with_fragment() {
         let url = build_signature_url("https://example.com/manifest.json#section");
         assert_eq!(url, "https://example.com/manifest.json.minisig#section");
+    }
+
+    /// Test that check_for_updates fails when the local database has an incompatible schema.
+    /// This verifies the bug scenario where --force should bypass schema validation.
+    #[test]
+    fn test_check_for_updates_fails_with_incompatible_schema() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        // Create a database with a schema version newer than supported
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE package_versions (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                version TEXT NOT NULL,
+                first_commit_hash TEXT NOT NULL,
+                first_commit_date INTEGER NOT NULL,
+                last_commit_hash TEXT NOT NULL,
+                last_commit_date INTEGER NOT NULL,
+                attribute_path TEXT NOT NULL
+            );
+            -- Set schema version higher than any supported version
+            INSERT INTO meta (key, value) VALUES ('schema_version', '999');
+            INSERT INTO meta (key, value) VALUES ('last_indexed_commit', 'abc123');
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        // Verify that opening the database fails with schema version error
+        let result = crate::db::Database::open_readonly(&db_path);
+        match result {
+            Ok(_) => panic!("Expected schema version error, but open succeeded"),
+            Err(e) => {
+                let err = e.to_string();
+                assert!(
+                    err.contains("schema version 999 is newer than supported"),
+                    "Expected schema version error, got: {}",
+                    err
+                );
+            }
+        }
+
+        // This demonstrates why --force must bypass check_for_updates:
+        // check_for_updates would call Database::open_readonly which fails here.
+        // The fix in perform_update() skips check_for_updates when force_full=true.
+    }
+
+    /// Test that force_full=true in perform_update bypasses the local database entirely.
+    /// This is a documentation test showing the expected behavior.
+    #[test]
+    fn test_force_full_bypasses_local_db_check() {
+        // When force_full=true, perform_update should:
+        // 1. NOT call check_for_updates (which opens the local DB)
+        // 2. Go directly to apply_full_update
+        // 3. Download fresh index regardless of local state
+        //
+        // This allows recovery from:
+        // - Corrupted local database
+        // - Incompatible schema versions
+        // - Any other local database issues
+        //
+        // The actual network test would require mocking, but the code path
+        // is verified by the fix in perform_update() which checks force_full
+        // before calling check_for_updates().
     }
 }

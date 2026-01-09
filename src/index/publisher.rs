@@ -1300,6 +1300,8 @@ fn generate_full_history_index<P: AsRef<Path>, Q: AsRef<Path>>(
     let db_path = db_path.as_ref();
     let output_dir = output_dir.as_ref();
 
+    fs::create_dir_all(output_dir)?;
+
     let compressed_path = output_dir.join(INDEX_FULL_DB_NAME);
 
     // Get database info and update metadata before compression
@@ -1488,7 +1490,7 @@ mod tests {
         generate_full_history_index(&db_path, &output_dir, None, false, Some(3), 19).unwrap();
 
         // Decompress and verify min_schema_version was written
-        let compressed_path = output_dir.join(INDEX_FULL_HISTORY_DB_NAME);
+        let compressed_path = output_dir.join(INDEX_FULL_DB_NAME);
         let decompressed_path = dir.path().join("decompressed.db");
         decompress_zstd(&compressed_path, &decompressed_path, false).unwrap();
 
@@ -1511,7 +1513,7 @@ mod tests {
         generate_full_history_index(&db_path, &output_dir, None, false, None, 19).unwrap();
 
         // Decompress and verify min_schema_version was NOT written
-        let compressed_path = output_dir.join(INDEX_FULL_HISTORY_DB_NAME);
+        let compressed_path = output_dir.join(INDEX_FULL_DB_NAME);
         let decompressed_path = dir.path().join("decompressed.db");
         decompress_zstd(&compressed_path, &decompressed_path, false).unwrap();
 
@@ -1783,6 +1785,7 @@ mod tests {
         generate_manifest(
             output_dir,
             full_index,
+            None,
             "commit123",
             vec![],
             bloom_filter,

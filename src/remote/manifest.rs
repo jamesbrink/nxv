@@ -24,7 +24,7 @@ pub const MANIFEST_PUBLIC_KEY: &str = include_str!("../../keys/nxv.pub");
 pub struct Manifest {
     /// Manifest format version (currently 1).
     /// This is the manifest structure version, not the database schema version.
-    /// Validation rejects versions > 2 to allow for future format changes.
+    /// See `fetch_manifest()` for version validation.
     pub version: u32,
     /// Minimum database schema version required to read this index.
     /// When omitted, clients fall back to checking the database's schema_version.

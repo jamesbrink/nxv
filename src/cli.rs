@@ -139,6 +139,10 @@ pub struct SearchArgs {
     #[arg(long)]
     pub license: Option<String>,
 
+    /// Filter by platform (e.g., "x86_64-linux", "aarch64-darwin").
+    #[arg(long)]
+    pub platform: Option<String>,
+
     /// Output format.
     #[arg(short, long, value_enum, default_value_t = OutputFormatArg::Table)]
     pub format: OutputFormatArg,

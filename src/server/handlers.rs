@@ -134,9 +134,12 @@ params(
 ("q" = String, Query, description = "Package name or attribute path to search"),
 ("version" = Option<String>, Query, description = "Filter by version prefix"),
 ("exact" = Option<bool>, Query, description = "Exact match only"),
+("desc" = Option<bool>, Query, description = "Search in package descriptions using FTS"),
 ("license" = Option<String>, Query, description = "Filter by license"),
-("sort" = Option<String>, Query, description = "Sort order: date, version, or name"),
+("platform" = Option<String>, Query, description = "Filter by platform (e.g., x86_64-linux)"),
+("sort" = Option<String>, Query, description = "Sort order: relevance, date, version, or name"),
 ("reverse" = Option<bool>, Query, description = "Reverse sort order"),
+("full" = Option<bool>, Query, description = "Show all commits (skip deduplication)"),
 ("limit" = Option<usize>, Query, description = "Maximum results (default: 50)"),
 ("offset" = Option<usize>, Query, description = "Results to skip"),
 ),
@@ -147,7 +150,7 @@ responses(
 ),
 tag = "packages"
 )]
-#[instrument(skip(state), fields(query = %params.q, version = ?params.version, exact = ?params.exact))]
+#[instrument(skip(state), fields(query = %params.q, version = ?params.version, exact = ?params.exact, desc = ?params.desc, platform = ?params.platform))]
 pub async fn search_packages(
     State(state): State<Arc<AppState>>,
     Query(params): Query<SearchParams>,
@@ -169,11 +172,12 @@ pub async fn search_packages(
         query: params.q,
         version: params.version,
         exact: params.exact,
-        desc: false,
+        desc: params.desc,
         license: params.license,
+        platform: params.platform,
         sort: params.sort,
         reverse: params.reverse,
-        full: false,
+        full: params.full,
         limit: capped_limit,
         offset: params.offset,
     };

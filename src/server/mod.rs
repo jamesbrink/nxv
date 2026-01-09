@@ -580,12 +580,12 @@ mod tests {
             INSERT INTO meta (key, value) VALUES ('last_indexed_commit', 'abc1234567890def');
             INSERT INTO package_versions
                 (name, version, first_commit_hash, first_commit_date,
-                 last_commit_hash, last_commit_date, attribute_path, description, license, store_path_x86_64_linux)
+                 last_commit_hash, last_commit_date, attribute_path, description, license, platforms, store_path_x86_64_linux)
             VALUES
-                ('python', '3.11.0', 'aaa111', 1700000000, 'bbb222', 1700100000, 'python311', 'Python interpreter', 'PSF', '/nix/store/abc123-python3-3.11.0'),
-                ('python', '3.12.0', 'ccc333', 1700200000, 'ddd444', 1700300000, 'python312', 'Python interpreter', 'PSF', '/nix/store/def456-python3-3.12.0'),
-                ('nodejs', '20.0.0', 'eee555', 1700400000, 'fff666', 1700500000, 'nodejs_20', 'Node.js runtime', 'MIT', NULL),
-                ('hello', '2.10', 'ggg777', 1700600000, 'hhh888', 1700700000, 'hello', 'Hello World program', 'GPL-3.0', '/nix/store/xyz789-hello-2.10');
+                ('python', '3.11.0', 'aaa111', 1700000000, 'bbb222', 1700100000, 'python311', 'Python interpreter', 'PSF', '["x86_64-linux", "aarch64-linux", "x86_64-darwin"]', '/nix/store/abc123-python3-3.11.0'),
+                ('python', '3.12.0', 'ccc333', 1700200000, 'ddd444', 1700300000, 'python312', 'Python interpreter', 'PSF', '["x86_64-linux", "aarch64-linux"]', '/nix/store/def456-python3-3.12.0'),
+                ('nodejs', '20.0.0', 'eee555', 1700400000, 'fff666', 1700500000, 'nodejs_20', 'Node.js runtime', 'MIT', '["x86_64-darwin", "aarch64-darwin"]', NULL),
+                ('hello', '2.10', 'ggg777', 1700600000, 'hhh888', 1700700000, 'hello', 'Hello World program', 'GPL-3.0', '["x86_64-linux"]', '/nix/store/xyz789-hello-2.10');
 
             INSERT INTO package_versions_fts (rowid, attribute_path, description)
             SELECT id, attribute_path, description FROM package_versions;
@@ -1363,5 +1363,113 @@ mod tests {
                 .unwrap()
                 .contains("no-cache")
         );
+    }
+
+    #[tokio::test]
+    async fn test_search_with_desc_flag() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None, None);
+
+        // Search for "runtime" in descriptions using desc=true parameter
+        let (status, json) = get_json(&app, "/api/v1/search?q=runtime&desc=true").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let data = json["data"].as_array().unwrap();
+        // Should find nodejs which has "Node.js runtime" in description
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0]["name"], "nodejs");
+    }
+
+    #[tokio::test]
+    async fn test_search_with_platform_filter() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None, None);
+
+        // Filter for x86_64-linux platform
+        let (status, json) = get_json(&app, "/api/v1/search?q=python&platform=x86_64-linux").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let data = json["data"].as_array().unwrap();
+        // Both python versions support x86_64-linux
+        assert_eq!(data.len(), 2);
+
+        // Filter for x86_64-darwin platform
+        let (status, json) = get_json(&app, "/api/v1/search?q=python&platform=x86_64-darwin").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let data = json["data"].as_array().unwrap();
+        // Only python311 supports x86_64-darwin
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0]["attribute_path"], "python311");
+    }
+
+    #[tokio::test]
+    async fn test_search_with_platform_filter_no_match() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None, None);
+
+        // Filter for aarch64-darwin platform (only nodejs supports this)
+        let (status, json) =
+            get_json(&app, "/api/v1/search?q=python&platform=aarch64-darwin").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let data = json["data"].as_array().unwrap();
+        // No python packages support aarch64-darwin in test data
+        assert!(data.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_search_darwin_only_packages() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None, None);
+
+        // Search for packages on aarch64-darwin (only nodejs in test data)
+        let (status, json) =
+            get_json(&app, "/api/v1/search?q=nodejs&platform=aarch64-darwin").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let data = json["data"].as_array().unwrap();
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0]["name"], "nodejs");
+    }
+
+    #[tokio::test]
+    async fn test_search_combined_filters() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None, None);
+
+        // Combine platform and license filters
+        let (status, json) = get_json(
+            &app,
+            "/api/v1/search?q=python&platform=x86_64-linux&license=PSF",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let data = json["data"].as_array().unwrap();
+        assert_eq!(data.len(), 2);
+        for pkg in data {
+            assert_eq!(pkg["license"], "PSF");
+        }
     }
 }

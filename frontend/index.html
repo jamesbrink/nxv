@@ -660,6 +660,7 @@
           <label class="search-option">
             Sort:
             <select id="sortOrder">
+              <option value="relevance">Relevance</option>
               <option value="date">Date</option>
               <option value="name">Name</option>
               <option value="version">Version</option>
@@ -868,6 +869,21 @@
       const getShortHash = (hash) => {
         if (!hash || typeof hash !== 'string') return '';
         return hash.substring(0, Math.min(7, hash.length));
+      };
+
+      // Format maintainers (show first 2, with count of more)
+      const formatMaintainers = (maintainers) => {
+        if (!maintainers) return '';
+        // Maintainers can be a JSON array or comma-separated string
+        let maintainerList = [];
+        try {
+          maintainerList = JSON.parse(maintainers);
+        } catch {
+          maintainerList = maintainers.split(',').map((m) => m.trim());
+        }
+        if (maintainerList.length === 0) return '';
+        if (maintainerList.length <= 2) return maintainerList.join(', ');
+        return `${maintainerList.slice(0, 2).join(', ')} +${maintainerList.length - 2}`;
       };
 
       // Format platforms into clean arch badges
@@ -1089,6 +1105,12 @@
             params.append('version', effectiveVersion);
           }
 
+          // Server-side platform filtering
+          const archFilter = document.getElementById('archFilter').value;
+          if (archFilter) {
+            params.append('platform', archFilter);
+          }
+
           const res = await fetch(`${API_BASE}/search?${params}`);
           const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
 
@@ -1105,22 +1127,8 @@
 
           const json = await res.json();
 
-          let { data, meta } = json;
+          const { data, meta } = json;
           currentOffset = offset;
-
-          // Client-side architecture filter
-          const archFilter = document.getElementById('archFilter').value;
-          if (archFilter) {
-            data = data.filter((pkg) => {
-              if (!pkg.platforms) return false;
-              try {
-                const platforms = JSON.parse(pkg.platforms);
-                return platforms.includes(archFilter);
-              } catch {
-                return pkg.platforms.includes(archFilter);
-              }
-            });
-          }
 
           if (data.length === 0) {
             container.innerHTML = `
@@ -1137,16 +1145,16 @@
           }
 
           resultsInfo.style.display = 'flex';
-          const filteredNote = archFilter ? ` (filtered from ${meta?.total || '?'})` : '';
+          const total = meta?.total || data.length;
           document.getElementById('resultsCount').textContent =
-            `Showing ${offset + 1}-${offset + data.length} of ${formatNumber(data.length)} results${filteredNote}`;
+            `Showing ${offset + 1}-${offset + data.length} of ${formatNumber(total)} results`;
           document.getElementById('resultsTime').textContent = `${elapsed}s`;
 
           container.innerHTML = `
           <div class="results-grid">
             ${data.map((pkg) => renderPackageCard(pkg)).join('')}
           </div>
-          ${archFilter ? '' : renderPagination(meta?.total || data.length, offset)}
+          ${renderPagination(total, offset)}
         `;
 
           // Attach event listeners
@@ -1224,6 +1232,7 @@
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
               ${formatDate(pkg.first_commit_date)} - ${formatDate(pkg.last_commit_date)}
             </span>
+            ${pkg.maintainers ? `<span class="result-meta-item" title="${escapeHtml(pkg.maintainers)}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg> ${formatMaintainers(pkg.maintainers)}</span>` : ''}
           </div>
           ${(() => {
             const platforms = formatPlatformsWithRaw(pkg.platforms);

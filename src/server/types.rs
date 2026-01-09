@@ -94,15 +94,24 @@ pub struct SearchParams {
     /// Exact match only (default: false).
     #[serde(default)]
     pub exact: bool,
+    /// Search in package descriptions using FTS (default: false).
+    #[serde(default)]
+    pub desc: bool,
     /// Filter by license (case-insensitive contains).
     #[serde(default)]
     pub license: Option<String>,
-    /// Sort order: date, version, or name.
+    /// Filter by platform (e.g., "x86_64-linux", "aarch64-darwin").
+    #[serde(default)]
+    pub platform: Option<String>,
+    /// Sort order: relevance, date, version, or name.
     #[serde(default)]
     pub sort: SortOrder,
     /// Reverse sort order (default: false).
     #[serde(default)]
     pub reverse: bool,
+    /// Show all commits (skip deduplication, default: false).
+    #[serde(default)]
+    pub full: bool,
     /// Maximum number of results (default: 50, 0 for unlimited).
     #[serde(default = "default_limit")]
     pub limit: usize,

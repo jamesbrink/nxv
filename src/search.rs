@@ -45,6 +45,8 @@ pub struct SearchOptions {
     pub desc: bool,
     /// Filter by license (case-insensitive contains).
     pub license: Option<String>,
+    /// Filter by platform (e.g., "x86_64-linux", "aarch64-darwin").
+    pub platform: Option<String>,
     /// Sort order for results.
     pub sort: SortOrder,
     /// Reverse the sort order.
@@ -66,6 +68,7 @@ impl Default for SearchOptions {
     /// - `exact`: `false`
     /// - `desc`: `false`
     /// - `license`: `None`
+    /// - `platform`: `None`
     /// - `sort`: `SortOrder::Relevance`
     /// - `reverse`: `false`
     /// - `full`: `false`
@@ -80,6 +83,7 @@ impl Default for SearchOptions {
     /// assert!(opts.version.is_none());
     /// assert!(!opts.exact && !opts.desc && !opts.reverse && !opts.full);
     /// assert!(opts.license.is_none());
+    /// assert!(opts.platform.is_none());
     /// assert_eq!(opts.sort, crate::search::SortOrder::Relevance);
     /// assert_eq!(opts.limit, 50);
     /// assert_eq!(opts.offset, 0);
@@ -91,6 +95,7 @@ impl Default for SearchOptions {
             exact: false,
             desc: false,
             license: None,
+            platform: None,
             sort: SortOrder::Relevance,
             reverse: false,
             full: false,
@@ -156,18 +161,21 @@ pub fn execute_search(conn: &Connection, opts: &SearchOptions) -> Result<SearchR
     // Step 2: Apply license filter
     let results = filter_by_license(results, opts.license.as_deref());
 
-    // Step 3: Sort results
+    // Step 3: Apply platform filter
+    let results = filter_by_platform(results, opts.platform.as_deref());
+
+    // Step 4: Sort results
     let mut results = results;
     sort_results(&mut results, opts.sort, opts.reverse);
 
-    // Step 4: Deduplicate (unless full mode)
+    // Step 5: Deduplicate (unless full mode)
     let results = if opts.full {
         results
     } else {
         deduplicate(results)
     };
 
-    // Step 5: Apply pagination
+    // Step 6: Apply pagination
     let (data, total) = paginate(results, opts.limit, opts.offset);
     let has_more = opts.limit > 0 && total > opts.offset + data.len();
 
@@ -205,6 +213,41 @@ pub fn filter_by_license(
                     p.license
                         .as_ref()
                         .is_some_and(|l| l.to_lowercase().contains(&license_lower))
+                })
+                .collect()
+        }
+        None => results,
+    }
+}
+
+/// Filter package versions by platform.
+///
+/// If `platform` is `None`, the input `results` are returned unchanged. When `platform` is
+/// provided, only entries whose `platforms` field contains the given platform string are retained.
+/// The platforms field is expected to be a JSON array of platform strings (e.g., `["x86_64-linux", "aarch64-linux"]`).
+///
+/// # Examples
+///
+/// ```
+/// let empty: Vec<PackageVersion> = Vec::new();
+/// let filtered = filter_by_platform(empty, Some("x86_64-linux"));
+/// assert!(filtered.is_empty());
+/// ```
+pub fn filter_by_platform(
+    results: Vec<PackageVersion>,
+    platform: Option<&str>,
+) -> Vec<PackageVersion> {
+    match platform {
+        Some(platform) => {
+            results
+                .into_iter()
+                .filter(|p| {
+                    p.platforms.as_ref().is_some_and(|platforms_json| {
+                        // Parse JSON array and check if platform is present
+                        serde_json::from_str::<Vec<String>>(platforms_json)
+                            .map(|platforms| platforms.iter().any(|pl| pl == platform))
+                            .unwrap_or(false)
+                    })
                 })
                 .collect()
         }
@@ -383,6 +426,51 @@ mod tests {
 
         let filtered = filter_by_license(packages, None);
         assert_eq!(filtered.len(), 3);
+    }
+
+    #[test]
+    fn test_filter_by_platform() {
+        let packages = vec![
+            {
+                let mut p = make_package("foo", "1.0", "foo", 0);
+                p.platforms = Some(r#"["x86_64-linux", "aarch64-linux"]"#.to_string());
+                p
+            },
+            {
+                let mut p = make_package("bar", "1.0", "bar", 1);
+                p.platforms = Some(r#"["x86_64-darwin", "aarch64-darwin"]"#.to_string());
+                p
+            },
+            {
+                let mut p = make_package("baz", "1.0", "baz", 2);
+                p.platforms = None;
+                p
+            },
+            {
+                let mut p = make_package("qux", "1.0", "qux", 3);
+                p.platforms = Some(r#"["x86_64-linux", "x86_64-darwin"]"#.to_string());
+                p
+            },
+        ];
+
+        // Filter for x86_64-linux should match foo and qux
+        let filtered = filter_by_platform(packages.clone(), Some("x86_64-linux"));
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered.iter().any(|p| p.name == "foo"));
+        assert!(filtered.iter().any(|p| p.name == "qux"));
+
+        // Filter for aarch64-darwin should match only bar
+        let filtered = filter_by_platform(packages.clone(), Some("aarch64-darwin"));
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "bar");
+
+        // No filter should return all
+        let filtered = filter_by_platform(packages.clone(), None);
+        assert_eq!(filtered.len(), 4);
+
+        // Non-existent platform should return none
+        let filtered = filter_by_platform(packages, Some("i686-linux"));
+        assert_eq!(filtered.len(), 0);
     }
 
     #[test]

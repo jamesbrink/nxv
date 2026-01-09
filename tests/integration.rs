@@ -83,22 +83,22 @@ fn create_test_db(path: &std::path::Path) {
 
         INSERT INTO package_versions
             (name, version, first_commit_hash, first_commit_date, last_commit_hash, last_commit_date,
-             attribute_path, description, license, homepage)
+             attribute_path, description, license, homepage, platforms)
         VALUES
             ('python-3.11.0', '3.11.0', 'abc1234567890', 1700000000, 'def1234567890', 1700100000,
-             'python', 'Python programming language', '["MIT"]', 'https://python.org'),
+             'python', 'Python programming language', '["MIT"]', 'https://python.org', '["x86_64-linux", "aarch64-linux", "x86_64-darwin"]'),
             ('python-3.11.0', '3.11.0', 'abc1234567890', 1700000000, 'def1234567890', 1700100000,
-             'python311', 'Python programming language', '["MIT"]', 'https://python.org'),
+             'python311', 'Python programming language', '["MIT"]', 'https://python.org', '["x86_64-linux", "aarch64-linux", "x86_64-darwin"]'),
             ('python-3.12.0', '3.12.0', 'ghi1234567890', 1701000000, 'jkl1234567890', 1701100000,
-             'python312', 'Python programming language', '["MIT"]', 'https://python.org'),
+             'python312', 'Python programming language', '["MIT"]', 'https://python.org', '["x86_64-linux", "aarch64-linux"]'),
             ('python2-2.7.18', '2.7.18', 'mno1234567890', 1600000000, 'pqr1234567890', 1600100000,
-             'python2', 'Python 2 interpreter', '["PSF"]', 'https://python.org'),
+             'python2', 'Python 2 interpreter', '["PSF"]', 'https://python.org', '["x86_64-linux"]'),
             ('nodejs-20.0.0', '20.0.0', 'stu1234567890', 1702000000, 'vwx1234567890', 1702100000,
-             'nodejs', 'Node.js JavaScript runtime', '["MIT"]', 'https://nodejs.org'),
+             'nodejs', 'Node.js JavaScript runtime', '["MIT"]', 'https://nodejs.org', '["x86_64-darwin", "aarch64-darwin"]'),
             ('firefox-120.0', '120.0', 'aaa1234567890', 1703000000, 'bbb1234567890', 1703100000,
-             'firefox', 'Mozilla Firefox web browser', '["MPL-2.0"]', 'https://firefox.com'),
+             'firefox', 'Mozilla Firefox web browser', '["MPL-2.0"]', 'https://firefox.com', '["x86_64-linux", "aarch64-linux", "x86_64-darwin", "aarch64-darwin"]'),
             ('rustc-1.75.0', '1.75.0', 'ccc1234567890', 1704000000, 'ddd1234567890', 1704100000,
-             'rustc', 'The Rust compiler', '["MIT", "Apache-2.0"]', 'https://rust-lang.org');
+             'rustc', 'The Rust compiler', '["MIT", "Apache-2.0"]', 'https://rust-lang.org', '["x86_64-linux", "aarch64-linux"]');
         "#,
     )
     .unwrap();
@@ -843,6 +843,101 @@ fn test_search_license_filter_no_match() {
         .assert()
         .success()
         .stderr(predicate::str::contains("No packages found"));
+}
+
+#[test]
+fn test_search_with_platform_filter() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    create_test_db(&db_path);
+
+    // Search for packages on x86_64-darwin platform
+    let output = nxv()
+        .args([
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "search",
+            "python",
+            "--platform",
+            "x86_64-darwin",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let results = parsed.as_array().unwrap();
+
+    // Should only find python and python311 (not python312 or python2 which don't support x86_64-darwin)
+    assert_eq!(
+        results.len(),
+        2,
+        "Should find 2 packages supporting x86_64-darwin"
+    );
+
+    for result in results {
+        let attr = result
+            .get("attribute_path")
+            .and_then(|a| a.as_str())
+            .unwrap();
+        assert!(
+            attr == "python" || attr == "python311",
+            "Found unexpected package: {}",
+            attr
+        );
+    }
+}
+
+#[test]
+fn test_search_platform_filter_no_match() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    create_test_db(&db_path);
+
+    // Search for python packages on aarch64-darwin (only nodejs supports this in test data)
+    nxv()
+        .args([
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "search",
+            "python",
+            "--platform",
+            "aarch64-darwin",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("No packages found"));
+}
+
+#[test]
+fn test_search_darwin_only_package() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    create_test_db(&db_path);
+
+    // nodejs in test data only supports darwin platforms
+    let output = nxv()
+        .args([
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "search",
+            "nodejs",
+            "--platform",
+            "aarch64-darwin",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let results = parsed.as_array().unwrap();
+
+    assert_eq!(results.len(), 1, "Should find nodejs on aarch64-darwin");
+    assert_eq!(results[0]["name"], "nodejs-20.0.0");
 }
 
 // ============================================================================

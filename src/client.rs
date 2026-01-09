@@ -133,8 +133,14 @@ impl ApiClient {
         if opts.exact {
             url.push_str("&exact=true");
         }
+        if opts.desc {
+            url.push_str("&desc=true");
+        }
         if let Some(ref license) = opts.license {
             url.push_str(&format!("&license={}", urlencoding::encode(license)));
+        }
+        if let Some(ref platform) = opts.platform {
+            url.push_str(&format!("&platform={}", urlencoding::encode(platform)));
         }
 
         let sort_str = match opts.sort {
@@ -147,6 +153,9 @@ impl ApiClient {
 
         if opts.reverse {
             url.push_str("&reverse=true");
+        }
+        if opts.full {
+            url.push_str("&full=true");
         }
         if opts.limit > 0 {
             url.push_str(&format!("&limit={}", opts.limit));

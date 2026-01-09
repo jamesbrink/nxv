@@ -367,6 +367,7 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
         exact: args.exact,
         desc: args.desc,
         license: args.license.clone(),
+        platform: args.platform.clone(),
         sort: args.sort,
         reverse: args.reverse,
         full: args.full,

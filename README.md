@@ -127,6 +127,8 @@ nxv search python                    # Find all python packages
 nxv search python 3.11               # Filter by version prefix
 nxv search python --exact            # Exact name match only
 nxv search "json parser" --desc      # Search descriptions (FTS)
+nxv search python --license MIT      # Filter by license
+nxv search python --platform x86_64-linux  # Filter by platform
 nxv search python --format json      # JSON output
 ```
 
@@ -181,6 +183,8 @@ nxv serve --host 0.0.0.0 --port 3000 --cors  # Public with CORS
 | `GET /api/v1/packages/{attr}/versions/{version}/last` | Last occurrence commit |
 | `GET /api/v1/stats` | Index statistics |
 | `GET /api/v1/health` | Health check |
+
+**Search parameters:** `q` (required), `version`, `exact`, `desc` (FTS search), `license`, `platform`, `sort` (relevance/date/version/name), `reverse`, `full`, `limit`, `offset`
 
 ### Remote API Mode
 

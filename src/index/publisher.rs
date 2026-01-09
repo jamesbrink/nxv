@@ -590,19 +590,23 @@ pub fn generate_delta_pack<P: AsRef<Path>, Q: AsRef<Path>>(
 }
 
 /// Generate a manifest file for the index.
+///
+/// `min_version` specifies the minimum schema version required to read this index.
+/// If `None`, older clients will fall back to checking the database's schema_version.
 pub fn generate_manifest<P: AsRef<Path>>(
     output_dir: P,
     full_index: IndexFile,
     latest_commit: &str,
     deltas: Vec<DeltaFile>,
     bloom_filter: IndexFile,
+    min_version: Option<u32>,
 ) -> Result<()> {
     let output_dir = output_dir.as_ref();
     let manifest_path = output_dir.join("manifest.json");
 
     let manifest = Manifest {
         version: 1,
-        min_version: None, // None = compatible with all clients that support version 1
+        min_version,
         latest_commit: latest_commit.to_string(),
         latest_commit_date: Utc::now().to_rfc3339(),
         full_index,
@@ -709,6 +713,7 @@ pub fn publish_index<P: AsRef<Path>, Q: AsRef<Path>>(
     url_prefix: Option<&str>,
     show_progress: bool,
     secret_key: Option<&str>,
+    min_version: Option<u32>,
 ) -> Result<()> {
     let db_path = db_path.as_ref();
     let output_dir = output_dir.as_ref();
@@ -737,6 +742,7 @@ pub fn publish_index<P: AsRef<Path>, Q: AsRef<Path>>(
         &last_commit,
         vec![],
         bloom_filter.clone(),
+        min_version,
     )?;
 
     // Sign the manifest if a secret key was provided
@@ -916,7 +922,15 @@ mod tests {
             size_bytes: 500,
         };
 
-        generate_manifest(output_dir, full_index, "latest123", vec![], bloom_filter).unwrap();
+        generate_manifest(
+            output_dir,
+            full_index,
+            "latest123",
+            vec![],
+            bloom_filter,
+            None,
+        )
+        .unwrap();
 
         let manifest_path = output_dir.join("manifest.json");
         assert!(manifest_path.exists());
@@ -927,6 +941,42 @@ mod tests {
         assert_eq!(parsed.version, 1);
         assert_eq!(parsed.full_index.url, "nxv-index-full.db.zst");
         assert_eq!(parsed.latest_commit, "latest123");
+        assert_eq!(parsed.min_version, None);
+    }
+
+    #[test]
+    fn test_generate_manifest_with_min_version() {
+        let dir = tempdir().unwrap();
+        let output_dir = dir.path();
+
+        let full_index = IndexFile {
+            url: "index.db.zst".to_string(),
+            sha256: "abc123".to_string(),
+            size_bytes: 1000,
+        };
+        let bloom_filter = IndexFile {
+            url: "bloom.bin".to_string(),
+            sha256: "def456".to_string(),
+            size_bytes: 500,
+        };
+
+        // Generate manifest with explicit min_version
+        generate_manifest(
+            output_dir,
+            full_index,
+            "commit123",
+            vec![],
+            bloom_filter,
+            Some(3),
+        )
+        .unwrap();
+
+        let manifest_path = output_dir.join("manifest.json");
+        let content = fs::read_to_string(&manifest_path).unwrap();
+        let parsed: Manifest = serde_json::from_str(&content).unwrap();
+
+        assert_eq!(parsed.version, 1);
+        assert_eq!(parsed.min_version, Some(3));
     }
 
     #[test]
@@ -1095,7 +1145,7 @@ mod tests {
         create_test_db(&db_path);
 
         // Publish without signing
-        publish_index(&db_path, &output_dir, None, false, None).unwrap();
+        publish_index(&db_path, &output_dir, None, false, None, None).unwrap();
 
         // Verify all artifacts except signature
         assert!(output_dir.join(INDEX_DB_NAME).exists());

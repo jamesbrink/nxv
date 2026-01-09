@@ -22,10 +22,15 @@ pub const MANIFEST_PUBLIC_KEY: &str = include_str!("../../keys/nxv.pub");
 /// Remote index manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
+    /// Schema version of this index (increments with any schema change).
     pub version: u32,
     /// Minimum schema version required to read this index.
-    /// Clients with MIN_READABLE_SCHEMA < this value should reject the index.
-    /// Defaults to `version` for backward compatibility with older manifests.
+    /// When omitted, clients use `version` for compatibility checking.
+    /// Set this lower than `version` when schema changes are purely additive
+    /// (e.g., new columns) to maintain backwards compatibility with older clients.
+    ///
+    /// Note: This is checked before downloading. The database also stores
+    /// `min_schema_version` in its meta table for local validation.
     #[serde(default)]
     pub min_version: Option<u32>,
     pub latest_commit: String,

@@ -456,6 +456,12 @@ pub struct PublishArgs {
     /// Can also be set via NXV_SECRET_KEY environment variable.
     #[arg(long, env = "NXV_SECRET_KEY", required_if_eq("sign", "true"))]
     pub secret_key: Option<String>,
+
+    /// Minimum schema version required to read this index.
+    /// Set this lower than the schema version for backward-compatible changes.
+    /// If not set, defaults to the schema version (breaking change).
+    #[arg(long)]
+    pub min_version: Option<u32>,
 }
 
 /// Arguments for the keygen command (feature-gated).

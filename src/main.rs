@@ -1354,6 +1354,7 @@ fn cmd_publish(cli: &Cli, args: &cli::PublishArgs) -> Result<()> {
         args.url_prefix.as_deref(),
         !cli.quiet,
         args.secret_key.as_deref(),
+        args.min_version,
     )?;
 
     Ok(())

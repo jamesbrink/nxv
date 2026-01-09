@@ -384,6 +384,7 @@ pub fn generate_full_index<P: AsRef<Path>, Q: AsRef<Path>>(
     output_dir: Q,
     url_prefix: Option<&str>,
     show_progress: bool,
+    min_version: Option<u32>,
 ) -> Result<(IndexFile, String)> {
     let db_path = db_path.as_ref();
     let output_dir = output_dir.as_ref();
@@ -392,12 +393,16 @@ pub fn generate_full_index<P: AsRef<Path>, Q: AsRef<Path>>(
 
     let compressed_path = output_dir.join(INDEX_DB_NAME);
 
-    // Get database info and update last_indexed_date to publish time
+    // Get database info and update metadata before compression
     let db = Database::open(db_path)?;
     let last_commit = db.get_meta("last_indexed_commit")?.unwrap_or_default();
     // Set the indexed date to now (publish time) so it matches the manifest
     db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
-    // Flush WAL to ensure the meta update is in the main DB file before compression
+    // Write min_schema_version to database for direct-download validation
+    if let Some(min_ver) = min_version {
+        db.set_meta("min_schema_version", &min_ver.to_string())?;
+    }
+    // Flush WAL to ensure meta updates are in the main DB file before compression
     db.checkpoint()?;
     let input_size = fs::metadata(db_path)?.len();
 
@@ -724,7 +729,7 @@ pub fn publish_index<P: AsRef<Path>, Q: AsRef<Path>>(
         eprintln!("Generating compressed index...");
     }
     let (full_index, last_commit) =
-        generate_full_index(db_path, output_dir, url_prefix, show_progress)?;
+        generate_full_index(db_path, output_dir, url_prefix, show_progress, min_version)?;
 
     if show_progress {
         eprintln!();
@@ -854,7 +859,7 @@ mod tests {
         create_test_db(&db_path);
 
         let (index_file, last_commit) =
-            generate_full_index(&db_path, &output_dir, None, false).unwrap();
+            generate_full_index(&db_path, &output_dir, None, false, None).unwrap();
 
         assert!(!index_file.sha256.is_empty());
         assert!(index_file.size_bytes > 0);
@@ -876,9 +881,32 @@ mod tests {
 
         let url_prefix = "https://example.com/releases";
         let (index_file, _) =
-            generate_full_index(&db_path, &output_dir, Some(url_prefix), false).unwrap();
+            generate_full_index(&db_path, &output_dir, Some(url_prefix), false, None).unwrap();
 
         assert_eq!(index_file.url, format!("{}/{}", url_prefix, INDEX_DB_NAME));
+    }
+
+    #[test]
+    fn test_generate_full_index_writes_min_schema_version() {
+        use crate::remote::download::decompress_zstd;
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let output_dir = dir.path().join("output");
+
+        create_test_db(&db_path);
+
+        // Generate with min_version=3
+        generate_full_index(&db_path, &output_dir, None, false, Some(3)).unwrap();
+
+        // Decompress and verify min_schema_version was written
+        let compressed_path = output_dir.join(INDEX_DB_NAME);
+        let decompressed_path = dir.path().join("decompressed.db");
+        decompress_zstd(&compressed_path, &decompressed_path, false).unwrap();
+
+        let db = Database::open(&decompressed_path).unwrap();
+        let min_ver = db.get_meta("min_schema_version").unwrap();
+        assert_eq!(min_ver, Some("3".to_string()));
     }
 
     #[test]

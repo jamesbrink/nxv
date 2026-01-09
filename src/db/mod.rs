@@ -19,7 +19,7 @@ const SCHEMA_VERSION: u32 = 3;
 
 /// Minimum schema version this build can read.
 /// Indexes with min_schema_version > this value are incompatible.
-const MIN_READABLE_SCHEMA: u32 = 3;
+pub const MIN_READABLE_SCHEMA: u32 = 3;
 
 /// Database connection wrapper.
 pub struct Database {
@@ -95,7 +95,8 @@ impl Database {
             return Err(NxvError::CorruptIndex("missing meta table".to_string()));
         }
 
-        // Check min_schema_version (falls back to schema_version for older indexes)
+        // Check min_schema_version if set by the indexer (for future schema changes).
+        // Falls back to schema_version for indexes that don't have min_schema_version yet.
         let min_version_str = self
             .get_meta("min_schema_version")?
             .or_else(|| self.get_meta("schema_version").ok().flatten());

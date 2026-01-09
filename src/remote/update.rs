@@ -1,6 +1,6 @@
 //! Update logic for applying remote index updates.
 
-use crate::db::Database;
+use crate::db::{Database, MIN_READABLE_SCHEMA};
 use crate::error::{NxvError, Result};
 use crate::paths;
 use crate::remote::download::download_file;
@@ -10,10 +10,6 @@ use std::path::Path;
 /// Default manifest URL.
 pub const DEFAULT_MANIFEST_URL: &str =
     "https://github.com/jamesbrink/nxv/releases/download/index-latest/manifest.json";
-
-/// Minimum schema version this build can read.
-/// Must match the value in db/mod.rs.
-const MIN_READABLE_SCHEMA: u32 = 3;
 
 /// Check if a manifest's index is compatible with this client.
 ///
@@ -336,6 +332,9 @@ pub fn apply_delta_update<P: AsRef<Path>>(
         public_key,
         timeout_secs,
     )?;
+
+    // Check compatibility before downloading anything
+    check_manifest_compatibility(&manifest)?;
 
     let delta = manifest.find_delta(from_commit).ok_or_else(|| {
         NxvError::NetworkMessage(format!("No delta available from commit {}", from_commit))

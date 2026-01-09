@@ -69,10 +69,13 @@ Release Notes:
 Files to modify:
   1. Cargo.toml - bump version to A.B.C
   2. CHANGELOG.md - move Unreleased items to [A.B.C] section
+  3. Cargo.lock - updated automatically by cargo build
 
-Actions after commit:
-  3. Commit with message "chore: release A.B.C"
-  4. Create and push tag vA.B.C
+Actions after verification:
+  4. Run cargo build/test/clippy to verify changes
+  5. Commit with message "chore: release A.B.C"
+  6. Run isolated Docker nix build (optional)
+  7. Create and push tag vA.B.C
 
 CI/CD will then:
   - Build static binaries (Linux x86_64/aarch64, macOS x86_64/ARM64)
@@ -106,22 +109,53 @@ Move the `[Unreleased]` section contents to a new version section:
    - Change `[unreleased]` link to compare against new tag.
    - Add new version link.
 
-### Step 3: Commit changes
+### Step 3: Verify changes
+
+Run a full build and test suite to ensure the version bump doesn't break anything
+and to regenerate Cargo.lock with the new version:
 
 ```bash
-git add Cargo.toml CHANGELOG.md
+cargo build --features indexer
+cargo test --features indexer
+cargo clippy --features indexer -- -D warnings
+```
+
+If any verification fails, stop and inform the user before committing.
+
+### Step 4: Commit changes
+
+Include Cargo.lock to ensure reproducible builds:
+
+```bash
+git add Cargo.toml Cargo.lock CHANGELOG.md
 git commit -m "chore: release A.B.C"
 ```
 
-### Step 4: Create and push tag
+### Step 5: Verify isolated nix build (optional but recommended)
+
+Run the isolated Docker build to verify the flake builds correctly with no local
+state. This catches issues like missing Cargo.lock that would fail in CI:
+
+```bash
+./scripts/verify-nix-build.sh
+```
+
+If Docker is not available or the user wants to skip, proceed with caution.
+
+### Step 6: Create tag locally
 
 ```bash
 git tag vA.B.C
+```
+
+### Step 7: Push commit and tag
+
+```bash
 git push origin main
 git push origin vA.B.C
 ```
 
-### Step 5: Report completion
+### Step 8: Report completion
 
 Provide link to [GitHub Actions][actions] and remind user to monitor the
 release workflow.

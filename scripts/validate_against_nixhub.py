@@ -22,6 +22,9 @@ Options:
     --after DATE        Only consider versions after this date (YYYY-MM-DD)
     --edge-cases        Include edge case packages (nested, special chars, etc.)
     --comprehensive     Run comprehensive test with 100 random + edge cases
+    --nixpkgs PATH      Path to nixpkgs clone for git-based validation
+    --verify-commits    Verify commit hashes exist in nixpkgs (requires --nixpkgs)
+    --verify-versions   Verify package version at recorded commit (requires --nixpkgs)
 
 Examples:
     # Validate specific packages
@@ -38,11 +41,18 @@ Examples:
 
     # Comprehensive validation
     python scripts/validate_against_nixhub.py --comprehensive --before 2023-07-25
+
+    # Verify commits exist in nixpkgs
+    python scripts/validate_against_nixhub.py --packages hello --nixpkgs ./nixpkgs --verify-commits
+
+    # Verify version at recorded commit (spot-check)
+    python scripts/validate_against_nixhub.py --packages hello,git --nixpkgs ./nixpkgs --verify-versions
 """
 
 import argparse
 import json
 import sqlite3
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -172,6 +182,8 @@ class VersionComparison:
     nixhub_store_path: Optional[str] = None
     store_path_match: Optional[bool] = None
     cache_available: Optional[bool] = None
+    commit_exists_in_git: Optional[bool] = None
+    version_verified_at_commit: Optional[bool] = None
 
 
 @dataclass
@@ -187,6 +199,8 @@ class PackageValidation:
     commit_mismatches: list[VersionComparison] = field(default_factory=list)
     store_path_mismatches: list[VersionComparison] = field(default_factory=list)
     cache_unavailable: list[str] = field(default_factory=list)
+    commits_not_in_git: list[VersionComparison] = field(default_factory=list)
+    version_verification_failed: list[VersionComparison] = field(default_factory=list)
     completeness_ratio: float = 0.0
     error: Optional[str] = None
 
@@ -203,6 +217,8 @@ class ValidationReport:
     total_commit_mismatches: int = 0
     total_store_path_mismatches: int = 0
     total_cache_unavailable: int = 0
+    total_commits_not_in_git: int = 0
+    total_version_verification_failed: int = 0
     avg_completeness: float = 0.0
     package_validations: list[PackageValidation] = field(default_factory=list)
 
@@ -251,6 +267,95 @@ def check_cache_availability(store_path: str) -> bool:
         return False
 
 
+def verify_commit_exists(nixpkgs_path: Path, commit_hash: str) -> bool:
+    """Verify a commit hash exists in the nixpkgs repository."""
+    if not commit_hash or len(commit_hash) < 7:
+        return False
+
+    try:
+        result = subprocess.run(
+            ["git", "cat-file", "-t", commit_hash],
+            cwd=nixpkgs_path,
+            capture_output=True,
+            timeout=10,
+        )
+        return result.returncode == 0 and result.stdout.decode().strip() == "commit"
+    except subprocess.TimeoutExpired:
+        return False
+    except Exception:
+        return False
+
+
+def verify_version_at_commit(
+    nixpkgs_path: Path,
+    commit_hash: str,
+    attr_path: str,
+    expected_version: str,
+) -> Optional[bool]:
+    """Verify a package has the expected version at a specific commit.
+
+    Returns:
+        True: Version matches
+        False: Version doesn't match
+        None: Could not evaluate (error or package doesn't exist at commit)
+    """
+    if not commit_hash or not attr_path or not expected_version:
+        return None
+
+    # Checkout the commit temporarily and evaluate the version
+    try:
+        # First, get the current HEAD to restore later
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=nixpkgs_path,
+            capture_output=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            return None
+        original_head = result.stdout.decode().strip()
+
+        # Checkout the target commit
+        result = subprocess.run(
+            ["git", "checkout", "--quiet", commit_hash],
+            cwd=nixpkgs_path,
+            capture_output=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            return None
+
+        try:
+            # Evaluate the package version using nix-instantiate
+            nix_expr = f'(import <nixpkgs> {{}}).{attr_path}.version or "unavailable"'
+            result = subprocess.run(
+                ["nix-instantiate", "--eval", "-E", nix_expr, "-I", f"nixpkgs={nixpkgs_path}"],
+                cwd=nixpkgs_path,
+                capture_output=True,
+                timeout=60,
+            )
+
+            if result.returncode == 0:
+                actual_version = result.stdout.decode().strip().strip('"')
+                if actual_version == "unavailable":
+                    return None
+                return actual_version == expected_version
+            return None
+        finally:
+            # Always restore the original HEAD
+            subprocess.run(
+                ["git", "checkout", "--quiet", original_head],
+                cwd=nixpkgs_path,
+                capture_output=True,
+                timeout=30,
+            )
+
+    except subprocess.TimeoutExpired:
+        return None
+    except Exception:
+        return None
+
+
 def get_nxv_versions(
     db_path: Path,
     package_name: str,
@@ -259,7 +364,7 @@ def get_nxv_versions(
 ) -> dict[str, dict]:
     """Get all versions of a package from nxv database.
 
-    Returns dict mapping version -> {commit_hash, store_path, date, ...}
+    Returns dict mapping version -> {commit_hash, store_path, date, attr_path, ...}
     """
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -268,7 +373,7 @@ def get_nxv_versions(
     # Build query with optional date filters
     query = """
         SELECT DISTINCT version, first_commit_hash, store_path_x86_64_linux,
-               datetime(first_commit_date, 'unixepoch') as commit_date
+               datetime(first_commit_date, 'unixepoch') as commit_date, attribute_path
         FROM package_versions
         WHERE (attribute_path = ? OR name = ?)
     """
@@ -294,6 +399,7 @@ def get_nxv_versions(
                 "commit_hash": row["first_commit_hash"],
                 "store_path": row["store_path_x86_64_linux"],
                 "date": row["commit_date"],
+                "attr_path": row["attribute_path"],
             }
 
     conn.close()
@@ -372,6 +478,9 @@ def validate_package(
     verbose: bool = False,
     before_date: Optional[str] = None,
     after_date: Optional[str] = None,
+    nixpkgs_path: Optional[Path] = None,
+    verify_commits: bool = False,
+    verify_versions: bool = False,
 ) -> PackageValidation:
     """Validate a single package against NixHub."""
     validation = PackageValidation(package_name=package_name)
@@ -460,6 +569,24 @@ def validate_package(
             if not comparison.cache_available:
                 validation.cache_unavailable.append(version)
 
+        # Verify commit exists in nixpkgs git repo
+        if verify_commits and nixpkgs_path and comparison.nxv_commit:
+            comparison.commit_exists_in_git = verify_commit_exists(
+                nixpkgs_path, comparison.nxv_commit
+            )
+            if comparison.commit_exists_in_git is False:
+                validation.commits_not_in_git.append(comparison)
+
+        # Verify version at commit (spot-check)
+        if verify_versions and nixpkgs_path and comparison.nxv_commit:
+            attr_path = nxv_data.get("attr_path")
+            if attr_path:
+                comparison.version_verified_at_commit = verify_version_at_commit(
+                    nixpkgs_path, comparison.nxv_commit, attr_path, version
+                )
+                if comparison.version_verified_at_commit is False:
+                    validation.version_verification_failed.append(comparison)
+
     # Calculate completeness ratio
     if nixhub_set:
         validation.completeness_ratio = len(nxv_set & nixhub_set) / len(nixhub_set)
@@ -470,6 +597,10 @@ def validate_package(
             print(f"  Commit mismatches: {len(validation.commit_mismatches)}")
         if validation.store_path_mismatches:
             print(f"  Store path mismatches: {len(validation.store_path_mismatches)}")
+        if validation.commits_not_in_git:
+            print(f"  Commits not in git: {len(validation.commits_not_in_git)}")
+        if validation.version_verification_failed:
+            print(f"  Version verification failed: {len(validation.version_verification_failed)}")
 
     return validation
 
@@ -516,6 +647,8 @@ def generate_report(validations: list[PackageValidation]) -> ValidationReport:
         report.total_commit_mismatches += len(v.commit_mismatches)
         report.total_store_path_mismatches += len(v.store_path_mismatches)
         report.total_cache_unavailable += len(v.cache_unavailable)
+        report.total_commits_not_in_git += len(v.commits_not_in_git)
+        report.total_version_verification_failed += len(v.version_verification_failed)
         total_completeness += v.completeness_ratio
 
     valid_count = report.packages_validated - report.packages_with_errors
@@ -543,6 +676,14 @@ def print_report(report: ValidationReport):
     print(f"  - Commit hash mismatches: {report.total_commit_mismatches}")
     print(f"  - Store path mismatches: {report.total_store_path_mismatches}")
     print(f"  - Cache unavailable: {report.total_cache_unavailable}")
+
+    # Git verification results (only if non-zero)
+    if report.total_commits_not_in_git > 0 or report.total_version_verification_failed > 0:
+        print(f"\nGit Verification:")
+        if report.total_commits_not_in_git > 0:
+            print(f"  - Commits not in git: {report.total_commits_not_in_git}")
+        if report.total_version_verification_failed > 0:
+            print(f"  - Version verification failed: {report.total_version_verification_failed}")
 
     print(f"\nAverage completeness: {report.avg_completeness:.1%}")
 
@@ -666,11 +807,40 @@ def main():
         action="store_true",
         help="Run comprehensive test with 100 random + all edge cases",
     )
+    parser.add_argument(
+        "--nixpkgs",
+        type=Path,
+        default=None,
+        help="Path to nixpkgs clone for git-based validation",
+    )
+    parser.add_argument(
+        "--verify-commits",
+        action="store_true",
+        help="Verify commit hashes exist in nixpkgs (requires --nixpkgs)",
+    )
+    parser.add_argument(
+        "--verify-versions",
+        action="store_true",
+        help="Verify package version at recorded commit (requires --nixpkgs, slow)",
+    )
 
     args = parser.parse_args()
 
     if not args.db.exists():
         print(f"Error: database not found: {args.db}", file=sys.stderr)
+        sys.exit(1)
+
+    # Validate --nixpkgs requirement
+    if (args.verify_commits or args.verify_versions) and not args.nixpkgs:
+        print("Error: --verify-commits and --verify-versions require --nixpkgs", file=sys.stderr)
+        sys.exit(1)
+
+    if args.nixpkgs and not args.nixpkgs.exists():
+        print(f"Error: nixpkgs directory not found: {args.nixpkgs}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.nixpkgs and not (args.nixpkgs / ".git").exists():
+        print(f"Error: nixpkgs directory is not a git repo: {args.nixpkgs}", file=sys.stderr)
         sys.exit(1)
 
     # Determine packages to validate
@@ -696,6 +866,10 @@ def main():
         print(f"Date filter: after {args.after}")
     if args.check_cache:
         print("Cache checking: enabled (slower)")
+    if args.verify_commits:
+        print(f"Git commit verification: enabled (nixpkgs: {args.nixpkgs})")
+    if args.verify_versions:
+        print(f"Version verification: enabled (very slow, uses nix-instantiate)")
 
     # Validate each package
     validations = []
@@ -709,6 +883,9 @@ def main():
             args.verbose,
             args.before,
             args.after,
+            args.nixpkgs,
+            args.verify_commits,
+            args.verify_versions,
         )
         validations.append(validation)
         # Rate limiting for NixHub API
@@ -737,6 +914,8 @@ def main():
             "total_commit_mismatches": report.total_commit_mismatches,
             "total_store_path_mismatches": report.total_store_path_mismatches,
             "total_cache_unavailable": report.total_cache_unavailable,
+            "total_commits_not_in_git": report.total_commits_not_in_git,
+            "total_version_verification_failed": report.total_version_verification_failed,
             "avg_completeness": report.avg_completeness,
             "package_validations": [
                 {
@@ -763,6 +942,20 @@ def main():
                             "nixhub_store_path": c.nixhub_store_path,
                         }
                         for c in v.store_path_mismatches
+                    ],
+                    "commits_not_in_git": [
+                        {
+                            "version": c.version,
+                            "nxv_commit": c.nxv_commit,
+                        }
+                        for c in v.commits_not_in_git
+                    ],
+                    "version_verification_failed": [
+                        {
+                            "version": c.version,
+                            "nxv_commit": c.nxv_commit,
+                        }
+                        for c in v.version_verification_failed
                     ],
                 }
                 for v in report.package_validations

@@ -1,0 +1,438 @@
+{
+  "_comment": "Regression test fixture for package version extraction",
+  "_generated": "2026-01-09",
+  "_description": "Contains known-good packages with expected version extraction behavior",
+
+  "packages": [
+    {
+      "attr_path": "hello",
+      "category": "stable",
+      "notes": "Simple, stable package with straightforward version",
+      "expect_version_regex": "^2\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "git",
+      "category": "stable",
+      "notes": "Frequently updated, complex versioning",
+      "expect_version_regex": "^2\\.[0-9]+\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "curl",
+      "category": "stable",
+      "notes": "Stable CLI tool with semver",
+      "expect_version_regex": "^[78]\\.[0-9]+\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "wget",
+      "category": "stable",
+      "notes": "Stable download utility",
+      "expect_version_regex": "^1\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "ripgrep",
+      "category": "stable",
+      "notes": "Rust CLI tool",
+      "expect_version_regex": "^[0-9]+\\.[0-9]+\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "fd",
+      "category": "stable",
+      "notes": "Rust CLI tool",
+      "expect_version_regex": "^[0-9]+\\.[0-9]+\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "jq",
+      "category": "stable",
+      "notes": "JSON processor",
+      "expect_version_regex": "^1\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "htop",
+      "category": "stable",
+      "notes": "Process viewer",
+      "expect_version_regex": "^[23]\\.[0-9]+\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "vim",
+      "category": "editors",
+      "notes": "Text editor",
+      "expect_version_regex": "^[89]\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "emacs",
+      "category": "editors",
+      "notes": "Text editor",
+      "expect_version_regex": "^2[789]\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "neovim",
+      "category": "editors",
+      "notes": "Wrapper package - version via unwrapped",
+      "expect_version_regex": "^0\\.[0-9]+\\.[0-9]+",
+      "expect_version_source": ["direct", "unwrapped", "passthru"]
+    },
+    {
+      "attr_path": "neovim-unwrapped",
+      "category": "editors",
+      "notes": "Unwrapped neovim - should have direct version",
+      "expect_version_regex": "^0\\.[0-9]+\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "firefox",
+      "category": "browsers",
+      "notes": "Complex wrapper, preserves version",
+      "expect_version_regex": "^[0-9]{2,3}\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "chromium",
+      "category": "browsers",
+      "notes": "Browser with complex build",
+      "expect_version_regex": "^[0-9]{2,3}\\.[0-9]+\\.[0-9]+\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "thunderbird",
+      "category": "browsers",
+      "notes": "Email client wrapper",
+      "expect_version_regex": "^[0-9]{2,3}\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "python3",
+      "category": "languages",
+      "notes": "Python interpreter",
+      "expect_version_regex": "^3\\.[0-9]+\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "nodejs",
+      "category": "languages",
+      "notes": "JavaScript runtime",
+      "expect_version_regex": "^[0-9]+\\.[0-9]+\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "rustc",
+      "category": "languages",
+      "notes": "Rust compiler",
+      "expect_version_regex": "^1\\.[0-9]+\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "go",
+      "category": "languages",
+      "notes": "Go compiler",
+      "expect_version_regex": "^1\\.[0-9]+\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "ruby",
+      "category": "languages",
+      "notes": "Ruby interpreter",
+      "expect_version_regex": "^[23]\\.[0-9]+\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "gcc",
+      "category": "compilers",
+      "notes": "GCC compiler",
+      "expect_version_regex": "^[0-9]+\\.[0-9]+\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "llvm",
+      "category": "compilers",
+      "notes": "LLVM toolchain",
+      "expect_version_regex": "^[0-9]+\\.[0-9]+\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "clang",
+      "category": "compilers",
+      "notes": "Clang compiler",
+      "expect_version_regex": "^[0-9]+\\.[0-9]+\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "cmake",
+      "category": "build_tools",
+      "notes": "Build system",
+      "expect_version_regex": "^3\\.[0-9]+\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "meson",
+      "category": "build_tools",
+      "notes": "Build system",
+      "expect_version_regex": "^[01]\\.[0-9]+\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "ninja",
+      "category": "build_tools",
+      "notes": "Build system",
+      "expect_version_regex": "^1\\.[0-9]+\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "postgresql",
+      "category": "databases",
+      "notes": "PostgreSQL database",
+      "expect_version_regex": "^[0-9]+\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "sqlite",
+      "category": "databases",
+      "notes": "SQLite database",
+      "expect_version_regex": "^3\\.[0-9]+\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "redis",
+      "category": "databases",
+      "notes": "Redis cache",
+      "expect_version_regex": "^[67]\\.[0-9]+\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "nginx",
+      "category": "servers",
+      "notes": "Web server",
+      "expect_version_regex": "^1\\.[0-9]+\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "docker",
+      "category": "containers",
+      "notes": "Container runtime",
+      "expect_version_regex": "^2[0-9]\\.[0-9]+\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "podman",
+      "category": "containers",
+      "notes": "Container runtime",
+      "expect_version_regex": "^[45]\\.[0-9]+\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "coreutils",
+      "category": "stable",
+      "notes": "GNU core utilities",
+      "expect_version_regex": "^[89]\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "bash",
+      "category": "stable",
+      "notes": "Bourne-again shell",
+      "expect_version_regex": "^5\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "zsh",
+      "category": "shells",
+      "notes": "Z shell",
+      "expect_version_regex": "^5\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "fish",
+      "category": "shells",
+      "notes": "Fish shell",
+      "expect_version_regex": "^3\\.[0-9]+\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "tmux",
+      "category": "terminal",
+      "notes": "Terminal multiplexer",
+      "expect_version_regex": "^3\\.[0-9]+[a-z]?",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "screen",
+      "category": "terminal",
+      "notes": "Terminal multiplexer",
+      "expect_version_regex": "^4\\.[0-9]+\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "openssh",
+      "category": "network",
+      "notes": "SSH client/server",
+      "expect_version_regex": "^[89]\\.[0-9]+p[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "openssl",
+      "category": "crypto",
+      "notes": "OpenSSL library",
+      "expect_version_regex": "^[13]\\.[0-9]+\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "gnupg",
+      "category": "crypto",
+      "notes": "GPG encryption",
+      "expect_version_regex": "^2\\.[0-9]+\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "ffmpeg",
+      "category": "media",
+      "notes": "Media converter",
+      "expect_version_regex": "^[567]\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "imagemagick",
+      "category": "media",
+      "notes": "Image manipulation",
+      "expect_version_regex": "^[67]\\.[0-9]+\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "fzf",
+      "category": "cli_tools",
+      "notes": "Fuzzy finder",
+      "expect_version_regex": "^0\\.[0-9]+\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "bat",
+      "category": "cli_tools",
+      "notes": "Cat clone with syntax highlighting",
+      "expect_version_regex": "^0\\.[0-9]+\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "tree",
+      "category": "cli_tools",
+      "notes": "Directory tree viewer",
+      "expect_version_regex": "^[12]\\.[0-9]+\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "unzip",
+      "category": "archive",
+      "notes": "Archive extractor",
+      "expect_version_regex": "^6\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "gzip",
+      "category": "archive",
+      "notes": "Compression utility",
+      "expect_version_regex": "^1\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "xz",
+      "category": "archive",
+      "notes": "XZ compression",
+      "expect_version_regex": "^5\\.[0-9]+\\.[0-9]+",
+      "expect_version_source": "direct"
+    },
+    {
+      "attr_path": "zstd",
+      "category": "archive",
+      "notes": "Zstandard compression",
+      "expect_version_regex": "^1\\.[0-9]+\\.[0-9]+",
+      "expect_version_source": "direct"
+    }
+  ],
+
+  "edge_cases": {
+    "_comment": "Packages that test specific edge cases in extraction",
+
+    "wrappers": [
+      {
+        "attr_path": "neovim",
+        "notes": "Tests wrapper version fallback chain",
+        "expect_has_version": true
+      },
+      {
+        "attr_path": "weechat",
+        "notes": "IRC client wrapper - tests passthru version",
+        "expect_has_version": true
+      }
+    ],
+
+    "nested_packages": [
+      {
+        "attr_path": "python3Packages.requests",
+        "notes": "Nested package under python3Packages",
+        "expect_has_version": true
+      },
+      {
+        "attr_path": "nodePackages.typescript",
+        "notes": "Nested package under nodePackages",
+        "expect_has_version": true
+      }
+    ],
+
+    "date_versions": [
+      {
+        "attr_path": "linux",
+        "notes": "Kernel with date-based versions",
+        "expect_version_regex": "^[456]\\.[0-9]+\\.[0-9]+",
+        "expect_version_source": "direct"
+      }
+    ],
+
+    "special_chars": [
+      {
+        "attr_path": "gcc13",
+        "notes": "Package name with numbers",
+        "expect_version_regex": "^13\\.[0-9]+\\.[0-9]+",
+        "expect_version_source": "direct"
+      },
+      {
+        "attr_path": "python311",
+        "notes": "Python with version in name",
+        "expect_version_regex": "^3\\.11\\.[0-9]+",
+        "expect_version_source": "direct"
+      }
+    ]
+  },
+
+  "known_issues": {
+    "_comment": "Packages with known extraction issues to track",
+
+    "no_version": [
+      {
+        "attr_path": "addOpenGLRunpath",
+        "notes": "Build hook - no version expected",
+        "expect_has_version": false
+      },
+      {
+        "attr_path": "wrapQtAppsHook",
+        "notes": "Build hook - no version expected",
+        "expect_has_version": false
+      }
+    ],
+
+    "version_from_name": [
+      {
+        "attr_path": "perl536",
+        "notes": "Version embedded in package name",
+        "expect_version_regex": "^5\\.36\\.[0-9]+",
+        "expect_version_source": ["direct", "name"]
+      }
+    ]
+  }
+}

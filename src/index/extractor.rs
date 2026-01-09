@@ -887,4 +887,135 @@ mod tests {
         assert_eq!(hello.version.as_deref(), Some("2.12.1"));
         assert_eq!(hello.version_source.as_deref(), Some("direct"));
     }
+
+    /// Regression test that validates package extraction against known-good fixture.
+    ///
+    /// This test requires a nixpkgs clone and runs actual nix evaluation, so it's
+    /// marked as ignored. Run with:
+    ///   NIXPKGS_PATH=/path/to/nixpkgs cargo test --features indexer test_regression_fixture -- --ignored
+    #[test]
+    #[ignore]
+    fn test_regression_fixture() {
+        use regex::Regex;
+        use serde::Deserialize;
+        use std::collections::HashMap;
+        use std::env;
+        use std::fs;
+
+        #[derive(Deserialize)]
+        struct RegressionFixture {
+            packages: Vec<PackageTest>,
+        }
+
+        #[derive(Deserialize)]
+        struct PackageTest {
+            attr_path: String,
+            expect_version_regex: Option<String>,
+            expect_version_source: Option<serde_json::Value>,
+        }
+
+        // Check for nixpkgs path
+        let nixpkgs_path = env::var("NIXPKGS_PATH").unwrap_or_else(|_| {
+            panic!(
+                "NIXPKGS_PATH environment variable not set. \
+                 Set it to the path of your nixpkgs clone."
+            )
+        });
+
+        let nix_check = Command::new("nix").arg("--version").output();
+        if nix_check.is_err() || !nix_check.unwrap().status.success() {
+            panic!("nix is not available - required for regression tests");
+        }
+
+        // Load fixture
+        let fixture_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/regression_packages.json");
+        let fixture_content = fs::read_to_string(&fixture_path)
+            .unwrap_or_else(|e| panic!("Failed to read fixture file {:?}: {}", fixture_path, e));
+        let fixture: RegressionFixture =
+            serde_json::from_str(&fixture_content).expect("Failed to parse fixture JSON");
+
+        // Extract packages
+        let attr_paths: Vec<String> = fixture.packages.iter().map(|p| p.attr_path.clone()).collect();
+        let packages = extract_packages_for_attrs(
+            std::path::Path::new(&nixpkgs_path),
+            "x86_64-linux",
+            &attr_paths,
+        )
+        .expect("Failed to extract packages");
+
+        // Build lookup map
+        let package_map: HashMap<_, _> = packages
+            .iter()
+            .map(|p| (p.attribute_path.clone(), p))
+            .collect();
+
+        let mut failures = Vec::new();
+
+        for test_pkg in &fixture.packages {
+            let pkg = match package_map.get(&test_pkg.attr_path) {
+                Some(p) => p,
+                None => {
+                    failures.push(format!(
+                        "{}: Package not extracted",
+                        test_pkg.attr_path
+                    ));
+                    continue;
+                }
+            };
+
+            // Check version regex
+            if let Some(regex_str) = &test_pkg.expect_version_regex {
+                let regex = Regex::new(regex_str).expect("Invalid regex in fixture");
+                match &pkg.version {
+                    Some(v) if regex.is_match(v) => {}
+                    Some(v) => {
+                        failures.push(format!(
+                            "{}: Version '{}' doesn't match regex '{}'",
+                            test_pkg.attr_path, v, regex_str
+                        ));
+                    }
+                    None => {
+                        failures.push(format!(
+                            "{}: No version extracted (expected match for '{}')",
+                            test_pkg.attr_path, regex_str
+                        ));
+                    }
+                }
+            }
+
+            // Check version source
+            if let Some(expected_source) = &test_pkg.expect_version_source {
+                let actual_source = pkg.version_source.as_deref();
+                let matches = match expected_source {
+                    serde_json::Value::String(s) => actual_source == Some(s.as_str()),
+                    serde_json::Value::Array(arr) => arr
+                        .iter()
+                        .filter_map(|v| v.as_str())
+                        .any(|s| actual_source == Some(s)),
+                    _ => false,
+                };
+                if !matches {
+                    failures.push(format!(
+                        "{}: version_source {:?} doesn't match expected {:?}",
+                        test_pkg.attr_path, actual_source, expected_source
+                    ));
+                }
+            }
+        }
+
+        if !failures.is_empty() {
+            panic!(
+                "Regression test failures ({} of {}):\n  - {}",
+                failures.len(),
+                fixture.packages.len(),
+                failures.join("\n  - ")
+            );
+        }
+
+        println!(
+            "Regression test passed: {} packages validated",
+            fixture.packages.len()
+        );
+    }
 }

@@ -106,6 +106,7 @@ proptest = "1.5"
 serial_test = "3.2"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+regex = "1.12"
 
 [[bench]]
 name = "search_benchmark"

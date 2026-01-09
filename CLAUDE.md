@@ -53,6 +53,7 @@ nix run .#nxv-indexer            # Run with indexer feature
 ### API Server (`server/`)
 
 The `nxv serve` command runs an HTTP API server with:
+
 - REST API at `/api/v1/*` (search, package info, version history, stats)
 - Web frontend at `/` (embedded HTML/JS)
 - OpenAPI documentation at `/docs`
@@ -61,6 +62,7 @@ The `nxv serve` command runs an HTTP API server with:
 ### Indexer (feature-gated)
 
 The `indexer` feature enables building indexes from a local nixpkgs clone:
+
 - `git.rs`: Walks nixpkgs git history (commits from 2017+)
 - `extractor.rs`: Runs `nix eval` to extract package metadata per commit
 - `mod.rs`: Coordinates indexing with checkpointing for Ctrl+C resilience
@@ -92,10 +94,12 @@ cargo search <crate>           # Find latest version
 ## Data Paths
 
 The database and bloom filter are stored in platform-specific data directories:
+
 - **macOS**: `~/Library/Application Support/nxv/`
 - **Linux**: `~/.local/share/nxv/`
 
 Files:
+
 - `index.db` - SQLite database with package versions
 - `bloom.bin` - Bloom filter for fast negative lookups
 
@@ -124,6 +128,7 @@ A NixOS module is provided for running nxv as a systemd service:
 ## Releasing
 
 **Use `/release` to prepare and execute a release.** This skill:
+
 1. Runs pre-flight checks (fmt, clippy, tests, nix flake check, clean git status)
 2. Generates release notes from git history
 3. Shows a complete summary of what will happen

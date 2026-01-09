@@ -337,6 +337,7 @@
             pkgs.cargo-edit
             pkgs.miniserve  # Simple HTTP server for frontend dev
             pkgs.nodePackages.prettier  # HTML/JS/CSS formatter
+            pkgs.markdownlint-cli  # Markdown linter
             pkgs.k6  # Load testing tool
           ];
 

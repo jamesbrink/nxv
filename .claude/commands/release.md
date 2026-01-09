@@ -16,6 +16,7 @@ Run these checks and stop immediately if any fail:
 cargo fmt --check
 cargo clippy --features indexer -- -D warnings
 cargo test --features indexer
+markdownlint '**/*.md' --ignore node_modules
 nix flake check
 git status --porcelain
 ```
@@ -29,8 +30,21 @@ If `git status` shows uncommitted changes, stop and inform the user.
 3. Get commits since last tag with `git log --oneline <last-tag>..HEAD`.
 4. Get today's UTC timestamp with `date -u +%Y-%m-%dT%H:%M:%SZ`.
 5. Check the `created` timestamp in `flake.nix` Docker config.
+6. Read current `CHANGELOG.md` to see unreleased section.
 
-## Phase 3: Generate Release Notes
+## Phase 3: Determine Version
+
+Follow semantic versioning (`MAJOR.MINOR.PATCH`):
+
+- **MAJOR** - Breaking changes (API incompatibility, removed features)
+- **MINOR** - New features (backward compatible additions)
+- **PATCH** - Bug fixes (backward compatible fixes)
+
+Pre-release versions use hyphen suffix (e.g., `0.2.0-rc1`).
+
+Review the commits and suggest an appropriate version bump based on the changes.
+
+## Phase 4: Generate Release Notes
 
 Create markdown release notes with these sections:
 
@@ -38,7 +52,7 @@ Create markdown release notes with these sections:
 - **Fixes** - Bug fixes (commits starting with `fix:`)
 - **Other** - Everything else (refactor, chore, docs, etc.)
 
-## Phase 4: User Confirmation
+## Phase 5: User Confirmation
 
 Present a summary and ask for confirmation before proceeding:
 
@@ -46,7 +60,7 @@ Present a summary and ask for confirmation before proceeding:
 === RELEASE SUMMARY ===
 
 Current version: X.Y.Z
-Proposed version: (user to confirm)
+Suggested version: A.B.C (reason: <major/minor/patch bump rationale>)
 
 Commits to be released:
   <commit list>
@@ -54,11 +68,14 @@ Commits to be released:
 Release Notes:
   <generated notes>
 
-Actions to perform:
-  1. Bump version in Cargo.toml
-  2. Update Docker timestamp in flake.nix
-  3. Commit with message "chore: bump version to X.Y.Z for release"
-  4. Create and push tag vX.Y.Z
+Files to modify:
+  1. Cargo.toml - bump version to A.B.C
+  2. CHANGELOG.md - move Unreleased items to [A.B.C] section
+  3. flake.nix - update Docker timestamp
+
+Actions after commit:
+  4. Commit with message "chore: bump version to A.B.C for release"
+  5. Create and push tag vA.B.C
 
 CI/CD will then:
   - Build static binaries (Linux x86_64/aarch64, macOS x86_64/ARM64)
@@ -73,35 +90,55 @@ Proceed? Enter version number to confirm, or "abort" to cancel.
 Use `AskUserQuestion` to get confirmation. The user must provide the version
 number (e.g., `0.1.4` or `0.2.0`).
 
-## Phase 5: Execute Release
+## Phase 6: Execute Release
 
 Only proceed after explicit user confirmation with a version number.
 
-1. Update `Cargo.toml` version field.
-2. Update `flake.nix` Docker `created` timestamp.
-3. Commit the changes:
+### Step 1: Update Cargo.toml
 
-   ```bash
-   git add Cargo.toml flake.nix
-   git commit -m "chore: bump version to X.Y.Z for release"
-   ```
+Edit the `version` field to the new version.
 
-4. Create and push the tag:
+### Step 2: Update CHANGELOG.md
 
-   ```bash
-   git tag vX.Y.Z
-   git push origin main
-   git push origin vX.Y.Z
-   ```
+Move the `[Unreleased]` section contents to a new version section:
 
-5. Report completion with link to [GitHub Actions][actions].
+1. Create new section `## [A.B.C] - YYYY-MM-DD` below `[Unreleased]`.
+2. Move all content from `[Unreleased]` to the new section.
+3. Leave `[Unreleased]` empty (keep the heading).
+4. Update the comparison links at the bottom:
+   - Change `[unreleased]` link to compare against new tag.
+   - Add new version link.
+
+### Step 3: Update flake.nix
+
+Update the Docker `created` timestamp to today's UTC date.
+
+### Step 4: Commit changes
+
+```bash
+git add Cargo.toml CHANGELOG.md flake.nix
+git commit -m "chore: bump version to A.B.C for release"
+```
+
+### Step 5: Create and push tag
+
+```bash
+git tag vA.B.C
+git push origin main
+git push origin vA.B.C
+```
+
+### Step 6: Report completion
+
+Provide link to [GitHub Actions][actions] and remind user to monitor the
+release workflow.
 
 [actions]: https://github.com/jamesbrink/nxv/actions
 
 ## Important Notes
 
-- Never proceed past Phase 4 without explicit user confirmation.
+- Never proceed past Phase 5 without explicit user confirmation.
 - Stop immediately if any pre-flight check fails.
-- Version must follow semver: `MAJOR.MINOR.PATCH`.
-- Pre-release versions use hyphen suffix (e.g., `0.2.0-rc1`).
+- The changelog must be updated as part of the release.
+- Version bumps must follow semver conventions.
 - The `created` timestamp in `flake.nix` only affects Docker image metadata.

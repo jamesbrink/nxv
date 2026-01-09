@@ -1312,7 +1312,8 @@ impl Indexer {
                 file_attr_map.get("pkgs/top-level/all-packages.nix");
 
             // Check for infrastructure files and parse their diffs to extract affected attrs
-            let mut needs_full_extraction = false;
+            // For the first commit, always do full extraction to capture baseline state
+            let mut needs_full_extraction = commit_idx == 0;
             for infra_file in INFRASTRUCTURE_FILES {
                 if changed_paths.contains(&infra_file.to_string()) {
                     // Get the diff for this infrastructure file
@@ -1359,17 +1360,25 @@ impl Indexer {
                 }
             }
 
-            // If a large infrastructure file change triggered full extraction,
+            // If full extraction is needed (first commit or large infrastructure diff),
             // extract all packages from all-packages.nix
             if needs_full_extraction && let Some(all_attrs_list) = all_attrs {
                 for attr in all_attrs_list {
                     target_attr_paths.insert(attr.clone());
                 }
-                debug!(
-                    commit = %commit.short_hash,
-                    total_attrs = target_attr_paths.len(),
-                    "Full extraction triggered due to large infrastructure diff"
-                );
+                if commit_idx == 0 {
+                    debug!(
+                        commit = %commit.short_hash,
+                        total_attrs = target_attr_paths.len(),
+                        "Full extraction for first commit to capture baseline state"
+                    );
+                } else {
+                    debug!(
+                        commit = %commit.short_hash,
+                        total_attrs = target_attr_paths.len(),
+                        "Full extraction triggered due to large infrastructure diff"
+                    );
+                }
             }
 
             for path in &changed_paths {
@@ -1967,8 +1976,10 @@ fn build_file_attr_map(
     for position in positions {
         if let Some(file) = position.file
             && let Some(relative) = normalize_position_file(repo_path, &file)
-            && !INFRASTRUCTURE_FILES.contains(&relative.as_str())
         {
+            // Include all files in the map, including infrastructure files.
+            // Infrastructure files are handled specially during incremental indexing
+            // (via diff parsing), but we need them in the map for full extraction.
             map.entry(relative).or_default().push(position.attr_path);
         }
     }

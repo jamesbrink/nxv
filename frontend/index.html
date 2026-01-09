@@ -202,11 +202,60 @@
         margin-bottom: 0.75rem;
       }
 
+      .result-header-right {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+      }
+
       .result-name {
         font-size: 1.1rem;
         font-weight: 600;
         color: var(--accent);
         word-break: break-word;
+      }
+
+      .result-name.clickable {
+        cursor: pointer;
+        transition: opacity 0.15s;
+      }
+
+      .result-name.clickable:hover {
+        opacity: 0.8;
+        text-decoration: underline;
+      }
+
+      .result-version.clickable {
+        cursor: pointer;
+        transition:
+          transform 0.15s,
+          box-shadow 0.15s;
+      }
+
+      .result-version.clickable:hover {
+        transform: scale(1.05);
+        box-shadow: 0 0 0 2px var(--accent);
+      }
+
+      .btn-icon {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 28px;
+        height: 28px;
+        padding: 0;
+        background: transparent;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        color: var(--text-muted);
+        cursor: pointer;
+        transition: all 0.15s;
+      }
+
+      .btn-icon:hover {
+        background: var(--bg-secondary);
+        color: var(--text);
+        border-color: var(--text-muted);
       }
 
       .result-version {
@@ -456,6 +505,63 @@
       .version-item .btn {
         flex-shrink: 0;
         margin-top: 0.25rem;
+      }
+
+      .info-grid {
+        display: grid;
+        gap: 0.75rem;
+      }
+
+      .info-row {
+        display: grid;
+        grid-template-columns: 120px 1fr;
+        gap: 1rem;
+        padding: 0.5rem 0;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .info-row:last-child {
+        border-bottom: none;
+      }
+
+      .info-label {
+        color: var(--text-muted);
+        font-size: 0.85rem;
+        font-weight: 500;
+      }
+
+      .info-value {
+        color: var(--text);
+        word-break: break-word;
+      }
+
+      .info-value code {
+        background: var(--bg-tertiary);
+        padding: 0.15rem 0.4rem;
+        border-radius: 3px;
+        font-size: 0.85rem;
+      }
+
+      .info-value a {
+        color: var(--accent);
+        text-decoration: none;
+      }
+
+      .info-value a:hover {
+        text-decoration: underline;
+      }
+
+      .info-section {
+        margin-top: 1rem;
+        padding-top: 1rem;
+        border-top: 1px solid var(--border);
+      }
+
+      .info-section-title {
+        font-weight: 600;
+        color: var(--text);
+        margin-bottom: 0.75rem;
+        font-size: 0.9rem;
       }
 
       .platform-badges {
@@ -734,6 +840,21 @@
       </div>
     </div>
 
+    <div class="modal-overlay" id="infoModal">
+      <div class="modal" style="max-width: 700px">
+        <div class="modal-header">
+          <h3 class="modal-title" id="infoTitle">Package Info</h3>
+          <button class="modal-close" id="infoClose">&times;</button>
+        </div>
+        <div class="modal-body" id="infoBody">
+          <div class="loading">
+            <div class="spinner"></div>
+            <p>Loading package info...</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="toast" id="toast"></div>
 
     <footer>
@@ -784,6 +905,7 @@
       let currentOffset = 0;
       const LIMIT = 25;
       let versionAutoPopulated = false; // Track if version was auto-filled
+      let lastSearchKey = ''; // Track last search to avoid redundant requests
 
       // Store expressions by ID to avoid HTML escaping issues
       const expressionStore = new Map();
@@ -1058,9 +1180,65 @@
           return;
         }
 
+        // Smart parse: detect "python 2.7" style queries
+        const parsed = parseSearchQuery(query);
+        const currentVersion = versionInput.value.trim();
+
+        // Always use parsed.package which is trimmed (handles trailing spaces)
+        // If query contains a version (e.g., "python 2.7"), this is just the package name
+        // If no version (e.g., "python "), this is the trimmed query
+        let effectiveQuery = parsed.package;
+        let effectiveVersion = currentVersion;
+
+        if (parsed.version && (!currentVersion || versionAutoPopulated)) {
+          // Auto-populate version field when user types "python 2.7" style query
+          effectiveVersion = parsed.version;
+          versionInput.value = parsed.version;
+          versionAutoPopulated = true;
+          versionInput.style.borderColor = 'var(--accent)';
+          versionInput.style.transition = 'border-color 0.3s';
+          setTimeout(() => {
+            versionInput.style.borderColor = '';
+          }, 2000);
+        } else if (!parsed.version && versionAutoPopulated) {
+          // Clear auto-populated version if query no longer has version
+          versionInput.value = '';
+          versionAutoPopulated = false;
+          effectiveVersion = '';
+        }
+
+        const params = new URLSearchParams({
+          q: effectiveQuery,
+          limit: LIMIT,
+          offset: offset,
+          sort: document.getElementById('sortOrder').value,
+        });
+
+        if (document.getElementById('exactMatch').checked) {
+          params.append('exact', 'true');
+        }
+
+        if (effectiveVersion) {
+          params.append('version', effectiveVersion);
+        }
+
+        // Server-side platform filtering
+        const archFilter = document.getElementById('archFilter').value;
+        if (archFilter) {
+          params.append('platform', archFilter);
+        }
+
+        // Skip redundant searches (e.g., typing trailing space)
+        const searchKey = params.toString();
+        if (searchKey === lastSearchKey && offset === 0) {
+          // Same search, no need to re-fetch
+          return;
+        }
+
         // Update URL with current search parameters
         updateUrl(query);
 
+        // Show loading state
         container.innerHTML =
           '<div class="loading"><div class="spinner"></div><p>Searching...</p></div>';
         resultsInfo.style.display = 'none';
@@ -1068,53 +1246,6 @@
         const startTime = performance.now();
 
         try {
-          // Smart parse: detect "python 2.7" style queries
-          const parsed = parseSearchQuery(query);
-          const currentVersion = versionInput.value.trim();
-
-          // If query contains a version (e.g., "python 2.7"), always use just the package name
-          // The version goes to the version filter (either auto-populated or manually overridden)
-          let effectiveQuery = parsed.version ? parsed.package : query;
-          let effectiveVersion = currentVersion;
-
-          if (parsed.version && (!currentVersion || versionAutoPopulated)) {
-            // Auto-populate version field when user types "python 2.7" style query
-            effectiveVersion = parsed.version;
-            versionInput.value = parsed.version;
-            versionAutoPopulated = true;
-            versionInput.style.borderColor = 'var(--accent)';
-            versionInput.style.transition = 'border-color 0.3s';
-            setTimeout(() => {
-              versionInput.style.borderColor = '';
-            }, 2000);
-          } else if (!parsed.version && versionAutoPopulated) {
-            // Clear auto-populated version if query no longer has version
-            versionInput.value = '';
-            versionAutoPopulated = false;
-            effectiveVersion = '';
-          }
-
-          const params = new URLSearchParams({
-            q: effectiveQuery,
-            limit: LIMIT,
-            offset: offset,
-            sort: document.getElementById('sortOrder').value,
-          });
-
-          if (document.getElementById('exactMatch').checked) {
-            params.append('exact', 'true');
-          }
-
-          if (effectiveVersion) {
-            params.append('version', effectiveVersion);
-          }
-
-          // Server-side platform filtering
-          const archFilter = document.getElementById('archFilter').value;
-          if (archFilter) {
-            params.append('platform', archFilter);
-          }
-
           const res = await fetch(`${API_BASE}/search?${params}`);
           const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
 
@@ -1124,7 +1255,11 @@
             const contentType = res.headers.get('content-type');
             if (contentType && contentType.includes('application/json')) {
               const errorJson = await res.json().catch(() => null);
-              throw new Error(errorJson?.message || errorJson?.error || getHttpErrorMessage(res.status, 'Search failed'));
+              throw new Error(
+                errorJson?.message ||
+                  errorJson?.error ||
+                  getHttpErrorMessage(res.status, 'Search failed')
+              );
             }
             throw new Error(getHttpErrorMessage(res.status, 'Search failed'));
           }
@@ -1164,6 +1299,9 @@
           // Attach event listeners
           attachCardListeners();
           attachPaginationListeners(query);
+
+          // Save search key for redundant search detection
+          lastSearchKey = searchKey;
         } catch (err) {
           container.innerHTML = `
           <div class="error-state">
@@ -1205,14 +1343,14 @@
 
         // Only generate expressions if we have a valid commit hash
         const nixExpr = hasCommitHash
-          ? (isLegacy
-              ? `(import (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/${shortHash}.tar.gz") {}).${pkg.attribute_path}`
-              : `nixpkgs#${pkg.attribute_path}  # or nixpkgs/${shortHash}#${pkg.attribute_path}`)
+          ? isLegacy
+            ? `(import (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/${shortHash}.tar.gz") {}).${pkg.attribute_path}`
+            : `nixpkgs#${pkg.attribute_path}  # or nixpkgs/${shortHash}#${pkg.attribute_path}`
           : '';
         const nixShell = hasCommitHash
-          ? (isLegacy
-              ? `${insecurePrefix}nix-shell -p '(import (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/${shortHash}.tar.gz") {}).${pkg.attribute_path}'`
-              : `${insecurePrefix}nix shell${impureFlag} nixpkgs/${shortHash}#${pkg.attribute_path}`)
+          ? isLegacy
+            ? `${insecurePrefix}nix-shell -p '(import (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/${shortHash}.tar.gz") {}).${pkg.attribute_path}'`
+            : `${insecurePrefix}nix shell${impureFlag} nixpkgs/${shortHash}#${pkg.attribute_path}`
           : '';
 
         // Store expressions in the map (only if valid)
@@ -1223,10 +1361,15 @@
         }
 
         return `
-        <div class="result-card" data-attr="${escapeHtml(pkg.attribute_path)}">
+        <div class="result-card" data-attr="${escapeHtml(pkg.attribute_path)}" data-version="${escapeHtml(pkg.version)}">
           <div class="result-header">
-            <span class="result-name">${escapeHtml(pkg.name)}</span>
-            <span class="result-version" ${isInsecure(pkg) ? 'style="background: rgba(248, 81, 73, 0.3); border: 1px solid var(--error);"' : ''}>${escapeHtml(pkg.version)}${isInsecure(pkg) ? ' ⚠' : ''}</span>
+            <span class="result-name clickable" data-attr="${escapeHtml(pkg.attribute_path)}" data-version="${escapeHtml(pkg.version)}" title="Click for full details">${escapeHtml(pkg.name)}</span>
+            <div class="result-header-right">
+              <span class="result-version clickable" data-version="${escapeHtml(pkg.version)}" title="Click to filter by this version" ${isInsecure(pkg) ? 'style="background: rgba(248, 81, 73, 0.3); border: 1px solid var(--error);"' : ''}>${escapeHtml(pkg.version)}${isInsecure(pkg) ? ' ⚠' : ''}</span>
+              <button class="btn-icon share-link" data-attr="${escapeHtml(pkg.attribute_path)}" data-version="${escapeHtml(pkg.version)}" title="Copy link to this package">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+              </button>
+            </div>
           </div>
           <div class="result-attr">${escapeHtml(pkg.attribute_path)}</div>
           ${pkg.description ? `<div class="result-desc">${escapeHtml(pkg.description)}</div>` : ''}
@@ -1275,7 +1418,9 @@
               : ''
           }
           <div class="result-actions">
-            ${hasCommitHash ? `
+            ${
+              hasCommitHash
+                ? `
             <button class="btn copy-expr" data-id="${cardId}-expr">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
               ${isLegacy ? 'Copy Nix Expression' : 'Copy Flake Ref'}
@@ -1284,7 +1429,9 @@
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m4 17 6-6-6-6M12 19h8"/></svg>
               ${isLegacy ? 'Copy nix-shell' : 'Copy nix shell'}
             </button>
-            ` : ''}
+            `
+                : ''
+            }
             ${
               hasCommitHash && pkg.source_path
                 ? `
@@ -1293,12 +1440,14 @@
                 View Source
               </a>
             `
-                : hasCommitHash ? `
+                : hasCommitHash
+                  ? `
               <a class="btn" href="https://github.com/NixOS/nixpkgs/tree/${pkg.last_commit_hash}" target="_blank" rel="noopener" title="View nixpkgs at this commit">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
                 View nixpkgs
               </a>
-            ` : ''
+            `
+                  : ''
             }
             ${
               pkg.homepage && isSafeUrl(pkg.homepage)
@@ -1353,6 +1502,37 @@
 
         document.querySelectorAll('.view-history').forEach((btn) => {
           btn.addEventListener('click', () => showHistory(btn.dataset.attr));
+        });
+
+        // Clickable package name to show info
+        document.querySelectorAll('.result-name.clickable').forEach((el) => {
+          el.addEventListener('click', () => {
+            showPackageInfo(el.dataset.attr, el.dataset.version);
+          });
+        });
+
+        // Share link button
+        document.querySelectorAll('.share-link').forEach((btn) => {
+          btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            copyShareLink(btn.dataset.attr, btn.dataset.version);
+          });
+        });
+
+        // Clickable version badge to filter by version
+        document.querySelectorAll('.result-version.clickable').forEach((el) => {
+          el.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const version = el.dataset.version;
+            const versionInput = document.getElementById('versionFilter');
+            versionInput.value = version;
+            versionAutoPopulated = false;
+            // Trigger search with current query
+            const query = document.getElementById('searchInput').value.trim();
+            if (query) {
+              search(query);
+            }
+          });
         });
       };
 
@@ -1478,7 +1658,7 @@
         }
       };
 
-      // Close modal
+      // Close history modal
       document.getElementById('historyClose').addEventListener('click', () => {
         document.getElementById('historyModal').classList.remove('active');
       });
@@ -1486,6 +1666,235 @@
       document.getElementById('historyModal').addEventListener('click', (e) => {
         if (e.target.id === 'historyModal') {
           document.getElementById('historyModal').classList.remove('active');
+        }
+      });
+
+      // Show package info modal
+      const showPackageInfo = async (attr, version) => {
+        const modal = document.getElementById('infoModal');
+        const body = document.getElementById('infoBody');
+        const title = document.getElementById('infoTitle');
+
+        title.textContent = attr;
+        body.innerHTML =
+          '<div class="loading"><div class="spinner"></div><p>Loading package info...</p></div>';
+        modal.classList.add('active');
+
+        try {
+          const res = await fetch(
+            `${API_BASE}/packages/${encodeURIComponent(attr)}/versions/${encodeURIComponent(version)}`
+          );
+          if (!res.ok) {
+            body.innerHTML = `<p>${escapeHtml(getHttpErrorMessage(res.status, 'Failed to load package info'))}</p>`;
+            return;
+          }
+
+          const { data: pkg } = await res.json();
+          if (!pkg) {
+            body.innerHTML = '<p>Package not found.</p>';
+            return;
+          }
+
+          const isLegacy = predatesFlakes(pkg.last_commit_date);
+          const shortHash = getShortHash(pkg.last_commit_hash);
+          const hasCommit = shortHash.length > 0;
+          const pkgInsecure = isInsecure(pkg);
+          const insecurePrefix = pkgInsecure ? 'NIXPKGS_ALLOW_INSECURE=1 ' : '';
+          const impureFlag = pkgInsecure ? ' --impure' : '';
+
+          const nixShell = hasCommit
+            ? isLegacy
+              ? `${insecurePrefix}nix-shell -p '(import (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/${shortHash}.tar.gz") {}).${pkg.attribute_path}'`
+              : `${insecurePrefix}nix shell${impureFlag} nixpkgs/${shortHash}#${pkg.attribute_path}`
+            : '';
+
+          // Store for copy button
+          expressionStore.set('info-shell', nixShell);
+
+          const platforms = pkg.platforms ? formatPlatformsWithRaw(pkg.platforms) : [];
+
+          body.innerHTML = `
+            <div class="info-grid">
+              <div class="info-row">
+                <span class="info-label">Name</span>
+                <span class="info-value">${escapeHtml(pkg.name)}</span>
+              </div>
+              <div class="info-row">
+                <span class="info-label">Version</span>
+                <span class="info-value"><code>${escapeHtml(pkg.version)}</code>${pkgInsecure ? ' <span style="color: var(--error);">⚠ Insecure</span>' : ''}</span>
+              </div>
+              <div class="info-row">
+                <span class="info-label">Attribute</span>
+                <span class="info-value"><code>${escapeHtml(pkg.attribute_path)}</code></span>
+              </div>
+              ${
+                pkg.description
+                  ? `
+              <div class="info-row">
+                <span class="info-label">Description</span>
+                <span class="info-value">${escapeHtml(pkg.description)}</span>
+              </div>
+              `
+                  : ''
+              }
+              ${
+                pkg.license
+                  ? `
+              <div class="info-row">
+                <span class="info-label">License</span>
+                <span class="info-value">${escapeHtml(pkg.license)}</span>
+              </div>
+              `
+                  : ''
+              }
+              ${
+                pkg.homepage && isSafeUrl(pkg.homepage)
+                  ? `
+              <div class="info-row">
+                <span class="info-label">Homepage</span>
+                <span class="info-value"><a href="${escapeHtml(pkg.homepage)}" target="_blank" rel="noopener">${escapeHtml(pkg.homepage)}</a></span>
+              </div>
+              `
+                  : ''
+              }
+              ${
+                pkg.maintainers
+                  ? `
+              <div class="info-row">
+                <span class="info-label">Maintainers</span>
+                <span class="info-value">${escapeHtml(pkg.maintainers)}</span>
+              </div>
+              `
+                  : ''
+              }
+              <div class="info-row">
+                <span class="info-label">Available</span>
+                <span class="info-value">${formatDate(pkg.first_commit_date)} — ${formatDate(pkg.last_commit_date)}</span>
+              </div>
+              ${
+                hasCommit
+                  ? `
+              <div class="info-row">
+                <span class="info-label">Commit</span>
+                <span class="info-value"><code>${escapeHtml(pkg.last_commit_hash)}</code></span>
+              </div>
+              `
+                  : ''
+              }
+              ${
+                platforms.length > 0
+                  ? `
+              <div class="info-row">
+                <span class="info-label">Platforms</span>
+                <span class="info-value">${platforms.map((p) => escapeHtml(p.raw)).join(', ')}</span>
+              </div>
+              `
+                  : ''
+              }
+              ${
+                pkg.source_path
+                  ? `
+              <div class="info-row">
+                <span class="info-label">Source</span>
+                <span class="info-value"><a href="https://github.com/NixOS/nixpkgs/blob/${pkg.last_commit_hash}/${escapeHtml(pkg.source_path)}" target="_blank" rel="noopener">${escapeHtml(pkg.source_path)}</a></span>
+              </div>
+              `
+                  : ''
+              }
+            </div>
+
+            ${
+              hasCommit
+                ? `
+            <div class="info-section">
+              <div class="info-section-title">Quick Install</div>
+              <div style="display: flex; gap: 0.5rem; align-items: center;">
+                <code style="flex: 1; padding: 0.5rem; background: var(--bg-tertiary); border-radius: 4px; font-size: 0.8rem; overflow-x: auto; white-space: nowrap;">${escapeHtml(nixShell)}</code>
+                <button class="btn" id="infoCopyShell">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                  Copy
+                </button>
+              </div>
+            </div>
+            `
+                : ''
+            }
+
+            ${
+              pkgInsecure
+                ? `
+            <div class="info-section">
+              <div class="insecure-warning" style="margin: 0;">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                <div class="insecure-warning-content">
+                  <div class="insecure-warning-title">Known Vulnerabilities</div>
+                  <div class="insecure-warning-list">${getVulnerabilities(pkg)
+                    .map((v) => escapeHtml(v))
+                    .join(', ')}</div>
+                </div>
+              </div>
+            </div>
+            `
+                : ''
+            }
+          `;
+
+          // Add copy button listener
+          const copyBtn = document.getElementById('infoCopyShell');
+          if (copyBtn) {
+            copyBtn.addEventListener('click', () => {
+              copyToClipboard(expressionStore.get('info-shell'), copyBtn);
+            });
+          }
+        } catch (err) {
+          body.innerHTML = `<div class="error-state"><p>Failed to load info: ${escapeHtml(err.message)}</p></div>`;
+        }
+      };
+
+      // Copy shareable link
+      const copyShareLink = (attr, version) => {
+        const url = `${window.location.origin}${window.location.pathname}?q=${encodeURIComponent(attr)}&version=${encodeURIComponent(version)}&exact=true`;
+
+        // Use clipboard API if available (secure contexts), otherwise fallback
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard
+            .writeText(url)
+            .then(() => {
+              showToast('Link copied to clipboard!');
+            })
+            .catch(() => {
+              fallbackCopyToClipboard(url);
+            });
+        } else {
+          fallbackCopyToClipboard(url);
+        }
+      };
+
+      // Fallback for non-secure contexts (HTTP)
+      const fallbackCopyToClipboard = (text) => {
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.select();
+        try {
+          document.execCommand('copy');
+          showToast('Link copied to clipboard!');
+        } catch (err) {
+          showToast('Failed to copy link');
+        }
+        document.body.removeChild(textarea);
+      };
+
+      // Close info modal
+      document.getElementById('infoClose').addEventListener('click', () => {
+        document.getElementById('infoModal').classList.remove('active');
+      });
+
+      document.getElementById('infoModal').addEventListener('click', (e) => {
+        if (e.target.id === 'infoModal') {
+          document.getElementById('infoModal').classList.remove('active');
         }
       });
 
@@ -1520,11 +1929,26 @@
       });
 
       // Version filter triggers on input with debounce (like search input)
+      // Also syncs back to search field (bidirectional)
       const versionFilter = document.getElementById('versionFilter');
       versionFilter.addEventListener('input', () => {
         // User is manually editing, so reset auto-populated flag
         versionAutoPopulated = false;
-        if (searchInput.value.trim()) {
+
+        const currentQuery = searchInput.value.trim();
+        if (currentQuery) {
+          // Parse current query to get package name
+          const parsed = parseSearchQuery(currentQuery);
+          const newVersion = versionFilter.value.trim();
+
+          // Update search field to reflect new version
+          if (newVersion) {
+            searchInput.value = `${parsed.package} ${newVersion}`;
+          } else {
+            // Version cleared, just show package name
+            searchInput.value = parsed.package;
+          }
+
           clearTimeout(searchTimeout);
           searchTimeout = setTimeout(() => search(searchInput.value), 300);
         }
@@ -1538,6 +1962,7 @@
         }
         if (e.key === 'Escape') {
           document.getElementById('historyModal').classList.remove('active');
+          document.getElementById('infoModal').classList.remove('active');
         }
       });
 

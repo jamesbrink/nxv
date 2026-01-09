@@ -17,6 +17,10 @@ const DEFAULT_BUSY_TIMEOUT_SECS: u64 = 5;
 #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
 const SCHEMA_VERSION: u32 = 3;
 
+/// Minimum schema version this build can read.
+/// Indexes with min_schema_version > this value are incompatible.
+const MIN_READABLE_SCHEMA: u32 = 3;
+
 /// Database connection wrapper.
 pub struct Database {
     conn: Connection,
@@ -91,20 +95,22 @@ impl Database {
             return Err(NxvError::CorruptIndex("missing meta table".to_string()));
         }
 
-        // Check schema version
-        let version_str = self.get_meta("schema_version")?;
-        let version_str = version_str.as_deref().unwrap_or("0");
-        let db_version: u32 = version_str.parse().map_err(|_| {
+        // Check min_schema_version (falls back to schema_version for older indexes)
+        let min_version_str = self
+            .get_meta("min_schema_version")?
+            .or_else(|| self.get_meta("schema_version").ok().flatten());
+        let min_version_str = min_version_str.as_deref().unwrap_or("0");
+        let min_schema_version: u32 = min_version_str.parse().map_err(|_| {
             NxvError::CorruptIndex(format!(
-                "invalid schema_version '{}': expected integer",
-                version_str
+                "invalid min_schema_version '{}': expected integer",
+                min_version_str
             ))
         })?;
 
-        if db_version > SCHEMA_VERSION {
+        if min_schema_version > MIN_READABLE_SCHEMA {
             return Err(NxvError::CorruptIndex(format!(
-                "database schema version {} is newer than supported version {}",
-                db_version, SCHEMA_VERSION
+                "index requires schema version {} but this build only supports up to {}",
+                min_schema_version, MIN_READABLE_SCHEMA
             )));
         }
 

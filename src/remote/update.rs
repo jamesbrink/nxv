@@ -11,6 +11,29 @@ use std::path::Path;
 pub const DEFAULT_MANIFEST_URL: &str =
     "https://github.com/jamesbrink/nxv/releases/download/index-latest/manifest.json";
 
+/// Minimum schema version this build can read.
+/// Must match the value in db/mod.rs.
+const MIN_READABLE_SCHEMA: u32 = 3;
+
+/// Check if a manifest's index is compatible with this client.
+///
+/// Returns an error if the index requires a newer schema version than we support.
+fn check_manifest_compatibility(manifest: &Manifest) -> Result<()> {
+    // min_version indicates the minimum client version needed to read this index.
+    // If not set, fall back to version (for backward compat with old manifests).
+    let required_version = manifest.min_version.unwrap_or(manifest.version);
+
+    if required_version > MIN_READABLE_SCHEMA {
+        return Err(NxvError::CorruptIndex(format!(
+            "index requires schema version {} but this build only supports up to {}. \
+             Please upgrade nxv to use this index.",
+            required_version, MIN_READABLE_SCHEMA
+        )));
+    }
+
+    Ok(())
+}
+
 /// Default timeout for manifest requests in seconds.
 const DEFAULT_MANIFEST_TIMEOUT_SECS: u64 = 30;
 
@@ -264,6 +287,9 @@ fn apply_full_update_with_manifest<P: AsRef<Path>>(
 ) -> Result<()> {
     let db_path = db_path.as_ref();
 
+    // Check compatibility before downloading anything
+    check_manifest_compatibility(manifest)?;
+
     // Download full index
     if show_progress {
         eprintln!("Downloading full index...");
@@ -470,6 +496,60 @@ mod tests {
 
         // This would fail to fetch manifest from network, so just test the path exists logic
         assert!(!db_path.exists());
+    }
+
+    #[test]
+    fn test_manifest_compatibility_check() {
+        use crate::remote::manifest::{IndexFile, Manifest};
+
+        let index_file = IndexFile {
+            url: "https://example.com/index.db.zst".to_string(),
+            size_bytes: 1000,
+            sha256: "abc123".to_string(),
+        };
+
+        // Compatible: min_version not set, version <= MIN_READABLE_SCHEMA
+        let manifest = Manifest {
+            version: 3,
+            min_version: None,
+            latest_commit: "abc".to_string(),
+            latest_commit_date: "2024-01-01".to_string(),
+            full_index: index_file.clone(),
+            bloom_filter: index_file.clone(),
+            deltas: vec![],
+        };
+        assert!(check_manifest_compatibility(&manifest).is_ok());
+
+        // Compatible: min_version explicitly set to supported version
+        let manifest = Manifest {
+            version: 5, // Higher version, but min_version is compatible
+            min_version: Some(3),
+            latest_commit: "abc".to_string(),
+            latest_commit_date: "2024-01-01".to_string(),
+            full_index: index_file.clone(),
+            bloom_filter: index_file.clone(),
+            deltas: vec![],
+        };
+        assert!(check_manifest_compatibility(&manifest).is_ok());
+
+        // Incompatible: min_version too high
+        let manifest = Manifest {
+            version: 10,
+            min_version: Some(10),
+            latest_commit: "abc".to_string(),
+            latest_commit_date: "2024-01-01".to_string(),
+            full_index: index_file.clone(),
+            bloom_filter: index_file,
+            deltas: vec![],
+        };
+        let result = check_manifest_compatibility(&manifest);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("requires schema version 10")
+        );
     }
 
     /// Test the full update flow: create delta pack, import it into existing database.
@@ -777,7 +857,7 @@ COMMIT;
             Err(e) => {
                 let err = e.to_string();
                 assert!(
-                    err.contains("schema version 999 is newer than supported"),
+                    err.contains("requires schema version 999"),
                     "Expected schema version error, got: {}",
                     err
                 );

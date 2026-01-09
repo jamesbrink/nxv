@@ -23,6 +23,11 @@ pub const MANIFEST_PUBLIC_KEY: &str = include_str!("../../keys/nxv.pub");
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
     pub version: u32,
+    /// Minimum schema version required to read this index.
+    /// Clients with MIN_READABLE_SCHEMA < this value should reject the index.
+    /// Defaults to `version` for backward compatibility with older manifests.
+    #[serde(default)]
+    pub min_version: Option<u32>,
     pub latest_commit: String,
     pub latest_commit_date: String,
     pub full_index: IndexFile,

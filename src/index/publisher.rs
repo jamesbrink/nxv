@@ -602,6 +602,7 @@ pub fn generate_manifest<P: AsRef<Path>>(
 
     let manifest = Manifest {
         version: 1,
+        min_version: None, // None = compatible with all clients that support version 1
         latest_commit: latest_commit.to_string(),
         latest_commit_date: Utc::now().to_rfc3339(),
         full_index,

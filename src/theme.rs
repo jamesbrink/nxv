@@ -330,6 +330,7 @@ impl Themed for usize {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     // Reset color state before each test
     fn reset_colors() {
@@ -338,12 +339,14 @@ mod tests {
     }
 
     #[test]
+    #[serial(colors)]
     fn test_colors_enabled_by_default() {
         reset_colors();
         assert!(colors_enabled());
     }
 
     #[test]
+    #[serial(colors)]
     fn test_disable_colors() {
         reset_colors();
         assert!(colors_enabled());
@@ -354,6 +357,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(colors)]
     fn test_themed_trait_with_colors() {
         reset_colors();
         let text = "test";
@@ -365,6 +369,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(colors)]
     fn test_themed_trait_without_colors() {
         reset_colors();
         disable_colors();
@@ -386,6 +391,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(colors)]
     fn test_table_color_with_colors() {
         reset_colors();
 
@@ -412,6 +418,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(colors)]
     fn test_table_color_without_colors() {
         reset_colors();
         disable_colors();
@@ -425,6 +432,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(colors)]
     fn test_themed_cell() {
         reset_colors();
 
@@ -434,6 +442,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(colors)]
     fn test_themed_cell_no_color() {
         reset_colors();
         disable_colors();
@@ -447,6 +456,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(colors)]
     fn test_numeric_types() {
         reset_colors();
 
@@ -461,6 +471,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(colors)]
     fn test_all_semantic_variants() {
         reset_colors();
 

@@ -940,4 +940,487 @@ COMMIT;
         // The helper function apply_full_update_with_manifest takes a
         // pre-fetched Manifest and performs the actual downloads.
     }
+
+    #[test]
+    fn test_default_manifest_url() {
+        assert!(DEFAULT_MANIFEST_URL.starts_with("https://"));
+        assert!(DEFAULT_MANIFEST_URL.contains("manifest.json"));
+    }
+}
+
+#[cfg(test)]
+mod fetch_manifest_tests {
+    use super::*;
+
+    /// Test fetch_manifest with skip_verify=true
+    #[test]
+    fn test_fetch_manifest_skip_verify() {
+        let mut server = mockito::Server::new();
+        let manifest_json = r#"{
+            "version": 2,
+            "latest_commit": "abc123",
+            "latest_commit_date": "2024-01-01",
+            "full_index": {
+                "url": "https://example.com/index.db.zst",
+                "size_bytes": 1000,
+                "sha256": "abc123"
+            },
+            "bloom_filter": {
+                "url": "https://example.com/bloom.bin",
+                "size_bytes": 100,
+                "sha256": "def456"
+            },
+            "deltas": []
+        }"#;
+
+        let mock = server
+            .mock("GET", "/manifest.json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(manifest_json)
+            .create();
+
+        let url = format!("{}/manifest.json", server.url());
+        let manifest = fetch_manifest(&url, false, true, None, Some(5)).unwrap();
+
+        mock.assert();
+        assert_eq!(manifest.version, 2);
+        assert_eq!(manifest.latest_commit, "abc123");
+    }
+
+    /// Test fetch_manifest with invalid manifest version
+    #[test]
+    fn test_fetch_manifest_invalid_version() {
+        let mut server = mockito::Server::new();
+        let manifest_json = r#"{
+            "version": 99,
+            "latest_commit": "abc123",
+            "latest_commit_date": "2024-01-01",
+            "full_index": {
+                "url": "https://example.com/index.db.zst",
+                "size_bytes": 1000,
+                "sha256": "abc123"
+            },
+            "bloom_filter": {
+                "url": "https://example.com/bloom.bin",
+                "size_bytes": 100,
+                "sha256": "def456"
+            },
+            "deltas": []
+        }"#;
+
+        let mock = server
+            .mock("GET", "/manifest.json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(manifest_json)
+            .create();
+
+        let url = format!("{}/manifest.json", server.url());
+        let result = fetch_manifest(&url, false, true, None, Some(5));
+
+        mock.assert();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Invalid manifest version"));
+    }
+
+    /// Test fetch_manifest with HTTP error
+    #[test]
+    fn test_fetch_manifest_http_error() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/manifest.json")
+            .with_status(404)
+            .with_body("Not found")
+            .create();
+
+        let url = format!("{}/manifest.json", server.url());
+        let result = fetch_manifest(&url, false, true, None, Some(5));
+
+        mock.assert();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Failed to fetch manifest") || err.contains("404"));
+    }
+
+    /// Test fetch_manifest with signature verification (signature not found)
+    #[test]
+    fn test_fetch_manifest_signature_not_found() {
+        let mut server = mockito::Server::new();
+        let manifest_json = r#"{
+            "version": 2,
+            "latest_commit": "abc123",
+            "latest_commit_date": "2024-01-01",
+            "full_index": {
+                "url": "https://example.com/index.db.zst",
+                "size_bytes": 1000,
+                "sha256": "abc123"
+            },
+            "bloom_filter": {
+                "url": "https://example.com/bloom.bin",
+                "size_bytes": 100,
+                "sha256": "def456"
+            },
+            "deltas": []
+        }"#;
+
+        let manifest_mock = server
+            .mock("GET", "/manifest.json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(manifest_json)
+            .create();
+
+        let sig_mock = server
+            .mock("GET", "/manifest.json.minisig")
+            .with_status(404)
+            .with_body("Not found")
+            .create();
+
+        let url = format!("{}/manifest.json", server.url());
+        let result = fetch_manifest(&url, false, false, None, Some(5)); // skip_verify = false
+
+        manifest_mock.assert();
+        sig_mock.assert();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("signature not found") || err.contains("--skip-verify"));
+    }
+
+    /// Test fetch_manifest with invalid JSON
+    #[test]
+    fn test_fetch_manifest_invalid_json() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/manifest.json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("not valid json {{{")
+            .create();
+
+        let url = format!("{}/manifest.json", server.url());
+        let result = fetch_manifest(&url, false, true, None, Some(5));
+
+        mock.assert();
+        assert!(result.is_err());
+    }
+
+    /// Test check_for_updates returns NoLocalIndex when db doesn't exist
+    #[test]
+    fn test_check_for_updates_no_local_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("nonexistent.db");
+
+        let mut server = mockito::Server::new();
+        let manifest_json = r#"{
+            "version": 2,
+            "latest_commit": "abc123",
+            "latest_commit_date": "2024-01-01",
+            "full_index": {
+                "url": "https://example.com/index.db.zst",
+                "size_bytes": 50000,
+                "sha256": "abc123"
+            },
+            "bloom_filter": {
+                "url": "https://example.com/bloom.bin",
+                "size_bytes": 100,
+                "sha256": "def456"
+            },
+            "deltas": []
+        }"#;
+
+        let mock = server
+            .mock("GET", "/manifest.json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(manifest_json)
+            .create();
+
+        let url = format!("{}/manifest.json", server.url());
+        let status = check_for_updates(&db_path, Some(&url), false, true, None, Some(5)).unwrap();
+
+        mock.assert();
+        match status {
+            UpdateStatus::NoLocalIndex { size_bytes } => {
+                assert_eq!(size_bytes, 50000);
+            }
+            _ => panic!("Expected NoLocalIndex status"),
+        }
+    }
+
+    /// Test check_for_updates returns UpToDate when commits match
+    #[test]
+    fn test_check_for_updates_up_to_date() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        // Create a database with matching commit
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE package_versions (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                version TEXT NOT NULL,
+                first_commit_hash TEXT NOT NULL,
+                first_commit_date INTEGER NOT NULL,
+                last_commit_hash TEXT NOT NULL,
+                last_commit_date INTEGER NOT NULL,
+                attribute_path TEXT NOT NULL
+            );
+            INSERT INTO meta (key, value) VALUES ('schema_version', '4');
+            INSERT INTO meta (key, value) VALUES ('last_indexed_commit', 'abc123');
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut server = mockito::Server::new();
+        let manifest_json = r#"{
+            "version": 2,
+            "latest_commit": "abc123",
+            "latest_commit_date": "2024-01-01",
+            "full_index": {
+                "url": "https://example.com/index.db.zst",
+                "size_bytes": 50000,
+                "sha256": "abc123"
+            },
+            "bloom_filter": {
+                "url": "https://example.com/bloom.bin",
+                "size_bytes": 100,
+                "sha256": "def456"
+            },
+            "deltas": []
+        }"#;
+
+        let mock = server
+            .mock("GET", "/manifest.json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(manifest_json)
+            .create();
+
+        let url = format!("{}/manifest.json", server.url());
+        let status = check_for_updates(&db_path, Some(&url), false, true, None, Some(5)).unwrap();
+
+        mock.assert();
+        match status {
+            UpdateStatus::UpToDate { commit } => {
+                assert_eq!(commit, "abc123");
+            }
+            _ => panic!("Expected UpToDate status, got {:?}", status),
+        }
+    }
+
+    /// Test check_for_updates returns FullDownloadNeeded when no delta available
+    #[test]
+    fn test_check_for_updates_full_download_needed() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        // Create a database with different commit
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE package_versions (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                version TEXT NOT NULL,
+                first_commit_hash TEXT NOT NULL,
+                first_commit_date INTEGER NOT NULL,
+                last_commit_hash TEXT NOT NULL,
+                last_commit_date INTEGER NOT NULL,
+                attribute_path TEXT NOT NULL
+            );
+            INSERT INTO meta (key, value) VALUES ('schema_version', '4');
+            INSERT INTO meta (key, value) VALUES ('last_indexed_commit', 'old_commit');
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut server = mockito::Server::new();
+        let manifest_json = r#"{
+            "version": 2,
+            "latest_commit": "new_commit",
+            "latest_commit_date": "2024-01-01",
+            "full_index": {
+                "url": "https://example.com/index.db.zst",
+                "size_bytes": 50000,
+                "sha256": "abc123"
+            },
+            "bloom_filter": {
+                "url": "https://example.com/bloom.bin",
+                "size_bytes": 100,
+                "sha256": "def456"
+            },
+            "deltas": []
+        }"#;
+
+        let mock = server
+            .mock("GET", "/manifest.json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(manifest_json)
+            .create();
+
+        let url = format!("{}/manifest.json", server.url());
+        let status = check_for_updates(&db_path, Some(&url), false, true, None, Some(5)).unwrap();
+
+        mock.assert();
+        match status {
+            UpdateStatus::FullDownloadNeeded { commit, size_bytes } => {
+                assert_eq!(commit, "new_commit");
+                assert_eq!(size_bytes, 50000);
+            }
+            _ => panic!("Expected FullDownloadNeeded status, got {:?}", status),
+        }
+    }
+
+    /// Test check_for_updates returns DeltaAvailable when delta exists
+    #[test]
+    fn test_check_for_updates_delta_available() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        // Create a database with a commit that has a delta
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE package_versions (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                version TEXT NOT NULL,
+                first_commit_hash TEXT NOT NULL,
+                first_commit_date INTEGER NOT NULL,
+                last_commit_hash TEXT NOT NULL,
+                last_commit_date INTEGER NOT NULL,
+                attribute_path TEXT NOT NULL
+            );
+            INSERT INTO meta (key, value) VALUES ('schema_version', '4');
+            INSERT INTO meta (key, value) VALUES ('last_indexed_commit', 'commit_v1');
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut server = mockito::Server::new();
+        let manifest_json = r#"{
+            "version": 2,
+            "latest_commit": "commit_v2",
+            "latest_commit_date": "2024-01-01",
+            "full_index": {
+                "url": "https://example.com/index.db.zst",
+                "size_bytes": 50000,
+                "sha256": "abc123"
+            },
+            "bloom_filter": {
+                "url": "https://example.com/bloom.bin",
+                "size_bytes": 100,
+                "sha256": "def456"
+            },
+            "deltas": [
+                {
+                    "from_commit": "commit_v1",
+                    "to_commit": "commit_v2",
+                    "url": "https://example.com/delta_v1_v2.sql.zst",
+                    "size_bytes": 5000,
+                    "sha256": "delta_hash"
+                }
+            ]
+        }"#;
+
+        let mock = server
+            .mock("GET", "/manifest.json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(manifest_json)
+            .create();
+
+        let url = format!("{}/manifest.json", server.url());
+        let status = check_for_updates(&db_path, Some(&url), false, true, None, Some(5)).unwrap();
+
+        mock.assert();
+        match status {
+            UpdateStatus::DeltaAvailable {
+                from_commit,
+                to_commit,
+                size_bytes,
+            } => {
+                assert_eq!(from_commit, "commit_v1");
+                assert_eq!(to_commit, "commit_v2");
+                assert_eq!(size_bytes, 5000);
+            }
+            _ => panic!("Expected DeltaAvailable status, got {:?}", status),
+        }
+    }
+
+    /// Test check_for_updates when database has no last_indexed_commit
+    #[test]
+    fn test_check_for_updates_no_commit_in_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        // Create a database without last_indexed_commit
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE package_versions (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                version TEXT NOT NULL,
+                first_commit_hash TEXT NOT NULL,
+                first_commit_date INTEGER NOT NULL,
+                last_commit_hash TEXT NOT NULL,
+                last_commit_date INTEGER NOT NULL,
+                attribute_path TEXT NOT NULL
+            );
+            INSERT INTO meta (key, value) VALUES ('schema_version', '4');
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut server = mockito::Server::new();
+        let manifest_json = r#"{
+            "version": 2,
+            "latest_commit": "abc123",
+            "latest_commit_date": "2024-01-01",
+            "full_index": {
+                "url": "https://example.com/index.db.zst",
+                "size_bytes": 50000,
+                "sha256": "abc123"
+            },
+            "bloom_filter": {
+                "url": "https://example.com/bloom.bin",
+                "size_bytes": 100,
+                "sha256": "def456"
+            },
+            "deltas": []
+        }"#;
+
+        let mock = server
+            .mock("GET", "/manifest.json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(manifest_json)
+            .create();
+
+        let url = format!("{}/manifest.json", server.url());
+        let status = check_for_updates(&db_path, Some(&url), false, true, None, Some(5)).unwrap();
+
+        mock.assert();
+        match status {
+            UpdateStatus::FullDownloadNeeded { commit, size_bytes } => {
+                assert_eq!(commit, "abc123");
+                assert_eq!(size_bytes, 50000);
+            }
+            _ => panic!("Expected FullDownloadNeeded status, got {:?}", status),
+        }
+    }
 }

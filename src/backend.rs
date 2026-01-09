@@ -295,3 +295,246 @@ impl Backend {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::queries::PackageVersion;
+    use chrono::{TimeZone, Utc};
+    use std::collections::HashMap;
+    use tempfile::tempdir;
+
+    /// Create a test database with sample data
+    fn setup_test_db() -> (tempfile::TempDir, Database) {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let mut db = Database::open(&db_path).unwrap();
+
+        // Insert test packages
+        let packages = vec![
+            PackageVersion {
+                id: 0,
+                name: "hello".to_string(),
+                version: "2.10".to_string(),
+                version_source: Some("direct".to_string()),
+                first_commit_hash: "abc123".to_string(),
+                first_commit_date: Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap(),
+                last_commit_hash: "def456".to_string(),
+                last_commit_date: Utc.with_ymd_and_hms(2020, 6, 1, 0, 0, 0).unwrap(),
+                attribute_path: "hello".to_string(),
+                description: Some("A friendly greeting program".to_string()),
+                license: Some("GPL-3.0".to_string()),
+                homepage: Some("https://www.gnu.org/software/hello/".to_string()),
+                maintainers: None,
+                platforms: None,
+                source_path: None,
+                known_vulnerabilities: None,
+                store_paths: HashMap::new(),
+            },
+            PackageVersion {
+                id: 0,
+                name: "hello".to_string(),
+                version: "2.12".to_string(),
+                version_source: Some("direct".to_string()),
+                first_commit_hash: "ghi789".to_string(),
+                first_commit_date: Utc.with_ymd_and_hms(2021, 1, 1, 0, 0, 0).unwrap(),
+                last_commit_hash: "jkl012".to_string(),
+                last_commit_date: Utc.with_ymd_and_hms(2021, 6, 1, 0, 0, 0).unwrap(),
+                attribute_path: "hello".to_string(),
+                description: Some("A friendly greeting program".to_string()),
+                license: Some("GPL-3.0".to_string()),
+                homepage: Some("https://www.gnu.org/software/hello/".to_string()),
+                maintainers: None,
+                platforms: None,
+                source_path: None,
+                known_vulnerabilities: None,
+                store_paths: HashMap::new(),
+            },
+            PackageVersion {
+                id: 0,
+                name: "git".to_string(),
+                version: "2.30.0".to_string(),
+                version_source: Some("direct".to_string()),
+                first_commit_hash: "mno345".to_string(),
+                first_commit_date: Utc.with_ymd_and_hms(2021, 1, 15, 0, 0, 0).unwrap(),
+                last_commit_hash: "pqr678".to_string(),
+                last_commit_date: Utc.with_ymd_and_hms(2021, 3, 1, 0, 0, 0).unwrap(),
+                attribute_path: "git".to_string(),
+                description: Some("Distributed version control system".to_string()),
+                license: Some("GPL-2.0".to_string()),
+                homepage: Some("https://git-scm.com/".to_string()),
+                maintainers: None,
+                platforms: None,
+                source_path: None,
+                known_vulnerabilities: None,
+                store_paths: HashMap::new(),
+            },
+        ];
+
+        db.insert_package_ranges_batch(&packages).unwrap();
+        db.set_meta("last_indexed_commit", "abc123def456").unwrap();
+
+        (dir, db)
+    }
+
+    #[test]
+    fn test_local_backend_is_not_remote() {
+        let (_dir, db) = setup_test_db();
+        let backend = Backend::Local(db);
+        assert!(!backend.is_remote());
+    }
+
+    #[test]
+    fn test_local_backend_search() {
+        let (_dir, db) = setup_test_db();
+        let backend = Backend::Local(db);
+
+        let opts = SearchOptions {
+            query: "hello".to_string(),
+            ..Default::default()
+        };
+
+        let result = backend.search(&opts).unwrap();
+        assert!(!result.data.is_empty());
+        assert!(result.data.iter().any(|p| p.attribute_path == "hello"));
+    }
+
+    #[test]
+    fn test_local_backend_search_no_results() {
+        let (_dir, db) = setup_test_db();
+        let backend = Backend::Local(db);
+
+        let opts = SearchOptions {
+            query: "nonexistent_package_xyz".to_string(),
+            ..Default::default()
+        };
+
+        let result = backend.search(&opts).unwrap();
+        assert!(result.data.is_empty());
+    }
+
+    #[test]
+    fn test_local_backend_get_package() {
+        let (_dir, db) = setup_test_db();
+        let backend = Backend::Local(db);
+
+        let results = backend.get_package("hello").unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|p| p.attribute_path == "hello"));
+    }
+
+    #[test]
+    fn test_local_backend_get_package_not_found() {
+        let (_dir, db) = setup_test_db();
+        let backend = Backend::Local(db);
+
+        let results = backend.get_package("nonexistent").unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_local_backend_search_by_name_version() {
+        let (_dir, db) = setup_test_db();
+        let backend = Backend::Local(db);
+
+        // Search with specific version
+        let results = backend
+            .search_by_name_version("hello", Some("2.10"))
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].version, "2.10");
+
+        // Search without version (should return all versions)
+        let results = backend.search_by_name_version("hello", None).unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_local_backend_search_by_name() {
+        let (_dir, db) = setup_test_db();
+        let backend = Backend::Local(db);
+
+        // Exact match
+        let results = backend.search_by_name("hello", true).unwrap();
+        assert!(!results.is_empty());
+
+        // Prefix match
+        let results = backend.search_by_name("hel", false).unwrap();
+        assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn test_local_backend_get_first_occurrence() {
+        let (_dir, db) = setup_test_db();
+        let backend = Backend::Local(db);
+
+        let result = backend.get_first_occurrence("hello", "2.10").unwrap();
+        assert!(result.is_some());
+        let pkg = result.unwrap();
+        assert_eq!(pkg.version, "2.10");
+        assert_eq!(pkg.first_commit_hash, "abc123");
+    }
+
+    #[test]
+    fn test_local_backend_get_first_occurrence_not_found() {
+        let (_dir, db) = setup_test_db();
+        let backend = Backend::Local(db);
+
+        let result = backend.get_first_occurrence("hello", "9.99.99").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_local_backend_get_last_occurrence() {
+        let (_dir, db) = setup_test_db();
+        let backend = Backend::Local(db);
+
+        let result = backend.get_last_occurrence("hello", "2.10").unwrap();
+        assert!(result.is_some());
+        let pkg = result.unwrap();
+        assert_eq!(pkg.version, "2.10");
+        assert_eq!(pkg.last_commit_hash, "def456");
+    }
+
+    #[test]
+    fn test_local_backend_get_version_history() {
+        let (_dir, db) = setup_test_db();
+        let backend = Backend::Local(db);
+
+        let history = backend.get_version_history("hello").unwrap();
+        assert_eq!(history.len(), 2);
+        // History should be ordered by date (newest first typically)
+    }
+
+    #[test]
+    fn test_local_backend_get_version_history_not_found() {
+        let (_dir, db) = setup_test_db();
+        let backend = Backend::Local(db);
+
+        let history = backend.get_version_history("nonexistent").unwrap();
+        assert!(history.is_empty());
+    }
+
+    #[test]
+    fn test_local_backend_get_stats() {
+        let (_dir, db) = setup_test_db();
+        let backend = Backend::Local(db);
+
+        let stats = backend.get_stats().unwrap();
+        assert_eq!(stats.total_ranges, 3);
+        assert_eq!(stats.unique_names, 2); // hello and git
+    }
+
+    #[test]
+    fn test_local_backend_get_meta() {
+        let (_dir, db) = setup_test_db();
+        let backend = Backend::Local(db);
+
+        let commit = backend.get_meta("last_indexed_commit").unwrap();
+        assert!(commit.is_some());
+        assert_eq!(commit.unwrap(), "abc123def456");
+
+        let missing = backend.get_meta("nonexistent_key").unwrap();
+        assert!(missing.is_none());
+    }
+}

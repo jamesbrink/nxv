@@ -703,3 +703,597 @@ mod proptests {
         }
     }
 }
+
+#[cfg(test)]
+mod mock_api_tests {
+    use super::*;
+
+    /// Test search method with successful response
+    #[test]
+    fn test_search_success() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/api/v1/search?q=hello&sort=relevance&limit=50")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                    "data": [{
+                        "id": 1,
+                        "name": "hello",
+                        "version": "2.10",
+                        "version_source": "direct",
+                        "first_commit_hash": "abc123",
+                        "first_commit_date": "2020-01-01T00:00:00Z",
+                        "last_commit_hash": "def456",
+                        "last_commit_date": "2020-06-01T00:00:00Z",
+                        "attribute_path": "hello",
+                        "description": "A greeting program",
+                        "license": "GPL-3.0",
+                        "homepage": null,
+                        "maintainers": null,
+                        "platforms": null,
+                        "source_path": null,
+                        "known_vulnerabilities": null,
+                        "store_paths": {}
+                    }],
+                    "meta": {
+                        "total": 1,
+                        "limit": 50,
+                        "offset": 0,
+                        "has_more": false
+                    }
+                }"#,
+            )
+            .create();
+
+        let client = ApiClient::new_with_timeout(server.url(), 5).unwrap();
+        let opts = SearchOptions {
+            query: "hello".to_string(),
+            ..Default::default()
+        };
+        let result = client.search(&opts).unwrap();
+
+        mock.assert();
+        assert_eq!(result.data.len(), 1);
+        assert_eq!(result.data[0].name, "hello");
+        assert_eq!(result.total, 1);
+        assert!(!result.has_more);
+    }
+
+    /// Test search with version filter
+    #[test]
+    fn test_search_with_version() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/api/v1/search?q=hello&version=2.10&sort=relevance&limit=50")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data": [], "meta": {"total": 0, "limit": 50, "offset": 0, "has_more": false}}"#)
+            .create();
+
+        let client = ApiClient::new_with_timeout(server.url(), 5).unwrap();
+        let opts = SearchOptions {
+            query: "hello".to_string(),
+            version: Some("2.10".to_string()),
+            ..Default::default()
+        };
+        let result = client.search(&opts).unwrap();
+
+        mock.assert();
+        assert!(result.data.is_empty());
+    }
+
+    /// Test search with all options
+    #[test]
+    fn test_search_with_all_options() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", mockito::Matcher::Regex(
+                r"/api/v1/search\?q=test.*exact=true.*desc=true.*license=MIT.*platform=x86_64-linux.*sort=date.*reverse=true.*full=true.*limit=10.*offset=5".to_string()
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data": []}"#)
+            .create();
+
+        let client = ApiClient::new_with_timeout(server.url(), 5).unwrap();
+        let opts = SearchOptions {
+            query: "test".to_string(),
+            version: None,
+            exact: true,
+            desc: true,
+            license: Some("MIT".to_string()),
+            platform: Some("x86_64-linux".to_string()),
+            sort: SortOrder::Date,
+            reverse: true,
+            full: true,
+            limit: 10,
+            offset: 5,
+        };
+        let result = client.search(&opts).unwrap();
+
+        mock.assert();
+        assert!(result.data.is_empty());
+    }
+
+    /// Test get_package success
+    #[test]
+    fn test_get_package_success() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/api/v1/packages/hello")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                    "data": [{
+                        "id": 1,
+                        "name": "hello",
+                        "version": "2.10",
+                        "version_source": null,
+                        "first_commit_hash": "abc123",
+                        "first_commit_date": "2020-01-01T00:00:00Z",
+                        "last_commit_hash": "def456",
+                        "last_commit_date": "2020-06-01T00:00:00Z",
+                        "attribute_path": "hello",
+                        "description": null,
+                        "license": null,
+                        "homepage": null,
+                        "maintainers": null,
+                        "platforms": null,
+                        "source_path": null,
+                        "known_vulnerabilities": null,
+                        "store_paths": {}
+                    }]
+                }"#,
+            )
+            .create();
+
+        let client = ApiClient::new_with_timeout(server.url(), 5).unwrap();
+        let result = client.get_package("hello").unwrap();
+
+        mock.assert();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].attribute_path, "hello");
+    }
+
+    /// Test get_package not found returns empty vec
+    #[test]
+    fn test_get_package_not_found() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/api/v1/packages/nonexistent")
+            .with_status(404)
+            .with_body(r#"{"error": "Not found"}"#)
+            .create();
+
+        let client = ApiClient::new_with_timeout(server.url(), 5).unwrap();
+        let result = client.get_package("nonexistent").unwrap();
+
+        mock.assert();
+        assert!(result.is_empty());
+    }
+
+    /// Test get_package with URL encoding
+    #[test]
+    fn test_get_package_url_encoding() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/api/v1/packages/path%2Fto%2Fpackage")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data": []}"#)
+            .create();
+
+        let client = ApiClient::new_with_timeout(server.url(), 5).unwrap();
+        let result = client.get_package("path/to/package").unwrap();
+
+        mock.assert();
+        assert!(result.is_empty());
+    }
+
+    /// Test search_by_name_version with version
+    #[test]
+    fn test_search_by_name_version_with_version() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/api/v1/search?q=hello&version=2.10&limit=1000")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data": []}"#)
+            .create();
+
+        let client = ApiClient::new_with_timeout(server.url(), 5).unwrap();
+        let result = client
+            .search_by_name_version("hello", Some("2.10"), None)
+            .unwrap();
+
+        mock.assert();
+        assert!(result.is_empty());
+    }
+
+    /// Test search_by_name_version with custom limit
+    #[test]
+    fn test_search_by_name_version_custom_limit() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/api/v1/search?q=hello&limit=50")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data": []}"#)
+            .create();
+
+        let client = ApiClient::new_with_timeout(server.url(), 5).unwrap();
+        let result = client
+            .search_by_name_version("hello", None, Some(50))
+            .unwrap();
+
+        mock.assert();
+        assert!(result.is_empty());
+    }
+
+    /// Test search_by_name_version with unlimited (0)
+    #[test]
+    fn test_search_by_name_version_unlimited() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/api/v1/search?q=hello")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data": []}"#)
+            .create();
+
+        let client = ApiClient::new_with_timeout(server.url(), 5).unwrap();
+        let result = client
+            .search_by_name_version("hello", None, Some(0))
+            .unwrap();
+
+        mock.assert();
+        assert!(result.is_empty());
+    }
+
+    /// Test get_first_occurrence success
+    #[test]
+    fn test_get_first_occurrence_success() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/api/v1/packages/hello/versions/2.10/first")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                    "data": {
+                        "id": 1,
+                        "name": "hello",
+                        "version": "2.10",
+                        "version_source": "direct",
+                        "first_commit_hash": "abc123",
+                        "first_commit_date": "2020-01-01T00:00:00Z",
+                        "last_commit_hash": "abc123",
+                        "last_commit_date": "2020-01-01T00:00:00Z",
+                        "attribute_path": "hello",
+                        "description": null,
+                        "license": null,
+                        "homepage": null,
+                        "maintainers": null,
+                        "platforms": null,
+                        "source_path": null,
+                        "known_vulnerabilities": null,
+                        "store_paths": {}
+                    }
+                }"#,
+            )
+            .create();
+
+        let client = ApiClient::new_with_timeout(server.url(), 5).unwrap();
+        let result = client.get_first_occurrence("hello", "2.10").unwrap();
+
+        mock.assert();
+        assert!(result.is_some());
+        let pkg = result.unwrap();
+        assert_eq!(pkg.version, "2.10");
+        assert_eq!(pkg.first_commit_hash, "abc123");
+    }
+
+    /// Test get_first_occurrence not found
+    #[test]
+    fn test_get_first_occurrence_not_found() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/api/v1/packages/hello/versions/9.99/first")
+            .with_status(404)
+            .with_body(r#"{"error": "Not found"}"#)
+            .create();
+
+        let client = ApiClient::new_with_timeout(server.url(), 5).unwrap();
+        let result = client.get_first_occurrence("hello", "9.99").unwrap();
+
+        mock.assert();
+        assert!(result.is_none());
+    }
+
+    /// Test get_last_occurrence success
+    #[test]
+    fn test_get_last_occurrence_success() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/api/v1/packages/hello/versions/2.10/last")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                    "data": {
+                        "id": 1,
+                        "name": "hello",
+                        "version": "2.10",
+                        "version_source": null,
+                        "first_commit_hash": "abc123",
+                        "first_commit_date": "2020-01-01T00:00:00Z",
+                        "last_commit_hash": "def456",
+                        "last_commit_date": "2020-06-01T00:00:00Z",
+                        "attribute_path": "hello",
+                        "description": null,
+                        "license": null,
+                        "homepage": null,
+                        "maintainers": null,
+                        "platforms": null,
+                        "source_path": null,
+                        "known_vulnerabilities": null,
+                        "store_paths": {}
+                    }
+                }"#,
+            )
+            .create();
+
+        let client = ApiClient::new_with_timeout(server.url(), 5).unwrap();
+        let result = client.get_last_occurrence("hello", "2.10").unwrap();
+
+        mock.assert();
+        assert!(result.is_some());
+        let pkg = result.unwrap();
+        assert_eq!(pkg.last_commit_hash, "def456");
+    }
+
+    /// Test get_version_history success
+    #[test]
+    fn test_get_version_history_success() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/api/v1/packages/hello/history")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                    "data": [
+                        {
+                            "version": "2.12",
+                            "first_seen": "2021-01-01T00:00:00Z",
+                            "last_seen": "2021-06-01T00:00:00Z",
+                            "is_insecure": false
+                        },
+                        {
+                            "version": "2.10",
+                            "first_seen": "2020-01-01T00:00:00Z",
+                            "last_seen": "2020-12-01T00:00:00Z",
+                            "is_insecure": true
+                        }
+                    ]
+                }"#,
+            )
+            .create();
+
+        let client = ApiClient::new_with_timeout(server.url(), 5).unwrap();
+        let result = client.get_version_history("hello").unwrap();
+
+        mock.assert();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].0, "2.12");
+        assert!(!result[0].3); // is_insecure = false
+        assert_eq!(result[1].0, "2.10");
+        assert!(result[1].3); // is_insecure = true
+    }
+
+    /// Test get_version_history not found returns empty vec
+    #[test]
+    fn test_get_version_history_not_found() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/api/v1/packages/nonexistent/history")
+            .with_status(404)
+            .with_body(r#"{"error": "Not found"}"#)
+            .create();
+
+        let client = ApiClient::new_with_timeout(server.url(), 5).unwrap();
+        let result = client.get_version_history("nonexistent").unwrap();
+
+        mock.assert();
+        assert!(result.is_empty());
+    }
+
+    /// Test get_version_history backwards compatibility (no is_insecure field)
+    #[test]
+    fn test_get_version_history_backwards_compat() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/api/v1/packages/old-api/history")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                    "data": [
+                        {
+                            "version": "1.0.0",
+                            "first_seen": "2020-01-01T00:00:00Z",
+                            "last_seen": "2020-06-01T00:00:00Z"
+                        }
+                    ]
+                }"#,
+            )
+            .create();
+
+        let client = ApiClient::new_with_timeout(server.url(), 5).unwrap();
+        let result = client.get_version_history("old-api").unwrap();
+
+        mock.assert();
+        assert_eq!(result.len(), 1);
+        assert!(!result[0].3); // is_insecure defaults to false
+    }
+
+    /// Test get_stats success
+    #[test]
+    fn test_get_stats_success() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/api/v1/stats")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                    "data": {
+                        "total_ranges": 1000,
+                        "unique_names": 500,
+                        "unique_versions": 750,
+                        "oldest_commit_date": "2017-01-01T00:00:00Z",
+                        "newest_commit_date": "2024-01-01T00:00:00Z",
+                        "last_indexed_commit": "abc123def456",
+                        "last_indexed_date": "2024-01-01"
+                    }
+                }"#,
+            )
+            .create();
+
+        let client = ApiClient::new_with_timeout(server.url(), 5).unwrap();
+        let result = client.get_stats().unwrap();
+
+        mock.assert();
+        assert_eq!(result.total_ranges, 1000);
+        assert_eq!(result.unique_names, 500);
+        assert_eq!(result.unique_versions, 750);
+    }
+
+    /// Test get_health success
+    #[test]
+    fn test_get_health_success() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/api/v1/health")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                    "status": "healthy",
+                    "version": "0.1.0",
+                    "index_commit": "abc123"
+                }"#,
+            )
+            .create();
+
+        let client = ApiClient::new_with_timeout(server.url(), 5).unwrap();
+        let result = client.get_health().unwrap();
+
+        mock.assert();
+        assert_eq!(result.status, "healthy");
+        assert_eq!(result.version, "0.1.0");
+        assert_eq!(result.index_commit, Some("abc123".to_string()));
+    }
+
+    /// Test get_health without index_commit
+    #[test]
+    fn test_get_health_no_index_commit() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/api/v1/health")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                    "status": "healthy",
+                    "version": "0.1.0",
+                    "index_commit": null
+                }"#,
+            )
+            .create();
+
+        let client = ApiClient::new_with_timeout(server.url(), 5).unwrap();
+        let result = client.get_health().unwrap();
+
+        mock.assert();
+        assert!(result.index_commit.is_none());
+    }
+
+    /// Test search_by_name with exact match
+    #[test]
+    fn test_search_by_name_exact() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/api/v1/search?q=hello&exact=true&limit=1000")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data": []}"#)
+            .create();
+
+        let client = ApiClient::new_with_timeout(server.url(), 5).unwrap();
+        let result = client.search_by_name("hello", true).unwrap();
+
+        mock.assert();
+        assert!(result.is_empty());
+    }
+
+    /// Test search_by_name without exact match
+    #[test]
+    fn test_search_by_name_prefix() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/api/v1/search?q=hel&limit=1000")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data": []}"#)
+            .create();
+
+        let client = ApiClient::new_with_timeout(server.url(), 5).unwrap();
+        let result = client.search_by_name("hel", false).unwrap();
+
+        mock.assert();
+        assert!(result.is_empty());
+    }
+
+    /// Test API error handling for 500 Internal Server Error
+    #[test]
+    fn test_api_error_500() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/api/v1/stats")
+            .with_status(500)
+            .with_body(r#"{"error": "Internal server error"}"#)
+            .create();
+
+        let client = ApiClient::new_with_timeout(server.url(), 5).unwrap();
+        let result = client.get_stats();
+
+        mock.assert();
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            NxvError::ApiError { status, .. } => assert_eq!(status, 500),
+            e => panic!("Expected ApiError, got: {:?}", e),
+        }
+    }
+
+    /// Test API error handling for 503 Service Unavailable
+    #[test]
+    fn test_api_error_503() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/api/v1/stats")
+            .with_status(503)
+            .with_body(r#"{"error": "Service unavailable"}"#)
+            .create();
+
+        let client = ApiClient::new_with_timeout(server.url(), 5).unwrap();
+        let result = client.get_stats();
+
+        mock.assert();
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), NxvError::NoIndex));
+    }
+}

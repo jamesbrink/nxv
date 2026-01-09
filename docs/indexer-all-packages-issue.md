@@ -1,9 +1,9 @@
 # Indexer Issue: Missing Package Updates from all-packages.nix
 
-**Status:** Phase 1 & 2 implemented, pending reindex
+**Status:** Phases 1-3 complete, pending reindex (Phase 4)
 **Related Issue:** [#21 - Incomplete set and wrong hashes?](https://github.com/jamesbrink/nxv/issues/21)
 **Date:** 2026-01-09
-**Last Updated:** 2026-01-09 (Phase 1 & 2 completed)
+**Last Updated:** 2026-01-09 (Phase 3 completed)
 
 ## Executive Summary
 
@@ -439,21 +439,24 @@ After truncation (2026-01-09):
   - Log attrs extracted per commit at trace level
   - Log fallback triggers at debug level
 
-### Phase 3: Validation & Testing
+### Phase 3: Validation & Testing (Completed)
 
-- [ ] **3.1** Enhance validation script
-  - Validate commit hashes exist in nixpkgs
-  - Verify version first appears at recorded commit
-  - Check store paths against cache.nixos.org (recent commits)
+- [x] **3.1** Enhance validation script
+  - Added `--nixpkgs PATH` option for git-based validation
+  - Added `--verify-commits` to check commits exist in nixpkgs
+  - Added `--verify-versions` to verify version at recorded commit
+  - Check store paths against cache.nixos.org (already exists)
 
-- [ ] **3.2** Create regression test suite
-  - Export 100+ known-good packages with expected versions
-  - Run after each change to catch regressions
-  - Include edge cases: wrappers, nested packages, aliases
+- [x] **3.2** Create regression test suite
+  - Created `tests/fixtures/regression_packages.json` with 50+ packages
+  - Covers stable, browsers, languages, compilers, databases, etc.
+  - Includes edge cases: wrappers, nested packages, date versions
+  - Added `test_regression_fixture` Rust test (run with `--ignored`)
 
-- [ ] **3.3** Add spot-check validation against actual nixpkgs git log
-  - For critical packages (firefox, chromium, python, etc.)
-  - Verify our commit hashes match reality
+- [x] **3.3** Add spot-check validation against actual nixpkgs git log
+  - `--verify-commits` validates commit hashes exist
+  - `--verify-versions` confirms package version at commit
+  - Results tracked in validation reports
 
 ### Phase 4: Database & Reindex
 

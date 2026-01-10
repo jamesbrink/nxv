@@ -571,12 +571,11 @@ fn test_verbose_info_level() {
     let db_path = dir.path().join("test.db");
     create_test_db(&db_path);
 
-    // -v should show progress messages like "Searching for..."
+    // Default (no flags) should show progress messages like "Searching for..."
     nxv()
         .args([
             "--db-path",
             db_path.to_str().unwrap(),
-            "-v",
             "search",
             "python",
         ])
@@ -591,12 +590,12 @@ fn test_verbose_debug_level() {
     let db_path = dir.path().join("test.db");
     create_test_db(&db_path);
 
-    // -vv should show debug messages with [debug] prefix
+    // -v should show debug messages with [debug] prefix
     nxv()
         .args([
             "--db-path",
             db_path.to_str().unwrap(),
-            "-vv",
+            "-v",
             "search",
             "python",
         ])

@@ -19,7 +19,7 @@ pub struct Cli {
     #[arg(long, env = "NXV_DB_PATH", default_value_os_t = paths::get_index_path())]
     pub db_path: PathBuf,
 
-    /// Enable verbose output (-v for info, -vv for debug).
+    /// Enable verbose output (-v for debug, -vv for trace).
     #[arg(short, long, action = clap::ArgAction::Count)]
     pub verbose: u8,
 
@@ -614,20 +614,20 @@ impl From<OutputFormatArg> for OutputFormat {
 /// Verbosity level for output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Verbosity {
-    /// Default: errors and results only.
+    /// Default: info level (natural CLI output).
     Normal,
-    /// -v: include warnings and progress info.
-    Info,
-    /// -vv: include debug info (SQL queries, HTTP requests).
+    /// -v: debug level for more detail.
     Debug,
+    /// -vv: trace level for full detail.
+    Trace,
 }
 
 impl From<u8> for Verbosity {
     fn from(count: u8) -> Self {
         match count {
             0 => Verbosity::Normal,
-            1 => Verbosity::Info,
-            _ => Verbosity::Debug,
+            1 => Verbosity::Debug,
+            _ => Verbosity::Trace,
         }
     }
 }
@@ -650,10 +650,9 @@ impl Cli {
         } else {
             // Fall back to verbose flags if no explicit log level
             config.level = match self.verbose {
-                0 => Level::WARN, // Default: warnings only for CLI
-                1 => Level::INFO,
-                2 => Level::DEBUG,
-                _ => Level::TRACE,
+                0 => Level::INFO,  // Default: info for natural CLI output
+                1 => Level::DEBUG, // -v: debug for more detail
+                _ => Level::TRACE, // -vv+: trace for full detail
             };
         }
 
@@ -1010,22 +1009,22 @@ mod tests {
             std::env::remove_var("RUST_LOG");
         }
 
-        // No verbose flags = WARN level
+        // No verbose flags = INFO level (natural CLI output)
         let args = Cli::try_parse_from(["nxv", "stats"]).unwrap();
-        let config = args.log_config();
-        assert_eq!(config.level, Level::WARN);
-
-        // -v = INFO level
-        let args = Cli::try_parse_from(["nxv", "-v", "stats"]).unwrap();
         let config = args.log_config();
         assert_eq!(config.level, Level::INFO);
 
-        // -vv = DEBUG level
-        let args = Cli::try_parse_from(["nxv", "-vv", "stats"]).unwrap();
+        // -v = DEBUG level (more detail)
+        let args = Cli::try_parse_from(["nxv", "-v", "stats"]).unwrap();
         let config = args.log_config();
         assert_eq!(config.level, Level::DEBUG);
 
-        // -vvv = TRACE level
+        // -vv = TRACE level (full detail)
+        let args = Cli::try_parse_from(["nxv", "-vv", "stats"]).unwrap();
+        let config = args.log_config();
+        assert_eq!(config.level, Level::TRACE);
+
+        // -vvv = TRACE level (same as -vv)
         let args = Cli::try_parse_from(["nxv", "-vvv", "stats"]).unwrap();
         let config = args.log_config();
         assert_eq!(config.level, Level::TRACE);

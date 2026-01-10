@@ -393,7 +393,7 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
 
     if verbosity >= Verbosity::Debug {
         eprintln!("[debug] Query type: {}", query_type);
-    } else if verbosity >= Verbosity::Info {
+    } else if !cli.quiet {
         eprintln!("Searching for '{}'...", args.package);
     }
 
@@ -501,7 +501,7 @@ fn cmd_update(cli: &Cli, args: &cli::UpdateArgs) -> Result<()> {
                 "Index is up to date (commit {}).",
                 &commit[..7.min(commit.len())]
             );
-            if verbosity >= Verbosity::Info {
+            if verbosity >= Verbosity::Debug {
                 eprintln!("Local index commit: {}", commit);
             }
         }
@@ -519,7 +519,7 @@ fn cmd_update(cli: &Cli, args: &cli::UpdateArgs) -> Result<()> {
                 "Full index downloaded successfully (commit {}).",
                 &commit[..7.min(commit.len())]
             );
-            if verbosity >= Verbosity::Info {
+            if verbosity >= Verbosity::Debug {
                 eprintln!("Full commit hash: {}", commit);
             }
         }

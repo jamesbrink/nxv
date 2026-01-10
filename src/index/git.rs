@@ -421,6 +421,10 @@ impl NixpkgsRepo {
     }
 
     /// Get commits since a specific hash that touched specific paths.
+    ///
+    /// Uses `--first-parent` by default for efficiency, but falls back to all commits
+    /// if no results are found (handles cases like September 2020 where first-parent
+    /// traversal skips certain months).
     pub fn get_commits_since_touching_paths(
         &self,
         since_hash: &str,
@@ -442,8 +446,110 @@ impl NixpkgsRepo {
             )))
         })?;
 
+        // Try with --first-parent first (faster, avoids duplicate processing)
+        let mut commits = self.get_commits_since_touching_paths_inner(
+            since_hash, paths, since, until, true,
+        )?;
+
+        // If no commits found with --first-parent and date filters are present,
+        // fall back to all commits (handles gaps like September 2020)
+        if commits.is_empty() && (since.is_some() || until.is_some()) {
+            tracing::warn!(
+                target: "nxv::index::git",
+                "No commits found with --first-parent for range {:?} to {:?}, falling back to all commits",
+                since, until
+            );
+            commits = self.get_commits_since_touching_paths_inner(
+                since_hash, paths, since, until, false,
+            )?;
+        }
+
+        // Detect and fill monthly gaps within the result
+        if !commits.is_empty() && (since.is_some() || until.is_some()) {
+            let gaps = detect_monthly_gaps(&commits, since, until);
+            if !gaps.is_empty() {
+                tracing::warn!(
+                    target: "nxv::index::git",
+                    gap_count = gaps.len(),
+                    gaps = ?gaps.iter().map(|(y, m)| format!("{}-{:02}", y, m)).collect::<Vec<_>>(),
+                    "Detected monthly gaps in results, fetching missing months"
+                );
+
+                // Fetch commits for each gap month without --first-parent
+                let mut gap_commits = Vec::new();
+                for (year, month) in gaps {
+                    let gap_since = format!("{}-{:02}-01", year, month);
+                    let gap_until = if month == 12 {
+                        format!("{}-01-01", year + 1)
+                    } else {
+                        format!("{}-{:02}-01", year, month + 1)
+                    };
+
+                    match self.get_commits_since_touching_paths_inner(
+                        since_hash, paths, Some(&gap_since), Some(&gap_until), false,
+                    ) {
+                        Ok(month_commits) => {
+                            tracing::info!(
+                                target: "nxv::index::git",
+                                year = year,
+                                month = month,
+                                commits_found = month_commits.len(),
+                                "Filled gap month"
+                            );
+                            gap_commits.extend(month_commits);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "nxv::index::git",
+                                year = year,
+                                month = month,
+                                error = %e,
+                                "Failed to fetch commits for gap month"
+                            );
+                        }
+                    }
+                }
+
+                // Merge gap commits into the main list
+                if !gap_commits.is_empty() {
+                    let original_count = commits.len();
+                    let mut seen: HashSet<String> = commits.iter().map(|c| c.hash.clone()).collect();
+                    for commit in gap_commits {
+                        if seen.insert(commit.hash.clone()) {
+                            commits.push(commit);
+                        }
+                    }
+                    commits.sort_by_key(|c| c.date);
+
+                    tracing::info!(
+                        target: "nxv::index::git",
+                        original = original_count,
+                        added = commits.len() - original_count,
+                        total = commits.len(),
+                        "Gap filling complete"
+                    );
+                }
+            }
+        }
+
+        Ok(commits)
+    }
+
+    /// Internal helper to get commits since a hash with optional --first-parent flag.
+    fn get_commits_since_touching_paths_inner(
+        &self,
+        since_hash: &str,
+        paths: &[&str],
+        since: Option<&str>,
+        until: Option<&str>,
+        first_parent: bool,
+    ) -> Result<Vec<CommitInfo>> {
         let range = format!("{}..HEAD", since_hash);
-        let mut args = vec!["log", "--first-parent", "--format=%H", &range];
+        let mut args = vec!["log", "--format=%H"];
+        if first_parent {
+            args.push("--first-parent");
+        }
+        args.push(&range);
         if let Some(since) = since {
             args.push("--since");
             args.push(since);
@@ -456,7 +562,7 @@ impl NixpkgsRepo {
 
         let output = Command::new("git")
             .current_dir(&self.path)
-            .args(args)
+            .args(&args)
             .args(paths)
             .output()?;
 

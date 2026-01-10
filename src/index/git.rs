@@ -266,14 +266,48 @@ impl NixpkgsRepo {
     }
 
     /// Get indexable commits that touched specific paths (newest first, then reversed).
+    ///
+    /// First tries with `--first-parent` to avoid processing duplicate commits from
+    /// merge branches. If no commits are found (which can happen due to history
+    /// restructuring in nixpkgs, e.g., the July-October 2020 gap), falls back to
+    /// fetching all commits without `--first-parent`.
     pub fn get_indexable_commits_touching_paths(
         &self,
         paths: &[&str],
         since: Option<&str>,
         until: Option<&str>,
     ) -> Result<Vec<CommitInfo>> {
+        // Try with --first-parent first for efficiency
+        let commits = self.get_commits_touching_paths_inner(paths, since, until, true)?;
+
+        // If no commits found with --first-parent, fall back to all commits.
+        // This handles nixpkgs history gaps where the first-parent chain was broken
+        // (e.g., July-October 2020 where --first-parent returns 0 commits).
+        if commits.is_empty() {
+            tracing::warn!(
+                target: "nxv::index::git",
+                "No commits found with --first-parent for range {:?} to {:?}, falling back to all commits",
+                since, until
+            );
+            return self.get_commits_touching_paths_inner(paths, since, until, false);
+        }
+
+        Ok(commits)
+    }
+
+    /// Internal helper to get commits with optional --first-parent flag.
+    fn get_commits_touching_paths_inner(
+        &self,
+        paths: &[&str],
+        since: Option<&str>,
+        until: Option<&str>,
+        first_parent: bool,
+    ) -> Result<Vec<CommitInfo>> {
         let since_arg = since.unwrap_or(MIN_INDEXABLE_DATE);
-        let mut args = vec!["log", "--first-parent", "--format=%H", "--since", since_arg];
+        let mut args = vec!["log", "--format=%H", "--since", since_arg];
+        if first_parent {
+            args.insert(1, "--first-parent");
+        }
         if let Some(until) = until {
             args.push("--until");
             args.push(until);
@@ -282,7 +316,7 @@ impl NixpkgsRepo {
 
         let output = Command::new("git")
             .current_dir(&self.path)
-            .args(args)
+            .args(&args)
             .args(paths)
             .output()?;
 
@@ -1437,5 +1471,48 @@ mod tests {
         let changed = repo.get_commit_changed_paths(&head).unwrap();
         assert!(changed.contains(&"file.txt".to_string()));
         assert!(changed.contains(&"file-renamed.txt".to_string()));
+    }
+
+    #[test]
+    fn test_get_indexable_commits_touching_paths_fallback() {
+        // This test verifies the fallback from --first-parent to all commits
+        // when --first-parent returns no commits.
+        //
+        // This can happen in nixpkgs due to history restructuring.
+        // Example: July-October 2020 where --first-parent returns 0 commits
+        // but the full history has thousands of commits.
+
+        let nixpkgs_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("nixpkgs");
+
+        // Skip if nixpkgs submodule isn't properly initialized
+        if !nixpkgs_path.join(".git").exists() || !nixpkgs_path.join("pkgs").exists() {
+            eprintln!("Skipping: nixpkgs submodule not initialized");
+            return;
+        }
+
+        let repo = NixpkgsRepo::open(&nixpkgs_path).unwrap();
+
+        // July-October 2020 is known to have 0 commits with --first-parent
+        // but thousands of commits without it. Test that we get commits.
+        let commits = repo
+            .get_indexable_commits_touching_paths(
+                &["pkgs"],
+                Some("2020-07-01"),
+                Some("2020-10-01"),
+            )
+            .unwrap();
+
+        // Should have commits thanks to the fallback
+        assert!(
+            !commits.is_empty(),
+            "Expected commits in 2020-07 to 2020-10 range (fallback should have activated)"
+        );
+
+        // Should have a significant number of commits (the gap period has ~11k commits)
+        assert!(
+            commits.len() > 1000,
+            "Expected >1000 commits in gap period, got {}",
+            commits.len()
+        );
     }
 }

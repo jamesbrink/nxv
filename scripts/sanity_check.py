@@ -49,6 +49,7 @@ class SanityReport:
 # BASIC INTEGRITY CHECKS
 # =============================================================================
 
+
 def check_duplicates(conn: sqlite3.Connection) -> CheckResult:
     """Check for duplicate (attribute_path, version) pairs."""
     cursor = conn.cursor()
@@ -65,9 +66,14 @@ def check_duplicates(conn: sqlite3.Connection) -> CheckResult:
         return CheckResult("no_duplicates", True, "No duplicate (attr, version) pairs")
 
     return CheckResult(
-        "no_duplicates", False,
+        "no_duplicates",
+        False,
         f"Found {len(duplicates)} duplicate pairs",
-        {"duplicates": [{"attr": d[0], "version": d[1], "count": d[2]} for d in duplicates]}
+        {
+            "duplicates": [
+                {"attr": d[0], "version": d[1], "count": d[2]} for d in duplicates
+            ]
+        },
     )
 
 
@@ -81,11 +87,14 @@ def check_date_integrity(conn: sqlite3.Connection) -> CheckResult:
     invalid_count = cursor.fetchone()[0]
 
     if invalid_count == 0:
-        return CheckResult("date_integrity", True, "All date ranges valid (first <= last)")
+        return CheckResult(
+            "date_integrity", True, "All date ranges valid (first <= last)"
+        )
 
     return CheckResult(
-        "date_integrity", False,
-        f"{invalid_count} rows have first_commit_date > last_commit_date"
+        "date_integrity",
+        False,
+        f"{invalid_count} rows have first_commit_date > last_commit_date",
     )
 
 
@@ -103,8 +112,9 @@ def check_schema_version(conn: sqlite3.Connection) -> CheckResult:
     passed = version == expected
 
     return CheckResult(
-        "schema_version", passed,
-        f"Schema version {version}" + ("" if passed else f" (expected {expected})")
+        "schema_version",
+        passed,
+        f"Schema version {version}" + ("" if passed else f" (expected {expected})"),
     )
 
 
@@ -121,8 +131,9 @@ def check_commit_hash_format(conn: sqlite3.Connection) -> CheckResult:
 
     passed = invalid == 0
     return CheckResult(
-        "commit_hash_format", passed,
-        f"{invalid} invalid commit hashes" if not passed else "All commit hashes valid"
+        "commit_hash_format",
+        passed,
+        f"{invalid} invalid commit hashes" if not passed else "All commit hashes valid",
     )
 
 
@@ -142,6 +153,7 @@ def check_fts_sync(conn: sqlite3.Connection) -> CheckResult:
 # VERSION EXTRACTION CHECKS (Issue #21 fixes)
 # =============================================================================
 
+
 def check_version_source_distribution(conn: sqlite3.Connection) -> CheckResult:
     """Check version_source distribution is reasonable."""
     cursor = conn.cursor()
@@ -152,16 +164,21 @@ def check_version_source_distribution(conn: sqlite3.Connection) -> CheckResult:
         GROUP BY version_source
         ORDER BY cnt DESC
     """)
-    distribution = {row[0] or "NULL": {"count": row[1], "pct": row[2]} for row in cursor.fetchall()}
+    distribution = {
+        row[0] or "NULL": {"count": row[1], "pct": row[2]} for row in cursor.fetchall()
+    }
 
     direct_pct = distribution.get("direct", {}).get("pct", 0)
-    null_pct = distribution.get("NULL", {}).get("pct", 0) + distribution.get("", {}).get("pct", 0)
+    null_pct = distribution.get("NULL", {}).get("pct", 0) + distribution.get(
+        "", {}
+    ).get("pct", 0)
 
     passed = direct_pct >= 30 and null_pct < 5
     return CheckResult(
-        "version_source_distribution", passed,
+        "version_source_distribution",
+        passed,
         f"direct={direct_pct}%, null={null_pct}%",
-        {"distribution": distribution}
+        {"distribution": distribution},
     )
 
 
@@ -178,9 +195,10 @@ def check_unknown_versions(conn: sqlite3.Connection) -> CheckResult:
 
     passed = pct < 5
     return CheckResult(
-        "unknown_versions", passed,
+        "unknown_versions",
+        passed,
         f"{unknown}/{total} ({pct:.2f}%) unknown/empty",
-        {"pct": pct}
+        {"pct": pct},
     )
 
 
@@ -204,30 +222,41 @@ def check_wrapper_versions(conn: sqlite3.Connection) -> CheckResult:
     issues = []
 
     for wrapped, unwrapped in wrapper_packages:
-        cursor.execute("""
+        cursor.execute(
+            """
             SELECT COUNT(*) FROM package_versions
             WHERE attribute_path = ? AND version != 'unknown' AND version != '' AND version IS NOT NULL
-        """, (wrapped,))
+        """,
+            (wrapped,),
+        )
         wrapped_count = cursor.fetchone()[0]
 
-        cursor.execute("""
+        cursor.execute(
+            """
             SELECT COUNT(*) FROM package_versions
             WHERE attribute_path = ? AND version != 'unknown' AND version != '' AND version IS NOT NULL
-        """, (unwrapped,))
+        """,
+            (unwrapped,),
+        )
         unwrapped_count = cursor.fetchone()[0]
 
         results[wrapped] = {"wrapped": wrapped_count, "unwrapped": unwrapped_count}
 
         # Both should have versions if the fix is working
         if wrapped_count == 0 and unwrapped_count > 0:
-            issues.append(f"{wrapped} has 0 versions but {unwrapped} has {unwrapped_count}")
+            issues.append(
+                f"{wrapped} has 0 versions but {unwrapped} has {unwrapped_count}"
+            )
 
     passed = len(issues) == 0
     return CheckResult(
-        "wrapper_versions", passed,
-        f"{len(issues)} wrapper issues" if issues else "Wrapper version extraction working",
+        "wrapper_versions",
+        passed,
+        f"{len(issues)} wrapper issues"
+        if issues
+        else "Wrapper version extraction working",
         {"packages": results, "issues": issues},
-        severity="warning" if not passed else "error"
+        severity="warning" if not passed else "error",
     )
 
 
@@ -251,15 +280,17 @@ def check_name_based_extraction(conn: sqlite3.Connection) -> CheckResult:
     # Name-based extraction should be used for some packages
     passed = name_count > 0
     return CheckResult(
-        "name_based_extraction", passed,
+        "name_based_extraction",
+        passed,
         f"{name_count} packages ({pct:.1f}%) use name-based version",
-        {"count": name_count, "pct": pct}
+        {"count": name_count, "pct": pct},
     )
 
 
 # =============================================================================
 # ALL-PACKAGES.NIX HANDLING CHECKS (Issue #21 primary fix)
 # =============================================================================
+
 
 def check_callpackage_packages(conn: sqlite3.Connection) -> CheckResult:
     """Check that packages defined via callPackage in all-packages.nix are captured.
@@ -270,21 +301,43 @@ def check_callpackage_packages(conn: sqlite3.Connection) -> CheckResult:
 
     # Major packages defined via callPackage in all-packages.nix
     callpackage_packages = [
-        "thunderbird", "firefox", "chromium", "vscode", "slack",
-        "discord", "spotify", "signal-desktop", "telegram-desktop",
-        "git", "curl", "wget", "htop", "ripgrep", "fd", "bat",
-        "docker", "podman", "kubectl", "terraform",
-        "postgresql", "mysql", "redis", "mongodb",
+        "thunderbird",
+        "firefox",
+        "chromium",
+        "vscode",
+        "slack",
+        "discord",
+        "spotify",
+        "signal-desktop",
+        "telegram-desktop",
+        "git",
+        "curl",
+        "wget",
+        "htop",
+        "ripgrep",
+        "fd",
+        "bat",
+        "docker",
+        "podman",
+        "kubectl",
+        "terraform",
+        "postgresql",
+        "mysql",
+        "redis",
+        "mongodb",
     ]
 
     found = {}
     missing = []
 
     for pkg in callpackage_packages:
-        cursor.execute("""
+        cursor.execute(
+            """
             SELECT COUNT(*) FROM package_versions
             WHERE attribute_path = ? AND version != 'unknown' AND version != ''
-        """, (pkg,))
+        """,
+            (pkg,),
+        )
         count = cursor.fetchone()[0]
         if count > 0:
             found[pkg] = count
@@ -294,9 +347,10 @@ def check_callpackage_packages(conn: sqlite3.Connection) -> CheckResult:
     # Allow some missing (they might not exist in older nixpkgs)
     passed = len(missing) <= len(callpackage_packages) * 0.3  # Max 30% missing
     return CheckResult(
-        "callpackage_packages", passed,
+        "callpackage_packages",
+        passed,
         f"{len(found)}/{len(callpackage_packages)} callPackage packages found",
-        {"found": found, "missing": missing}
+        {"found": found, "missing": missing},
     )
 
 
@@ -318,18 +372,25 @@ def check_first_commit_baseline(conn: sqlite3.Connection) -> CheckResult:
         return CheckResult("first_commit_baseline", False, "No packages in database")
 
     # Count packages at the earliest date
-    cursor.execute("""
+    cursor.execute(
+        """
         SELECT COUNT(DISTINCT attribute_path) FROM package_versions
         WHERE first_commit_date = ?
-    """, (earliest_date,))
+    """,
+        (earliest_date,),
+    )
     first_commit_packages = cursor.fetchone()[0]
 
     # Should have captured thousands of packages on first commit
     passed = first_commit_packages >= 1000
     return CheckResult(
-        "first_commit_baseline", passed,
+        "first_commit_baseline",
+        passed,
         f"{first_commit_packages} packages in first commit (need >= 1000)",
-        {"first_commit_packages": first_commit_packages, "earliest_date": earliest_date}
+        {
+            "first_commit_packages": first_commit_packages,
+            "earliest_date": earliest_date,
+        },
     )
 
 
@@ -354,9 +415,10 @@ def check_upsert_working(conn: sqlite3.Connection) -> CheckResult:
 
     passed = multi_pct > 50
     return CheckResult(
-        "upsert_working", passed,
+        "upsert_working",
+        passed,
         f"{multi_pct:.1f}% have date spans, {long_lived} >30 days",
-        {"single": single, "multi": multi, "long_lived": long_lived}
+        {"single": single, "multi": multi, "long_lived": long_lived},
     )
 
 
@@ -379,7 +441,9 @@ def check_continuous_coverage(conn: sqlite3.Connection) -> CheckResult:
     monthly = cursor.fetchall()
 
     if len(monthly) < 2:
-        return CheckResult("continuous_coverage", True, "Not enough data for coverage check")
+        return CheckResult(
+            "continuous_coverage", True, "Not enough data for coverage check"
+        )
 
     # Check for sudden drops (>90% decrease from previous month)
     gaps = []
@@ -392,16 +456,18 @@ def check_continuous_coverage(conn: sqlite3.Connection) -> CheckResult:
 
     passed = len(gaps) == 0
     return CheckResult(
-        "continuous_coverage", passed,
+        "continuous_coverage",
+        passed,
         f"{len(gaps)} coverage gaps detected" if gaps else "No major coverage gaps",
         {"gaps": gaps, "months_checked": len(monthly)},
-        severity="warning" if not passed else "error"
+        severity="warning" if not passed else "error",
     )
 
 
 # =============================================================================
 # GIT VERIFICATION CHECKS (requires --nixpkgs)
 # =============================================================================
+
 
 def verify_commit_exists(nixpkgs_path: Path, commit_hash: str) -> bool:
     """Check if a commit exists in nixpkgs."""
@@ -433,7 +499,9 @@ def get_commit_date(nixpkgs_path: Path, commit_hash: str) -> str | None:
     return None
 
 
-def check_commit_exists_in_git(conn: sqlite3.Connection, nixpkgs_path: Path) -> CheckResult:
+def check_commit_exists_in_git(
+    conn: sqlite3.Connection, nixpkgs_path: Path
+) -> CheckResult:
     """Spot check that commit hashes exist in nixpkgs git repo."""
     cursor = conn.cursor()
 
@@ -457,13 +525,17 @@ def check_commit_exists_in_git(conn: sqlite3.Connection, nixpkgs_path: Path) -> 
 
     passed = len(missing) == 0
     return CheckResult(
-        "commits_exist_in_git", passed,
-        f"{found}/{len(commits)} commits verified" + (f", missing: {missing[:3]}" if missing else ""),
-        {"found": found, "missing": missing}
+        "commits_exist_in_git",
+        passed,
+        f"{found}/{len(commits)} commits verified"
+        + (f", missing: {missing[:3]}" if missing else ""),
+        {"found": found, "missing": missing},
     )
 
 
-def check_commit_dates_match(conn: sqlite3.Connection, nixpkgs_path: Path) -> CheckResult:
+def check_commit_dates_match(
+    conn: sqlite3.Connection, nixpkgs_path: Path
+) -> CheckResult:
     """Verify that stored commit dates match actual git commit dates."""
     cursor = conn.cursor()
 
@@ -487,32 +559,39 @@ def check_commit_dates_match(conn: sqlite3.Connection, nixpkgs_path: Path) -> Ch
             try:
                 # Git format: "2017-01-02 06:29:48 +0100"
                 git_date = datetime.strptime(git_date_str[:19], "%Y-%m-%d %H:%M:%S")
-                stored_dt = datetime.fromtimestamp(stored_date, tz=timezone.utc).replace(tzinfo=None)
+                stored_dt = datetime.fromtimestamp(
+                    stored_date, tz=timezone.utc
+                ).replace(tzinfo=None)
 
                 # Allow 24 hour tolerance for timezone differences
                 diff = abs((git_date - stored_dt).total_seconds())
                 if diff < 86400:  # Within 24 hours
                     matched += 1
                 else:
-                    mismatches.append({
-                        "commit": commit_hash[:12],
-                        "stored": stored_dt.isoformat(),
-                        "git": git_date.isoformat(),
-                        "diff_hours": diff / 3600
-                    })
+                    mismatches.append(
+                        {
+                            "commit": commit_hash[:12],
+                            "stored": stored_dt.isoformat(),
+                            "git": git_date.isoformat(),
+                            "diff_hours": diff / 3600,
+                        }
+                    )
             except Exception:
                 pass
 
     passed = len(mismatches) == 0
     return CheckResult(
-        "commit_dates_match", passed,
+        "commit_dates_match",
+        passed,
         f"{matched}/{len(samples)} dates verified",
         {"matched": matched, "mismatches": mismatches[:3]},
-        severity="warning" if not passed else "error"
+        severity="warning" if not passed else "error",
     )
 
 
-def check_all_packages_nix_extraction(conn: sqlite3.Connection, nixpkgs_path: Path) -> CheckResult:
+def check_all_packages_nix_extraction(
+    conn: sqlite3.Connection, nixpkgs_path: Path
+) -> CheckResult:
     """Verify that packages from all-packages.nix changes are being captured.
 
     This is the core check for the Issue #21 fix.
@@ -547,33 +626,43 @@ def check_all_packages_nix_extraction(conn: sqlite3.Connection, nixpkgs_path: Pa
             if result.returncode != 0:
                 continue
 
-            files = result.stdout.decode().strip().split('\n')
+            files = result.stdout.decode().strip().split("\n")
             touched_all_packages = any("all-packages.nix" in f for f in files)
 
             if touched_all_packages:
                 # This commit touched all-packages.nix - verify we captured packages from it
-                cursor.execute("""
+                cursor.execute(
+                    """
                     SELECT COUNT(*) FROM package_versions
                     WHERE first_commit_hash = ? OR last_commit_hash = ?
-                """, (commit, commit))
+                """,
+                    (commit, commit),
+                )
                 pkg_count = cursor.fetchone()[0]
 
                 if pkg_count > 0:
                     verified += 1
                 else:
-                    issues.append(f"{commit[:12]}: touched all-packages.nix but 0 packages")
+                    issues.append(
+                        f"{commit[:12]}: touched all-packages.nix but 0 packages"
+                    )
         except Exception as e:
             issues.append(f"{commit[:12]}: error checking - {e}")
 
     passed = len(issues) == 0
     return CheckResult(
-        "all_packages_extraction", passed,
-        f"{verified} all-packages.nix commits verified" if passed else f"{len(issues)} issues",
-        {"verified": verified, "issues": issues}
+        "all_packages_extraction",
+        passed,
+        f"{verified} all-packages.nix commits verified"
+        if passed
+        else f"{len(issues)} issues",
+        {"verified": verified, "issues": issues},
     )
 
 
-def check_infrastructure_files_handling(conn: sqlite3.Connection, nixpkgs_path: Path) -> CheckResult:
+def check_infrastructure_files_handling(
+    conn: sqlite3.Connection, nixpkgs_path: Path
+) -> CheckResult:
     """Check that INFRASTRUCTURE_FILES (all-packages.nix, aliases.nix) are handled correctly.
 
     Verifies the diff parsing fix is working.
@@ -603,15 +692,20 @@ def check_infrastructure_files_handling(conn: sqlite3.Connection, nixpkgs_path: 
             if result.returncode != 0:
                 continue
 
-            files = result.stdout.decode().strip().split('\n')
-            infra_files = [f for f in files if "all-packages.nix" in f or "aliases.nix" in f]
+            files = result.stdout.decode().strip().split("\n")
+            infra_files = [
+                f for f in files if "all-packages.nix" in f or "aliases.nix" in f
+            ]
 
             if infra_files:
                 infrastructure_commits += 1
-                cursor.execute("""
+                cursor.execute(
+                    """
                     SELECT COUNT(*) FROM package_versions
                     WHERE first_commit_hash = ?
-                """, (commit,))
+                """,
+                    (commit,),
+                )
                 if cursor.fetchone()[0] > 0:
                     captured_from_infra += 1
         except Exception:
@@ -619,24 +713,27 @@ def check_infrastructure_files_handling(conn: sqlite3.Connection, nixpkgs_path: 
 
     if infrastructure_commits == 0:
         return CheckResult(
-            "infrastructure_files", True,
+            "infrastructure_files",
+            True,
             "No infrastructure file commits in sample",
-            severity="info"
+            severity="info",
         )
 
-    pct = (captured_from_infra / infrastructure_commits * 100)
+    pct = captured_from_infra / infrastructure_commits * 100
     passed = pct >= 80  # At least 80% of infra commits should have packages
 
     return CheckResult(
-        "infrastructure_files", passed,
+        "infrastructure_files",
+        passed,
         f"{captured_from_infra}/{infrastructure_commits} ({pct:.0f}%) infra commits captured packages",
-        {"infra_commits": infrastructure_commits, "captured": captured_from_infra}
+        {"infra_commits": infrastructure_commits, "captured": captured_from_infra},
     )
 
 
 # =============================================================================
 # EDGE CASE CHECKS
 # =============================================================================
+
 
 def check_nested_packages(conn: sqlite3.Connection) -> CheckResult:
     """Check that nested packages (python3Packages.*, nodePackages.*) are captured."""
@@ -652,10 +749,13 @@ def check_nested_packages(conn: sqlite3.Connection) -> CheckResult:
 
     results = {}
     for pattern, name in nested_patterns:
-        cursor.execute("""
+        cursor.execute(
+            """
             SELECT COUNT(DISTINCT attribute_path) FROM package_versions
             WHERE attribute_path LIKE ?
-        """, (pattern,))
+        """,
+            (pattern,),
+        )
         count = cursor.fetchone()[0]
         results[name] = count
 
@@ -663,9 +763,10 @@ def check_nested_packages(conn: sqlite3.Connection) -> CheckResult:
     passed = total > 100  # Should have at least some nested packages
 
     return CheckResult(
-        "nested_packages", passed,
+        "nested_packages",
+        passed,
         f"{total} nested packages found",
-        {"breakdown": results}
+        {"breakdown": results},
     )
 
 
@@ -690,9 +791,10 @@ def check_special_version_formats(conn: sqlite3.Connection) -> CheckResult:
     passed = results["semver"] > 0
 
     return CheckResult(
-        "special_versions", passed,
+        "special_versions",
+        passed,
         f"semver={results['semver']}, date={results['date_iso']}, compact={results['date_compact']}",
-        {"formats": results}
+        {"formats": results},
     )
 
 
@@ -717,9 +819,12 @@ def check_store_paths(conn: sqlite3.Connection) -> CheckResult:
 
     passed = invalid == 0
     return CheckResult(
-        "store_paths", passed,
-        f"{with_paths} store paths, {invalid} invalid" if with_paths > 0 else "No store paths yet (pre-2020 data)",
-        {"with_paths": with_paths, "invalid": invalid}
+        "store_paths",
+        passed,
+        f"{with_paths} store paths, {invalid} invalid"
+        if with_paths > 0
+        else "No store paths yet (pre-2020 data)",
+        {"with_paths": with_paths, "invalid": invalid},
     )
 
 
@@ -751,15 +856,17 @@ def check_date_range_reasonable(conn: sqlite3.Connection) -> CheckResult:
             passed = False
 
     return CheckResult(
-        "date_range", passed,
+        "date_range",
+        passed,
         f"{earliest[:10] if earliest else '?'} to {latest[:10] if latest else '?'} ({days} days)",
-        {"earliest": earliest, "latest": latest, "days": days}
+        {"earliest": earliest, "latest": latest, "days": days},
     )
 
 
 # =============================================================================
 # CRITICAL PACKAGES CHECK
 # =============================================================================
+
 
 def check_critical_packages(conn: sqlite3.Connection) -> CheckResult:
     """Check that critical packages have versions."""
@@ -778,10 +885,13 @@ def check_critical_packages(conn: sqlite3.Connection) -> CheckResult:
 
     for category, packages in critical.items():
         for pkg in packages:
-            cursor.execute("""
+            cursor.execute(
+                """
                 SELECT COUNT(*) FROM package_versions
                 WHERE attribute_path = ? AND version != 'unknown' AND version != ''
-            """, (pkg,))
+            """,
+                (pkg,),
+            )
             count = cursor.fetchone()[0]
             if count > 0:
                 found[pkg] = count
@@ -792,9 +902,10 @@ def check_critical_packages(conn: sqlite3.Connection) -> CheckResult:
     passed = len(missing) <= total_expected * 0.2  # Allow up to 20% missing
 
     return CheckResult(
-        "critical_packages", passed,
+        "critical_packages",
+        passed,
         f"{len(found)}/{total_expected} critical packages found",
-        {"found": found, "missing": missing}
+        {"found": found, "missing": missing},
     )
 
 
@@ -802,7 +913,10 @@ def check_critical_packages(conn: sqlite3.Connection) -> CheckResult:
 # MAIN RUNNER
 # =============================================================================
 
-def run_sanity_checks(db_path: Path, nixpkgs_path: Path | None = None, verbose: bool = False) -> SanityReport:
+
+def run_sanity_checks(
+    db_path: Path, nixpkgs_path: Path | None = None, verbose: bool = False
+) -> SanityReport:
     """Run all sanity checks."""
     report = SanityReport()
     conn = sqlite3.connect(db_path)
@@ -856,7 +970,11 @@ def run_sanity_checks(db_path: Path, nixpkgs_path: Path | None = None, verbose: 
                 result = check_fn(conn)
                 report.add(result)
                 if verbose:
-                    status = "PASS" if result.passed else ("WARN" if result.severity == "warning" else "FAIL")
+                    status = (
+                        "PASS"
+                        if result.passed
+                        else ("WARN" if result.severity == "warning" else "FAIL")
+                    )
                     print(f"[{status}] {name}: {result.message}")
             except Exception as e:
                 report.add(CheckResult(name, False, f"Error: {e}"))
@@ -866,10 +984,19 @@ def run_sanity_checks(db_path: Path, nixpkgs_path: Path | None = None, verbose: 
     # Git-based checks (require nixpkgs)
     if nixpkgs_path and nixpkgs_path.exists():
         git_checks = [
-            ("Commits Exist in Git", lambda c: check_commit_exists_in_git(c, nixpkgs_path)),
+            (
+                "Commits Exist in Git",
+                lambda c: check_commit_exists_in_git(c, nixpkgs_path),
+            ),
             ("Commit Dates Match", lambda c: check_commit_dates_match(c, nixpkgs_path)),
-            ("All-Packages.nix Extraction", lambda c: check_all_packages_nix_extraction(c, nixpkgs_path)),
-            ("Infrastructure Files Handling", lambda c: check_infrastructure_files_handling(c, nixpkgs_path)),
+            (
+                "All-Packages.nix Extraction",
+                lambda c: check_all_packages_nix_extraction(c, nixpkgs_path),
+            ),
+            (
+                "Infrastructure Files Handling",
+                lambda c: check_infrastructure_files_handling(c, nixpkgs_path),
+            ),
         ]
 
         if verbose:
@@ -880,7 +1007,11 @@ def run_sanity_checks(db_path: Path, nixpkgs_path: Path | None = None, verbose: 
                 result = check_fn(conn)
                 report.add(result)
                 if verbose:
-                    status = "PASS" if result.passed else ("WARN" if result.severity == "warning" else "FAIL")
+                    status = (
+                        "PASS"
+                        if result.passed
+                        else ("WARN" if result.severity == "warning" else "FAIL")
+                    )
                     print(f"[{status}] {name}: {result.message}")
             except Exception as e:
                 report.add(CheckResult(name, False, f"Error: {e}"))
@@ -898,11 +1029,17 @@ def print_report(report: SanityReport, nixpkgs_path: Path | None):
     print("=" * 70)
 
     for check in report.checks:
-        status = "PASS" if check.passed else ("WARN" if check.severity == "warning" else "FAIL")
+        status = (
+            "PASS"
+            if check.passed
+            else ("WARN" if check.severity == "warning" else "FAIL")
+        )
         print(f"[{status}] {check.name}: {check.message}")
 
     print("\n" + "-" * 70)
-    print(f"SUMMARY: {report.passed} passed, {report.failed} failed, {report.warnings} warnings")
+    print(
+        f"SUMMARY: {report.passed} passed, {report.failed} failed, {report.warnings} warnings"
+    )
     print("-" * 70)
 
     if report.failed == 0 and report.warnings == 0:
@@ -919,14 +1056,16 @@ def print_report(report: SanityReport, nixpkgs_path: Path | None):
 def main():
     parser = argparse.ArgumentParser(description="Sanity check nxv database integrity")
     parser.add_argument(
-        "--db", type=Path,
+        "--db",
+        type=Path,
         default=Path.home() / ".local/share/nxv/index.db",
-        help="Path to nxv database"
+        help="Path to nxv database",
     )
     parser.add_argument(
-        "--nixpkgs", type=Path,
+        "--nixpkgs",
+        type=Path,
         default=None,
-        help="Path to nixpkgs clone for git verification"
+        help="Path to nixpkgs clone for git verification",
     )
     parser.add_argument("--verbose", "-v", action="store_true", help="Show progress")
     parser.add_argument("--json", action="store_true", help="Output JSON")
@@ -940,7 +1079,11 @@ def main():
     # Try to find nixpkgs in common locations
     nixpkgs_path = args.nixpkgs
     if not nixpkgs_path:
-        for candidate in [Path("./nixpkgs"), Path("../nixpkgs"), Path.home() / "nixpkgs"]:
+        for candidate in [
+            Path("./nixpkgs"),
+            Path("../nixpkgs"),
+            Path.home() / "nixpkgs",
+        ]:
             if candidate.exists() and (candidate / ".git").exists():
                 nixpkgs_path = candidate
                 break
@@ -962,10 +1105,10 @@ def main():
                     "passed": c.passed,
                     "message": c.message,
                     "severity": c.severity,
-                    "details": c.details
+                    "details": c.details,
                 }
                 for c in report.checks
-            ]
+            ],
         }
         print(json.dumps(output, indent=2))
     else:

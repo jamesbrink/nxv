@@ -217,7 +217,9 @@ def extract_attrs_from_line(line: str) -> tuple[Optional[str], str]:
     return None, "unparseable"
 
 
-def analyze_diff(diff_text: str) -> tuple[list[str], dict[str, str], list[str], int, int]:
+def analyze_diff(
+    diff_text: str,
+) -> tuple[list[str], dict[str, str], list[str], int, int]:
     """Analyze a diff and extract attribute names.
 
     Returns (attrs, extraction_methods, unparseable_lines).
@@ -280,7 +282,7 @@ def analyze_commit(
     )
 
     if verbose:
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"Commit: {commit_hash[:7]} ({commit_date})")
         print(f"Message: {commit_message[:60]}...")
         print(f"Files: {', '.join(changed_files)}")
@@ -335,9 +337,7 @@ def generate_report(analyses: list[DiffAnalysis]) -> ResearchReport:
 
     report.total_attrs_extracted = total_attrs
     report.extraction_methods = all_methods
-    report.common_unparseable_patterns = Counter(
-        dict(all_unparseable.most_common(20))
-    )
+    report.common_unparseable_patterns = Counter(dict(all_unparseable.most_common(20)))
 
     if analyses:
         report.avg_attrs_per_commit = total_attrs / len(analyses)
@@ -361,13 +361,13 @@ def print_report(report: ResearchReport):
     print(f"  - Touching aliases.nix: {report.commits_touching_aliases}")
     print(f"  - Merge commits: {report.merge_commits}")
 
-    print(f"\nExtraction Statistics:")
+    print("\nExtraction Statistics:")
     print(f"  - Total attrs extracted: {report.total_attrs_extracted}")
     print(f"  - Avg attrs per commit: {report.avg_attrs_per_commit:.1f}")
     print(f"  - Avg lines changed per commit: {report.avg_lines_changed:.1f}")
     print(f"  - Success rate (>=1 attr): {report.extraction_success_rate:.1%}")
 
-    print(f"\nExtraction Methods:")
+    print("\nExtraction Methods:")
     for method, count in report.extraction_methods.most_common():
         print(f"  - {method}: {count}")
 
@@ -378,7 +378,7 @@ def print_report(report: ResearchReport):
         if len(report.large_diff_commits) > 5:
             print(f"  ... and {len(report.large_diff_commits) - 5} more")
 
-    print(f"\nCommon Unparseable Patterns:")
+    print("\nCommon Unparseable Patterns:")
     for pattern, count in report.common_unparseable_patterns.most_common(10):
         print(f"  [{count:3d}] {pattern[:50]}")
 

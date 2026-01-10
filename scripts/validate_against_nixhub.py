@@ -329,7 +329,14 @@ def verify_version_at_commit(
             # Evaluate the package version using nix-instantiate
             nix_expr = f'(import <nixpkgs> {{}}).{attr_path}.version or "unavailable"'
             result = subprocess.run(
-                ["nix-instantiate", "--eval", "-E", nix_expr, "-I", f"nixpkgs={nixpkgs_path}"],
+                [
+                    "nix-instantiate",
+                    "--eval",
+                    "-E",
+                    nix_expr,
+                    "-I",
+                    f"nixpkgs={nixpkgs_path}",
+                ],
                 cwd=nixpkgs_path,
                 capture_output=True,
                 timeout=60,
@@ -600,7 +607,9 @@ def validate_package(
         if validation.commits_not_in_git:
             print(f"  Commits not in git: {len(validation.commits_not_in_git)}")
         if validation.version_verification_failed:
-            print(f"  Version verification failed: {len(validation.version_verification_failed)}")
+            print(
+                f"  Version verification failed: {len(validation.version_verification_failed)}"
+            )
 
     return validation
 
@@ -667,23 +676,28 @@ def print_report(report: ValidationReport):
     print(f"\nPackages validated: {report.packages_validated}")
     print(f"Packages with errors: {report.packages_with_errors}")
 
-    print(f"\nVersion Counts:")
+    print("\nVersion Counts:")
     print(f"  - Total in nxv: {report.total_versions_nxv}")
     print(f"  - Total in NixHub: {report.total_versions_nixhub}")
     print(f"  - Missing from nxv: {report.total_missing_from_nxv}")
 
-    print(f"\nData Quality:")
+    print("\nData Quality:")
     print(f"  - Commit hash mismatches: {report.total_commit_mismatches}")
     print(f"  - Store path mismatches: {report.total_store_path_mismatches}")
     print(f"  - Cache unavailable: {report.total_cache_unavailable}")
 
     # Git verification results (only if non-zero)
-    if report.total_commits_not_in_git > 0 or report.total_version_verification_failed > 0:
-        print(f"\nGit Verification:")
+    if (
+        report.total_commits_not_in_git > 0
+        or report.total_version_verification_failed > 0
+    ):
+        print("\nGit Verification:")
         if report.total_commits_not_in_git > 0:
             print(f"  - Commits not in git: {report.total_commits_not_in_git}")
         if report.total_version_verification_failed > 0:
-            print(f"  - Version verification failed: {report.total_version_verification_failed}")
+            print(
+                f"  - Version verification failed: {report.total_version_verification_failed}"
+            )
 
     print(f"\nAverage completeness: {report.avg_completeness:.1%}")
 
@@ -733,14 +747,18 @@ def print_category_report(validations: list[PackageValidation]):
     print("-" * 70)
 
     for category, pkg_list in PACKAGE_CATEGORIES.items():
-        cat_validations = [v for v in validations if v.package_name in pkg_list and not v.error]
+        cat_validations = [
+            v for v in validations if v.package_name in pkg_list and not v.error
+        ]
         if not cat_validations:
             continue
 
         total_nxv = sum(v.nxv_version_count for v in cat_validations)
         total_nixhub = sum(v.nixhub_version_count for v in cat_validations)
         total_missing = sum(len(v.versions_only_in_nixhub) for v in cat_validations)
-        avg_completeness = sum(v.completeness_ratio for v in cat_validations) / len(cat_validations)
+        avg_completeness = sum(v.completeness_ratio for v in cat_validations) / len(
+            cat_validations
+        )
 
         print(f"\n{category.upper()} ({len(cat_validations)} packages):")
         print(f"  nxv: {total_nxv}, NixHub: {total_nixhub}, Missing: {total_missing}")
@@ -832,7 +850,10 @@ def main():
 
     # Validate --nixpkgs requirement
     if (args.verify_commits or args.verify_versions) and not args.nixpkgs:
-        print("Error: --verify-commits and --verify-versions require --nixpkgs", file=sys.stderr)
+        print(
+            "Error: --verify-commits and --verify-versions require --nixpkgs",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     if args.nixpkgs and not args.nixpkgs.exists():
@@ -840,7 +861,10 @@ def main():
         sys.exit(1)
 
     if args.nixpkgs and not (args.nixpkgs / ".git").exists():
-        print(f"Error: nixpkgs directory is not a git repo: {args.nixpkgs}", file=sys.stderr)
+        print(
+            f"Error: nixpkgs directory is not a git repo: {args.nixpkgs}",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     # Determine packages to validate
@@ -869,13 +893,13 @@ def main():
     if args.verify_commits:
         print(f"Git commit verification: enabled (nixpkgs: {args.nixpkgs})")
     if args.verify_versions:
-        print(f"Version verification: enabled (very slow, uses nix-instantiate)")
+        print("Version verification: enabled (very slow, uses nix-instantiate)")
 
     # Validate each package
     validations = []
     for i, package in enumerate(packages):
         if not args.verbose:
-            print(f"\rProgress: {i+1}/{len(packages)} - {package[:30]:30s}", end="")
+            print(f"\rProgress: {i + 1}/{len(packages)} - {package[:30]:30s}", end="")
         validation = validate_package(
             args.db,
             package,

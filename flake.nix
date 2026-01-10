@@ -391,6 +391,7 @@
             pkgs.markdownlint-cli  # Markdown linter
             pkgs.k6  # Load testing tool
             pkgs.python3  # For benchmark scripts
+            pkgs.ruff  # Python linter and formatter
             # For indexer feature with nix-bindings
             pkgs.clang
             pkgs.llvmPackages.libclang

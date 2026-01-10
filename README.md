@@ -309,6 +309,33 @@ nxv index --nixpkgs-path ./nixpkgs
 
 **Worker parallelism:** The `--workers` flag controls how many worker subprocesses handle Nix evaluations. Workers are assigned per-system (architecture), so with the default 4 systems (x86_64-linux, aarch64-linux, x86_64-darwin, aarch64-darwin), only 4 workers are used concurrently per commit. Setting `--workers` higher than your system count provides no benefit.
 
+### Parallel Year-Range Indexing
+
+For faster initial indexing, you can process multiple year ranges in parallel. Each range gets its own git worktree and worker pool, with results merged via UPSERT into the shared database.
+
+```bash
+# Process 3 years in parallel (each year gets its own worktree + 4 workers)
+nxv index --nixpkgs-path ./nixpkgs --parallel-ranges 2018,2019,2020
+
+# Specify a year range
+nxv index --nixpkgs-path ./nixpkgs --parallel-ranges 2017-2020
+
+# Auto-partition into N ranges
+nxv index --nixpkgs-path ./nixpkgs --parallel-ranges 4  # 4 evenly-split ranges
+
+# Control maximum concurrent range workers (default: 4)
+nxv index --nixpkgs-path ./nixpkgs --parallel-ranges 2018,2019,2020 --max-range-workers 2
+```
+
+**How it works:**
+
+- Each year range creates an independent git worktree in `/tmp`
+- Each range has its own checkpoint (`last_indexed_commit_2018`, etc.) for safe resume
+- Results merge correctly via UPSERT: `MIN(first_commit_date)` and `MAX(last_commit_date)` ensure bounds are accurate regardless of processing order
+- Two levels of parallelism: year ranges × systems (e.g., 3 ranges × 4 systems = up to 12 concurrent Nix evaluations)
+
+**Expected speedup:** 2-3x for initial indexing. Database writes serialize via SQLite WAL mode, but Nix extraction (the bottleneck) parallelizes fully.
+
 ### Backfilling Metadata
 
 Update missing fields without full rebuild:

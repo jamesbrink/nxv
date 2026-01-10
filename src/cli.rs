@@ -378,6 +378,21 @@ pub struct IndexArgs {
     /// Internal flag for worker subprocess mode (hidden from help).
     #[arg(long, hide = true)]
     pub internal_worker: bool,
+
+    /// Process year ranges in parallel for faster indexing.
+    /// Formats:
+    ///   "4"             - Auto-partition into 4 equal year ranges
+    ///   "2017,2018"     - Process years 2017 and 2018 in parallel
+    ///   "2017-2020"     - Single range from 2017 to 2019 (end exclusive)
+    ///   "2017-2019,2020-2024" - Multiple explicit ranges
+    #[arg(long, value_name = "RANGES")]
+    pub parallel_ranges: Option<String>,
+
+    /// Maximum concurrent range workers for parallel indexing.
+    /// Each range gets its own worktree and worker pool.
+    /// Default: min(num_cpus / 4, number of ranges)
+    #[arg(long, default_value_t = 4)]
+    pub max_range_workers: usize,
 }
 
 /// Fields that can be backfilled from nixpkgs.

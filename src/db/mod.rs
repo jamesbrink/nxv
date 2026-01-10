@@ -484,6 +484,70 @@ impl Database {
         Ok(())
     }
 
+    /// Get checkpoint for a specific year range (parallel indexing).
+    ///
+    /// Returns the last indexed commit hash for the given range label.
+    #[cfg(feature = "indexer")]
+    pub fn get_range_checkpoint(&self, range_label: &str) -> Result<Option<String>> {
+        self.get_meta(&format!("last_indexed_commit_{}", range_label))
+    }
+
+    /// Set checkpoint for a specific year range (parallel indexing).
+    ///
+    /// Stores the last indexed commit hash and timestamp for the given range.
+    #[cfg(feature = "indexer")]
+    #[instrument(skip(self))]
+    pub fn set_range_checkpoint(&self, range_label: &str, commit_hash: &str) -> Result<()> {
+        self.set_meta(
+            &format!("last_indexed_commit_{}", range_label),
+            commit_hash,
+        )?;
+        self.set_meta(
+            &format!("last_indexed_date_{}", range_label),
+            &chrono::Utc::now().to_rfc3339(),
+        )?;
+        Ok(())
+    }
+
+    /// Get all range checkpoints (for resume logic in parallel indexing).
+    ///
+    /// Returns a map from range label to last indexed commit hash.
+    #[cfg(feature = "indexer")]
+    #[allow(dead_code)] // Available for future resume functionality and testing
+    pub fn get_all_range_checkpoints(&self) -> Result<std::collections::HashMap<String, String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT key, value FROM meta WHERE key LIKE 'last_indexed_commit_%'")?;
+        let rows = stmt.query_map([], |row| {
+            let key: String = row.get(0)?;
+            let value: String = row.get(1)?;
+            // Extract range label from key (e.g., "last_indexed_commit_2017" -> "2017")
+            let label = key
+                .strip_prefix("last_indexed_commit_")
+                .unwrap_or(&key)
+                .to_string();
+            Ok((label, value))
+        })?;
+
+        let mut checkpoints = std::collections::HashMap::new();
+        for row in rows {
+            let (label, hash) = row?;
+            checkpoints.insert(label, hash);
+        }
+        Ok(checkpoints)
+    }
+
+    /// Clear all range checkpoints (for fresh start in parallel indexing).
+    #[cfg(feature = "indexer")]
+    #[allow(dead_code)] // Available for future resume functionality and testing
+    pub fn clear_range_checkpoints(&self) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM meta WHERE key LIKE 'last_indexed_commit_%' OR key LIKE 'last_indexed_date_%'",
+            [],
+        )?;
+        Ok(())
+    }
+
     /// Get the underlying connection for advanced operations.
     pub fn connection(&self) -> &Connection {
         &self.conn
@@ -1051,5 +1115,121 @@ mod tests {
             })
             .unwrap();
         assert_eq!(count, 10_000);
+    }
+
+    // =============================================
+    // Range checkpoint tests (indexer feature only)
+    // =============================================
+
+    #[test]
+    #[cfg(feature = "indexer")]
+    fn test_range_checkpoint_set_and_get() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db = Database::open(&db_path).unwrap();
+
+        // Set checkpoints for multiple ranges
+        db.set_range_checkpoint("2017", "abc123").unwrap();
+        db.set_range_checkpoint("2018", "def456").unwrap();
+
+        // Retrieve them
+        assert_eq!(
+            db.get_range_checkpoint("2017").unwrap(),
+            Some("abc123".to_string())
+        );
+        assert_eq!(
+            db.get_range_checkpoint("2018").unwrap(),
+            Some("def456".to_string())
+        );
+        assert_eq!(db.get_range_checkpoint("2019").unwrap(), None);
+    }
+
+    #[test]
+    #[cfg(feature = "indexer")]
+    fn test_range_checkpoint_update() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db = Database::open(&db_path).unwrap();
+
+        // Set initial checkpoint
+        db.set_range_checkpoint("2017", "abc123").unwrap();
+        assert_eq!(
+            db.get_range_checkpoint("2017").unwrap(),
+            Some("abc123".to_string())
+        );
+
+        // Update checkpoint
+        db.set_range_checkpoint("2017", "xyz789").unwrap();
+        assert_eq!(
+            db.get_range_checkpoint("2017").unwrap(),
+            Some("xyz789".to_string())
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "indexer")]
+    fn test_range_checkpoint_get_all() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db = Database::open(&db_path).unwrap();
+
+        // Set checkpoints
+        db.set_range_checkpoint("2017", "abc123").unwrap();
+        db.set_range_checkpoint("2018", "def456").unwrap();
+        db.set_range_checkpoint("2019", "ghi789").unwrap();
+
+        // Get all
+        let all = db.get_all_range_checkpoints().unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all.get("2017"), Some(&"abc123".to_string()));
+        assert_eq!(all.get("2018"), Some(&"def456".to_string()));
+        assert_eq!(all.get("2019"), Some(&"ghi789".to_string()));
+    }
+
+    #[test]
+    #[cfg(feature = "indexer")]
+    fn test_range_checkpoint_clear() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db = Database::open(&db_path).unwrap();
+
+        // Set checkpoints
+        db.set_range_checkpoint("2017", "abc123").unwrap();
+        db.set_range_checkpoint("2018", "def456").unwrap();
+
+        // Verify they exist
+        assert_eq!(db.get_all_range_checkpoints().unwrap().len(), 2);
+
+        // Clear all range checkpoints
+        db.clear_range_checkpoints().unwrap();
+
+        // Verify they're gone
+        assert_eq!(db.get_all_range_checkpoints().unwrap().len(), 0);
+        assert_eq!(db.get_range_checkpoint("2017").unwrap(), None);
+        assert_eq!(db.get_range_checkpoint("2018").unwrap(), None);
+    }
+
+    #[test]
+    #[cfg(feature = "indexer")]
+    fn test_range_checkpoint_does_not_affect_main_checkpoint() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db = Database::open(&db_path).unwrap();
+
+        // Set main checkpoint
+        db.set_meta("last_indexed_commit", "main_commit").unwrap();
+
+        // Set range checkpoints
+        db.set_range_checkpoint("2017", "range_commit_1").unwrap();
+        db.set_range_checkpoint("2018", "range_commit_2").unwrap();
+
+        // Clear range checkpoints
+        db.clear_range_checkpoints().unwrap();
+
+        // Main checkpoint should still exist
+        assert_eq!(
+            db.get_meta("last_indexed_commit").unwrap(),
+            Some("main_commit".to_string())
+        );
     }
 }

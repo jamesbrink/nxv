@@ -61,6 +61,159 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tracing::{debug, info_span, instrument, trace};
 
+/// A year range for parallel indexing.
+///
+/// Represents a time range for partitioning commits during parallel indexing.
+/// Each range is processed by a separate worker with its own worktree.
+#[derive(Debug, Clone)]
+pub struct YearRange {
+    /// Human-readable label for checkpointing (e.g., "2017" or "2017-2018").
+    pub label: String,
+    /// Start date (inclusive) in ISO format: "YYYY-MM-DD".
+    pub since: String,
+    /// End date (exclusive) in ISO format: "YYYY-MM-DD".
+    pub until: String,
+}
+
+impl YearRange {
+    /// Create a range for a single year.
+    pub fn new(start_year: u16, end_year: u16) -> Self {
+        Self {
+            label: if start_year == end_year - 1 {
+                format!("{}", start_year)
+            } else {
+                format!("{}-{}", start_year, end_year - 1)
+            },
+            since: format!("{}-01-01", start_year),
+            until: format!("{}-01-01", end_year),
+        }
+    }
+
+    /// Create a range for a specific month (useful for testing).
+    #[cfg(test)]
+    pub fn new_month(year: u16, month: u8) -> Self {
+        let next_month = if month == 12 { 1 } else { month + 1 };
+        let next_year = if month == 12 { year + 1 } else { year };
+        Self {
+            label: format!("{}-{:02}", year, month),
+            since: format!("{}-{:02}-01", year, month),
+            until: format!("{}-{:02}-01", next_year, next_month),
+        }
+    }
+
+    /// Parse a range specification string.
+    ///
+    /// Supports multiple formats:
+    /// - `"4"` - Auto-partition into N equal ranges
+    /// - `"2017"` - Single year
+    /// - `"2017-2020"` - Year range (2017 through 2019, exclusive end)
+    /// - `"2017,2018,2019"` - Multiple individual years
+    /// - `"2017-2019,2020-2024"` - Multiple ranges
+    ///
+    /// # Arguments
+    /// * `spec` - The range specification string
+    /// * `min_year` - Minimum year to consider (e.g., 2017)
+    /// * `max_year` - Maximum year (exclusive, e.g., 2026 for up to 2025)
+    ///
+    /// # Examples
+    /// ```
+    /// let ranges = YearRange::parse_ranges("4", 2017, 2025).unwrap();
+    /// assert_eq!(ranges.len(), 4); // 8 years split into 4 ranges
+    /// ```
+    pub fn parse_ranges(spec: &str, min_year: u16, max_year: u16) -> Result<Vec<Self>> {
+        let spec = spec.trim();
+
+        // Check if it's a small number (auto-partition) - numbers < 100 are counts, >= 100 could be years
+        // This distinguishes "4" (partition into 4 ranges) from "2017" (single year)
+        if let Ok(count) = spec.parse::<usize>() {
+            // If the number looks like a year (>= 1970), treat it as a single year spec
+            if count >= 1970 {
+                let year = count as u16;
+                return Ok(vec![Self::new(year, year + 1)]);
+            }
+            if count == 0 {
+                return Err(NxvError::Config("Range count must be greater than 0".into()));
+            }
+            let total_years = (max_year - min_year) as usize;
+            if count > total_years {
+                return Err(NxvError::Config(format!(
+                    "Cannot split {} years into {} ranges",
+                    total_years, count
+                )));
+            }
+            let years_per_range = total_years / count;
+            let remainder = total_years % count;
+
+            let mut ranges = Vec::new();
+            let mut current = min_year;
+            for i in 0..count {
+                // Distribute remainder among first ranges
+                let extra = if i < remainder { 1 } else { 0 };
+                let end = current + years_per_range as u16 + extra as u16;
+                ranges.push(Self::new(current, end));
+                current = end;
+            }
+            return Ok(ranges);
+        }
+
+        // Parse comma-separated ranges/years
+        let mut ranges = Vec::new();
+        for part in spec.split(',') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+
+            if let Some((start_str, end_str)) = part.split_once('-') {
+                // Range format: "2017-2020"
+                let start: u16 = start_str.trim().parse().map_err(|_| {
+                    NxvError::Config(format!("Invalid year: {}", start_str))
+                })?;
+                let end: u16 = end_str.trim().parse().map_err(|_| {
+                    NxvError::Config(format!("Invalid year: {}", end_str))
+                })?;
+                if start >= end {
+                    return Err(NxvError::Config(format!(
+                        "Invalid range: {} must be less than {}",
+                        start, end
+                    )));
+                }
+                ranges.push(Self::new(start, end + 1)); // +1 because end is inclusive in input
+            } else {
+                // Single year: "2017"
+                let year: u16 = part.parse().map_err(|_| {
+                    NxvError::Config(format!("Invalid year: {}", part))
+                })?;
+                ranges.push(Self::new(year, year + 1));
+            }
+        }
+
+        if ranges.is_empty() {
+            return Err(NxvError::Config("No valid ranges specified".into()));
+        }
+
+        Ok(ranges)
+    }
+}
+
+/// Result from indexing a single year range (for parallel indexing).
+#[derive(Debug, Default, Clone)]
+pub struct RangeIndexResult {
+    /// Label of the range that was processed.
+    #[allow(dead_code)] // Used for logging and debugging
+    pub range_label: String,
+    /// Number of commits successfully processed in this range.
+    pub commits_processed: u64,
+    /// Total number of package extractions in this range.
+    pub packages_found: u64,
+    /// Number of packages upserted from this range.
+    pub packages_upserted: u64,
+    /// Number of extraction failures in this range.
+    pub extraction_failures: u64,
+    /// Whether this range's indexing was interrupted.
+    pub was_interrupted: bool,
+}
+
 /// Configuration for the indexer.
 #[derive(Debug, Clone)]
 pub struct IndexerConfig {
@@ -821,6 +974,229 @@ impl Indexer {
                 self.index_full(nixpkgs_path, db_path)
             }
         }
+    }
+
+    /// Run parallel indexing across multiple year ranges.
+    ///
+    /// Each range is processed by a separate thread with its own git worktree.
+    /// Results are merged into a single database via UPSERT semantics - the
+    /// MIN/MAX bounds logic ensures correct merging regardless of processing order.
+    ///
+    /// # Arguments
+    /// * `nixpkgs_path` - Path to nixpkgs repository
+    /// * `db_path` - Path to database file
+    /// * `ranges` - Year ranges to process in parallel
+    ///
+    /// # Example
+    /// ```no_run
+    /// let indexer = Indexer::new(IndexerConfig::default());
+    /// let ranges = YearRange::parse_ranges("2017,2018,2019", 2017, 2025)?;
+    /// let result = indexer.index_parallel_ranges("./nixpkgs", "./index.db", ranges, 4)?;
+    /// ```
+    pub fn index_parallel_ranges<P: AsRef<Path>, Q: AsRef<Path>>(
+        &self,
+        nixpkgs_path: P,
+        db_path: Q,
+        ranges: Vec<YearRange>,
+        max_range_workers: usize,
+    ) -> Result<IndexResult> {
+        use std::sync::Mutex;
+        use std::thread;
+
+        let nixpkgs_path = nixpkgs_path.as_ref();
+        let db_path = db_path.as_ref();
+
+        // Validate we have ranges to process
+        if ranges.is_empty() {
+            return Err(NxvError::Config("No ranges specified for parallel indexing".into()));
+        }
+
+        let repo = NixpkgsRepo::open(nixpkgs_path)?;
+
+        // Clean up orphaned worktrees from previous crashed runs
+        repo.prune_worktrees()?;
+
+        // Clean up temp eval store from previous runs
+        let temp_store_freed = gc::cleanup_temp_eval_store();
+        if let Some(bytes) = temp_store_freed
+            && bytes > 0
+        {
+            eprintln!(
+                "Cleaned up temp eval store ({:.1} MB freed)",
+                bytes as f64 / 1_000_000.0
+            );
+        }
+
+        // Check store health
+        if !gc::verify_store() {
+            eprintln!(
+                "{} Nix store verification failed. Run 'nix-store --verify --repair' to fix.",
+                "Warning:".warning()
+            );
+        }
+
+        // Check available disk space
+        if gc::is_store_low_on_space(self.config.gc_min_free_bytes) {
+            eprintln!(
+                "{} Low disk space detected. Running garbage collection...",
+                "Warning:".warning()
+            );
+            if let Some(duration) = gc::run_garbage_collection() {
+                eprintln!(
+                    "Garbage collection completed in {:.1}s",
+                    duration.as_secs_f64()
+                );
+            }
+        }
+
+        // Open database with mutex for thread-safe access
+        let db = Arc::new(Mutex::new(Database::open(db_path)?));
+
+        eprintln!(
+            "Starting parallel indexing with {} ranges:",
+            ranges.len()
+        );
+        for range in &ranges {
+            eprintln!("  - {} ({} to {})", range.label, range.since, range.until);
+        }
+
+        // Set up multi-progress bar
+        let multi_progress = if self.config.show_progress {
+            Some(MultiProgress::new())
+        } else {
+            None
+        };
+
+        // Create progress bars for each range
+        let progress_bars: Vec<Option<ProgressBar>> = if let Some(ref mp) = multi_progress {
+            ranges
+                .iter()
+                .map(|range| {
+                    let pb = mp.add(ProgressBar::new(0)); // Length set when commits are fetched
+                    pb.set_style(
+                        ProgressStyle::default_bar()
+                            .template(&format!(
+                                "{{spinner:.green}} {} [{{bar:30.cyan/blue}}] {{pos}}/{{len}} {{msg}}",
+                                range.label
+                            ))
+                            .expect("Invalid progress bar template")
+                            .progress_chars("█▓▒░  "),
+                    );
+                    pb.enable_steady_tick(Duration::from_millis(100));
+                    Some(pb)
+                })
+                .collect()
+        } else {
+            ranges.iter().map(|_| None).collect()
+        };
+
+        // Shared shutdown flag
+        let shutdown = self.shutdown.clone();
+
+        // Collect results from all range workers
+        let results: Arc<Mutex<Vec<RangeIndexResult>>> = Arc::new(Mutex::new(Vec::new()));
+        let errors: Arc<Mutex<Vec<(String, NxvError)>>> = Arc::new(Mutex::new(Vec::new()));
+
+        // Zip ranges with progress bars for batched processing
+        let range_items: Vec<_> = ranges.into_iter().zip(progress_bars).collect();
+
+        // Limit the number of concurrent range workers
+        let effective_max_workers = max_range_workers.max(1).min(range_items.len());
+        eprintln!(
+            "Using {} concurrent range workers",
+            effective_max_workers
+        );
+
+        // Process ranges in batches to limit concurrency
+        for batch in range_items.chunks(effective_max_workers) {
+            // Check for shutdown before starting new batch
+            if shutdown.load(std::sync::atomic::Ordering::SeqCst) {
+                eprintln!("Shutdown requested, skipping remaining batches");
+                break;
+            }
+
+            // Process this batch in parallel using scoped threads
+            thread::scope(|s| {
+                let handles: Vec<_> = batch
+                    .iter()
+                    .map(|(range, progress_bar)| {
+                        let db = db.clone();
+                        let nixpkgs_path = nixpkgs_path.to_path_buf();
+                        let shutdown = shutdown.clone();
+                        let results = results.clone();
+                        let errors = errors.clone();
+                        let config = self.config.clone();
+                        let range = range.clone();
+                        let progress_bar = progress_bar.clone();
+
+                        s.spawn(move || {
+                            match process_range_worker(
+                                &nixpkgs_path,
+                                db,
+                                range.clone(),
+                                &config,
+                                shutdown,
+                                progress_bar,
+                            ) {
+                                Ok(result) => {
+                                    results.lock().unwrap().push(result);
+                                }
+                                Err(e) => {
+                                    errors.lock().unwrap().push((range.label, e));
+                                }
+                            }
+                        })
+                    })
+                    .collect();
+
+                // Wait for all workers in this batch to complete
+                for handle in handles {
+                    let _ = handle.join();
+                }
+            });
+        }
+
+        // Check for errors
+        let errors = errors.lock().unwrap();
+        if !errors.is_empty() {
+            for (label, error) in errors.iter() {
+                eprintln!("Error in range {}: {}", label, error);
+            }
+            // Return first error
+            if let Some((label, _)) = errors.first() {
+                return Err(NxvError::Config(format!(
+                    "Parallel indexing failed for range {}",
+                    label
+                )));
+            }
+        }
+
+        // Aggregate results
+        let mut final_result = IndexResult::default();
+        let results = results.lock().unwrap();
+        for range_result in results.iter() {
+            final_result.merge(range_result.clone());
+        }
+
+        // Calculate unique names from database
+        {
+            let db_guard = db.lock().unwrap();
+            final_result.unique_names = db_guard
+                .connection()
+                .query_row(
+                    "SELECT COUNT(DISTINCT attribute_path) FROM package_versions",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap_or(0) as u64;
+        }
+
+        eprintln!(
+            "\nParallel indexing complete: {} commits, {} packages upserted",
+            final_result.commits_processed, final_result.packages_upserted
+        );
+
+        Ok(final_result)
     }
 
     /// Processes a sequence of commits: extracts package metadata for configured systems
@@ -1695,7 +2071,7 @@ fn should_refresh_file_map(changed_paths: &[String]) -> bool {
 }
 
 /// Result of an indexing operation.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct IndexResult {
     /// Number of commits successfully processed.
     pub commits_processed: u64,
@@ -1709,6 +2085,307 @@ pub struct IndexResult {
     pub was_interrupted: bool,
     /// Number of extraction failures (per-system failures during indexing).
     pub extraction_failures: u64,
+}
+
+impl IndexResult {
+    /// Merge results from a range worker into this aggregate result.
+    ///
+    /// Used in parallel indexing to combine results from multiple year range workers.
+    pub fn merge(&mut self, other: RangeIndexResult) {
+        self.commits_processed += other.commits_processed;
+        self.packages_found += other.packages_found;
+        self.packages_upserted += other.packages_upserted;
+        self.extraction_failures += other.extraction_failures;
+        self.was_interrupted |= other.was_interrupted;
+        // Note: unique_names is not tracked per-range, will be calculated at the end
+    }
+}
+
+/// Worker function for processing a single year range (runs in its own thread).
+///
+/// This function:
+/// 1. Opens its own repo handle and creates a dedicated worktree
+/// 2. Fetches commits for the specified date range
+/// 3. Checks for and resumes from any existing checkpoint
+/// 4. Processes commits and UPSERTs packages to the shared database
+/// 5. Saves checkpoints periodically
+fn process_range_worker(
+    nixpkgs_path: &Path,
+    db: Arc<std::sync::Mutex<Database>>,
+    range: YearRange,
+    config: &IndexerConfig,
+    shutdown: Arc<AtomicBool>,
+    progress_bar: Option<ProgressBar>,
+) -> Result<RangeIndexResult> {
+    use crate::db::queries::PackageVersion;
+
+    let mut result = RangeIndexResult {
+        range_label: range.label.clone(),
+        ..Default::default()
+    };
+
+    // Open repo and create worktree for this range
+    let repo = NixpkgsRepo::open(nixpkgs_path)?;
+
+    // Get commits for this range
+    let commits = repo.get_indexable_commits_touching_paths(
+        &["pkgs"],
+        Some(&range.since),
+        Some(&range.until),
+    )?;
+
+    if commits.is_empty() {
+        if let Some(pb) = &progress_bar {
+            pb.finish_with_message("no commits");
+        }
+        return Ok(result);
+    }
+
+    // Check for resume point
+    let resume_from = {
+        let db_guard = db.lock().unwrap();
+        db_guard.get_range_checkpoint(&range.label)?
+    };
+
+    // Filter commits if resuming
+    let commits: Vec<_> = if let Some(ref resume_hash) = resume_from {
+        // Find the index of the resume commit and skip everything before it
+        if let Some(pos) = commits.iter().position(|c| c.hash == *resume_hash) {
+            commits.into_iter().skip(pos + 1).collect()
+        } else {
+            // Resume commit not found, process all
+            commits
+        }
+    } else {
+        commits
+    };
+
+    let total_commits = commits.len();
+    if total_commits == 0 {
+        if let Some(pb) = &progress_bar {
+            pb.finish_with_message("already complete");
+        }
+        return Ok(result);
+    }
+
+    // Update progress bar with commit count
+    if let Some(pb) = &progress_bar {
+        pb.set_length(total_commits as u64);
+        if resume_from.is_some() {
+            pb.set_message("resuming...");
+        }
+    }
+
+    // Get first commit for worktree creation
+    let first_commit = commits.first().ok_or_else(|| {
+        NxvError::Git(git2::Error::from_str("No commits to process in range"))
+    })?;
+
+    // Create dedicated worktree for this range
+    let worktree = WorktreeSession::new(&repo, &first_commit.hash)?;
+    let worktree_path = worktree.path();
+
+    // Determine if we should use parallel evaluation for systems
+    let systems = &config.systems;
+    let use_parallel = config.worker_count != Some(1) && systems.len() > 1;
+    let worker_count = config.worker_count.unwrap_or(systems.len());
+
+    // Create worker pool for parallel system evaluation (if enabled)
+    let worker_pool = if use_parallel && worker_count > 1 {
+        let pool_config = worker::WorkerPoolConfig {
+            worker_count,
+            max_memory_mib: config.max_memory_mib,
+            ..Default::default()
+        };
+        worker::WorkerPool::new(pool_config).ok()
+    } else {
+        None
+    };
+
+    // Build initial file-to-attribute map
+    let (mut file_attr_map, mut mapping_commit) =
+        match build_file_attr_map(worktree_path, systems, worker_pool.as_ref()) {
+            Ok(map) => (map, first_commit.hash.clone()),
+            Err(_) => (HashMap::new(), String::new()),
+        };
+
+    // Buffer for batch UPSERT operations
+    let mut pending_upserts: Vec<PackageVersion> = Vec::new();
+
+    // Process commits
+    for (commit_idx, commit) in commits.iter().enumerate() {
+        // Check for shutdown
+        if shutdown.load(Ordering::SeqCst) {
+            result.was_interrupted = true;
+
+            // Save checkpoint and flush pending
+            if !pending_upserts.is_empty() {
+                let mut db_guard = db.lock().unwrap();
+                result.packages_upserted += db_guard.upsert_packages_batch(&pending_upserts)? as u64;
+            }
+            if let Some(last) = commits.get(commit_idx.saturating_sub(1)) {
+                let db_guard = db.lock().unwrap();
+                db_guard.set_range_checkpoint(&range.label, &last.hash)?;
+            }
+
+            if let Some(pb) = &progress_bar {
+                pb.finish_with_message("interrupted");
+            }
+            return Ok(result);
+        }
+
+        // Checkout commit
+        worktree.checkout(&commit.hash)?;
+
+        // Get changed files for this commit
+        let changed_paths = repo.get_commit_changed_paths(&commit.hash)?;
+
+        // Check if we need to rebuild the file-to-attribute map
+        let need_refresh = file_attr_map.is_empty() || should_refresh_file_map(&changed_paths);
+        if need_refresh
+            && mapping_commit != commit.hash
+            && let Ok(new_map) = build_file_attr_map(worktree_path, systems, worker_pool.as_ref())
+        {
+            file_attr_map = new_map;
+            mapping_commit = commit.hash.clone();
+        }
+
+        // Determine target attributes
+        let mut target_attr_paths: HashSet<String> = HashSet::new();
+        let all_attrs: Option<&Vec<String>> =
+            file_attr_map.get("pkgs/top-level/all-packages.nix");
+
+        // Check for infrastructure files and parse their diffs
+        let mut needs_full_extraction = commit_idx == 0; // First commit needs full extraction
+        for infra_file in INFRASTRUCTURE_FILES {
+            if changed_paths.contains(&infra_file.to_string())
+                && let Ok(diff) = repo.get_file_diff(&commit.hash, infra_file)
+            {
+                if let Some(extracted_attrs) = extract_attrs_from_diff(&diff) {
+                    for attr in extracted_attrs {
+                        if let Some(all_attrs_list) = all_attrs {
+                            if all_attrs_list.contains(&attr) {
+                                target_attr_paths.insert(attr);
+                            }
+                        } else {
+                            target_attr_paths.insert(attr);
+                        }
+                    }
+                } else {
+                    needs_full_extraction = true;
+                }
+            }
+        }
+
+        // Full extraction for first commit or large infrastructure diff
+        if needs_full_extraction
+            && let Some(all_attrs_list) = all_attrs
+        {
+            for attr in all_attrs_list {
+                target_attr_paths.insert(attr.clone());
+            }
+        }
+
+        // Add attrs from changed package files
+        for path in &changed_paths {
+            if let Some(attr_paths) = file_attr_map.get(path) {
+                for attr in attr_paths {
+                    target_attr_paths.insert(attr.clone());
+                }
+            }
+        }
+
+        let target_attrs: Vec<String> = target_attr_paths.into_iter().collect();
+
+        if target_attrs.is_empty() {
+            // No packages to extract for this commit
+            result.commits_processed += 1;
+            if let Some(pb) = &progress_bar {
+                pb.inc(1);
+            }
+            continue;
+        }
+
+        // Extract packages for all systems
+        let extraction_results: Vec<(String, std::result::Result<Vec<extractor::PackageInfo>, NxvError>)> =
+            if let Some(ref pool) = worker_pool {
+                let results = pool.extract_parallel(worktree_path, systems, &target_attrs);
+                systems.iter().cloned().zip(results).collect()
+            } else {
+                systems
+                    .iter()
+                    .map(|system| {
+                        let result = extractor::extract_packages_for_attrs(
+                            worktree_path,
+                            system,
+                            &target_attrs,
+                        );
+                        (system.clone(), result)
+                    })
+                    .collect()
+            };
+
+        // Aggregate results across systems
+        let mut aggregates: HashMap<String, PackageAggregate> = HashMap::new();
+
+        for (system, packages_result) in extraction_results {
+            match packages_result {
+                Ok(packages) => {
+                    result.packages_found += packages.len() as u64;
+                    for pkg in packages {
+                        let key = format!(
+                            "{}::{}",
+                            pkg.attribute_path,
+                            pkg.version.as_deref().unwrap_or("")
+                        );
+                        if let Some(existing) = aggregates.get_mut(&key) {
+                            existing.merge(pkg, &system);
+                        } else {
+                            aggregates.insert(key, PackageAggregate::new(pkg, &system));
+                        }
+                    }
+                }
+                Err(_) => {
+                    result.extraction_failures += 1;
+                }
+            }
+        }
+
+        // Convert aggregates to PackageVersion records
+        for aggregate in aggregates.values() {
+            pending_upserts.push(aggregate.to_package_version(&commit.hash, commit.date));
+        }
+
+        result.commits_processed += 1;
+        if let Some(pb) = &progress_bar {
+            pb.inc(1);
+        }
+
+        // Checkpoint periodically
+        if (commit_idx + 1) % config.checkpoint_interval == 0 {
+            let mut db_guard = db.lock().unwrap();
+            result.packages_upserted += db_guard.upsert_packages_batch(&pending_upserts)? as u64;
+            db_guard.set_range_checkpoint(&range.label, &commit.hash)?;
+            db_guard.checkpoint()?;
+            pending_upserts.clear();
+        }
+    }
+
+    // Final flush
+    if !pending_upserts.is_empty() {
+        let mut db_guard = db.lock().unwrap();
+        result.packages_upserted += db_guard.upsert_packages_batch(&pending_upserts)? as u64;
+        if let Some(last) = commits.last() {
+            db_guard.set_range_checkpoint(&range.label, &last.hash)?;
+        }
+        db_guard.checkpoint()?;
+    }
+
+    if let Some(pb) = &progress_bar {
+        pb.finish_with_message("done");
+    }
+
+    Ok(result)
 }
 
 /// Constructs a Bloom filter containing all unique package attribute paths from the database.
@@ -2531,5 +3208,158 @@ index abc123..def456 100644
 
         assert_eq!(aggregate.version, "3.11.7");
         assert_eq!(aggregate.version_source, Some("name".to_string()));
+    }
+
+    // =============================================
+    // YearRange parsing tests
+    // =============================================
+
+    #[test]
+    fn test_year_range_new_single_year() {
+        let range = YearRange::new(2017, 2018);
+        assert_eq!(range.label, "2017");
+        assert_eq!(range.since, "2017-01-01");
+        assert_eq!(range.until, "2018-01-01");
+    }
+
+    #[test]
+    fn test_year_range_new_multi_year() {
+        let range = YearRange::new(2017, 2020);
+        assert_eq!(range.label, "2017-2019");
+        assert_eq!(range.since, "2017-01-01");
+        assert_eq!(range.until, "2020-01-01");
+    }
+
+    #[test]
+    fn test_year_range_parse_single_year() {
+        let ranges = YearRange::parse_ranges("2017", 2017, 2025).unwrap();
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].since, "2017-01-01");
+        assert_eq!(ranges[0].until, "2018-01-01");
+    }
+
+    #[test]
+    fn test_year_range_parse_range() {
+        // Note: "2017-2020" means years 2017, 2018, 2019, 2020 (inclusive end)
+        // So until is 2021-01-01 (exclusive)
+        let ranges = YearRange::parse_ranges("2017-2020", 2017, 2025).unwrap();
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].since, "2017-01-01");
+        assert_eq!(ranges[0].until, "2021-01-01"); // 2020 inclusive means until 2021
+    }
+
+    #[test]
+    fn test_year_range_parse_multiple() {
+        let ranges = YearRange::parse_ranges("2017,2018,2019", 2017, 2025).unwrap();
+        assert_eq!(ranges.len(), 3);
+        assert_eq!(ranges[0].label, "2017");
+        assert_eq!(ranges[1].label, "2018");
+        assert_eq!(ranges[2].label, "2019");
+    }
+
+    #[test]
+    fn test_year_range_auto_partition() {
+        // 8 years (2017-2024) divided into 4 ranges = 2 years each
+        let ranges = YearRange::parse_ranges("4", 2017, 2025).unwrap();
+        assert_eq!(ranges.len(), 4);
+        assert_eq!(ranges[0].label, "2017-2018");
+        assert_eq!(ranges[0].since, "2017-01-01");
+        assert_eq!(ranges[0].until, "2019-01-01");
+    }
+
+    #[test]
+    fn test_year_range_auto_partition_uneven() {
+        // 9 years (2017-2025) divided into 4 ranges
+        let ranges = YearRange::parse_ranges("4", 2017, 2026).unwrap();
+        assert_eq!(ranges.len(), 4);
+        // First ranges get 2 years each, last may get more
+    }
+
+    #[test]
+    fn test_year_range_parse_invalid_year() {
+        let result = YearRange::parse_ranges("1900", 2017, 2025);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_year_range_parse_invalid_format() {
+        let result = YearRange::parse_ranges("abc", 2017, 2025);
+        assert!(result.is_err());
+    }
+
+    // =============================================
+    // IndexResult merge tests
+    // =============================================
+
+    #[test]
+    fn test_index_result_merge_single() {
+        let mut total = IndexResult::default();
+        let range1 = RangeIndexResult {
+            range_label: "2017".to_string(),
+            commits_processed: 100,
+            packages_found: 1000,
+            packages_upserted: 500,
+            extraction_failures: 10,
+            was_interrupted: false,
+        };
+        total.merge(range1);
+        assert_eq!(total.commits_processed, 100);
+        assert_eq!(total.packages_found, 1000);
+        assert_eq!(total.packages_upserted, 500);
+        assert_eq!(total.extraction_failures, 10);
+        assert!(!total.was_interrupted);
+    }
+
+    #[test]
+    fn test_index_result_merge_multiple() {
+        let mut total = IndexResult::default();
+        let range1 = RangeIndexResult {
+            range_label: "2017".to_string(),
+            commits_processed: 100,
+            packages_found: 1000,
+            packages_upserted: 500,
+            extraction_failures: 10,
+            was_interrupted: false,
+        };
+        let range2 = RangeIndexResult {
+            range_label: "2018".to_string(),
+            commits_processed: 150,
+            packages_found: 1500,
+            packages_upserted: 750,
+            extraction_failures: 5,
+            was_interrupted: false,
+        };
+        total.merge(range1);
+        total.merge(range2);
+        assert_eq!(total.commits_processed, 250);
+        assert_eq!(total.packages_found, 2500);
+        assert_eq!(total.packages_upserted, 1250);
+        assert_eq!(total.extraction_failures, 15);
+        assert!(!total.was_interrupted);
+    }
+
+    #[test]
+    fn test_index_result_merge_interrupted() {
+        let mut total = IndexResult::default();
+        let range1 = RangeIndexResult {
+            range_label: "2017".to_string(),
+            commits_processed: 100,
+            packages_found: 1000,
+            packages_upserted: 500,
+            extraction_failures: 0,
+            was_interrupted: false,
+        };
+        let range2 = RangeIndexResult {
+            range_label: "2018".to_string(),
+            commits_processed: 50,
+            packages_found: 500,
+            packages_upserted: 250,
+            extraction_failures: 0,
+            was_interrupted: true, // This one was interrupted
+        };
+        total.merge(range1);
+        total.merge(range2);
+        assert_eq!(total.commits_processed, 150);
+        assert!(total.was_interrupted); // Interrupt flag propagates
     }
 }

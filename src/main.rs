@@ -1122,7 +1122,7 @@ fn validate_date_range(since: Option<&str>, until: Option<&str>) -> Result<()> {
 #[cfg(feature = "indexer")]
 fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
     use crate::db::Database;
-    use crate::index::{Indexer, IndexerConfig, save_bloom_filter};
+    use crate::index::{Indexer, IndexerConfig, YearRange, save_bloom_filter};
     use std::sync::atomic::Ordering;
 
     // Check for internal worker mode first
@@ -1174,7 +1174,26 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
     })
     .expect("Error setting Ctrl+C handler");
 
-    let result = if args.full {
+    // Check for parallel ranges mode
+    let result = if let Some(ref ranges_spec) = args.parallel_ranges {
+        // Parse year ranges from CLI specification
+        // Default year range: 2017 to current year + 1
+        use chrono::Datelike;
+        let current_year = chrono::Utc::now().year() as u16;
+        let ranges = YearRange::parse_ranges(ranges_spec, 2017, current_year + 1)?;
+
+        eprintln!(
+            "Using parallel year-range indexing with {} ranges (max {} workers)",
+            ranges.len(),
+            args.max_range_workers.min(ranges.len())
+        );
+        for range in &ranges {
+            eprintln!("  Range: {} ({} to {})", range.label, range.since, range.until);
+        }
+        eprintln!();
+
+        indexer.index_parallel_ranges(&nixpkgs_path, &cli.db_path, ranges, args.max_range_workers)?
+    } else if args.full {
         indexer.index_full(&nixpkgs_path, &cli.db_path)?
     } else {
         indexer.index_incremental(&nixpkgs_path, &cli.db_path)?

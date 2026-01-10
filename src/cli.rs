@@ -376,10 +376,10 @@ pub struct IndexArgs {
     #[arg(long)]
     pub workers: Option<usize>,
 
-    /// Total memory budget for all workers (e.g., "32G", "24GiB", "16384M").
+    /// Total memory budget for all workers (e.g., "32G", "8GiB", "16384M").
     /// Plain numbers are MiB for backwards compatibility.
     /// Divided automatically among workers.
-    #[arg(long, default_value = "24G", value_parser = parse_memory_size)]
+    #[arg(long, default_value = "8G", value_parser = parse_memory_size)]
     pub max_memory: MemorySize,
 
     /// Show verbose output including extraction warnings.

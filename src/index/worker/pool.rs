@@ -10,7 +10,7 @@ use super::signals::{TerminationReason, WorkerFailure, analyze_wait_status};
 use super::spawn::{WorkerConfig, spawn_worker};
 use crate::error::{NxvError, Result};
 use crate::index::extractor::{AttrPosition, PackageInfo};
-use crate::memory::DEFAULT_PER_WORKER_MEMORY;
+use crate::memory::DEFAULT_MEMORY_BUDGET;
 use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -33,9 +33,12 @@ pub struct WorkerPoolConfig {
 
 impl Default for WorkerPoolConfig {
     fn default() -> Self {
+        const DEFAULT_WORKERS: usize = 4;
         Self {
-            worker_count: 4,
-            per_worker_memory_mib: DEFAULT_PER_WORKER_MEMORY.as_mib() as usize,
+            worker_count: DEFAULT_WORKERS,
+            // Default: 8 GiB total / 4 workers = 2 GiB per worker
+            per_worker_memory_mib: (DEFAULT_MEMORY_BUDGET.as_mib() / DEFAULT_WORKERS as u64)
+                as usize,
             timeout: Duration::from_secs(300), // 5 minutes
             eval_store_path: None,
         }
@@ -669,10 +672,8 @@ mod tests {
     fn test_worker_pool_config_default() {
         let config = WorkerPoolConfig::default();
         assert_eq!(config.worker_count, 4);
-        assert_eq!(
-            config.per_worker_memory_mib,
-            DEFAULT_PER_WORKER_MEMORY.as_mib() as usize
-        );
+        // 8 GiB total / 4 workers = 2 GiB per worker
+        assert_eq!(config.per_worker_memory_mib, 2 * 1024);
         assert!(config.eval_store_path.is_none());
     }
 

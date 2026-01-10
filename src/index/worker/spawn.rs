@@ -7,7 +7,7 @@
 
 use super::proc::Proc;
 use crate::error::{NxvError, Result};
-use crate::memory::DEFAULT_PER_WORKER_MEMORY;
+use crate::memory::DEFAULT_MEMORY_BUDGET;
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::sync::Once;
@@ -28,8 +28,11 @@ pub struct WorkerConfig {
 
 impl Default for WorkerConfig {
     fn default() -> Self {
+        const DEFAULT_WORKERS: usize = 4;
         Self {
-            per_worker_memory_mib: DEFAULT_PER_WORKER_MEMORY.as_mib() as usize,
+            // Default: 8 GiB total / 4 workers = 2 GiB per worker
+            per_worker_memory_mib: (DEFAULT_MEMORY_BUDGET.as_mib() / DEFAULT_WORKERS as u64)
+                as usize,
             eval_store_path: None,
         }
     }
@@ -202,10 +205,8 @@ mod tests {
     #[test]
     fn test_worker_config_default() {
         let config = WorkerConfig::default();
-        assert_eq!(
-            config.per_worker_memory_mib,
-            DEFAULT_PER_WORKER_MEMORY.as_mib() as usize
-        );
+        // 8 GiB total / 4 workers = 2 GiB per worker
+        assert_eq!(config.per_worker_memory_mib, 2 * 1024);
     }
 
     // Note: spawn_worker requires the binary to support --internal-worker,

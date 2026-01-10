@@ -12,6 +12,7 @@ pub struct MemorySize(u64);
 
 impl MemorySize {
     /// Create from raw bytes.
+    #[allow(dead_code)]
     pub const fn from_bytes(bytes: u64) -> Self {
         Self(bytes)
     }
@@ -27,6 +28,7 @@ impl MemorySize {
     }
 
     /// Get the raw byte count.
+    #[allow(dead_code)]
     pub const fn as_bytes(&self) -> u64 {
         self.0
     }
@@ -193,21 +195,12 @@ impl fmt::Display for MemorySize {
 /// Workers below this threshold may OOM during Nix evaluation.
 pub const MIN_WORKER_MEMORY: MemorySize = MemorySize::from_mib(512);
 
-/// Default per-worker memory allocation (6 GiB).
+/// Default total memory budget (8 GiB).
 ///
-/// This is the target per-worker memory when dividing the total budget.
-/// Change this value to adjust the default memory per worker.
-pub const DEFAULT_PER_WORKER_MEMORY: MemorySize = MemorySize::from_gib(6);
-
-/// Default number of workers (one per system architecture).
-pub const DEFAULT_WORKER_COUNT: usize = 4;
-
-/// Default total memory budget.
-///
-/// Calculated as DEFAULT_PER_WORKER_MEMORY × DEFAULT_WORKER_COUNT.
-/// With defaults: 6 GiB × 4 = 24 GiB.
-pub const DEFAULT_MEMORY_BUDGET: MemorySize =
-    MemorySize::from_bytes(DEFAULT_PER_WORKER_MEMORY.as_bytes() * DEFAULT_WORKER_COUNT as u64);
+/// A conservative default suitable for most systems.
+/// With 4 default workers, this gives 2 GiB per worker.
+/// Users with more RAM can increase via --max-memory (e.g., --max-memory=32G).
+pub const DEFAULT_MEMORY_BUDGET: MemorySize = MemorySize::from_gib(8);
 
 #[cfg(test)]
 mod tests {
@@ -282,6 +275,6 @@ mod tests {
 
     #[test]
     fn test_default() {
-        assert_eq!(MemorySize::default().as_gib(), 24);
+        assert_eq!(MemorySize::default().as_gib(), 8);
     }
 }

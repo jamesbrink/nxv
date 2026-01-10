@@ -1009,13 +1009,13 @@ mod tests {
         let output_dir = dir.path();
 
         let full_index = IndexFile {
-            url: "nxv-index-full.db.zst".to_string(),
+            url: "index.db.zst".to_string(),
             sha256: "abc123".to_string(),
             size_bytes: 1000,
         };
 
         let bloom_filter = IndexFile {
-            url: "nxv-bloom.bin".to_string(),
+            url: "bloom.bin".to_string(),
             sha256: "def456".to_string(),
             size_bytes: 500,
         };
@@ -1037,7 +1037,7 @@ mod tests {
         let content = fs::read_to_string(&manifest_path).unwrap();
         let parsed: Manifest = serde_json::from_str(&content).unwrap();
         assert_eq!(parsed.version, 1);
-        assert_eq!(parsed.full_index.url, "nxv-index-full.db.zst");
+        assert_eq!(parsed.full_index.url, "index.db.zst");
         assert_eq!(parsed.latest_commit, "latest123");
         assert_eq!(parsed.min_version, None);
     }

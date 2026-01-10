@@ -152,9 +152,7 @@ nix run nixpkgs/e4a45f9#python
 ### Index Management
 
 ```bash
-nxv update              # Download/update slim index (default)
-nxv update index:slim   # Explicit slim variant
-nxv update index:full   # Download full history variant
+nxv update              # Download/update index
 nxv update --force      # Force full re-download
 nxv stats               # Show index statistics
 ```
@@ -332,8 +330,7 @@ Generate distribution-ready artifacts with the `publish` command:
 nxv publish --output ./publish --url-prefix https://your-server.com/nxv
 
 # Files created:
-#   publish/index.db.zst       - Slim database (~28MB) - one row per (attr, version)
-#   publish/index-full.db.zst  - Full history (~1.3GB) - all version ranges
+#   publish/index.db.zst       - Compressed database (~28MB) - one row per (attr, version)
 #   publish/bloom.bin          - Bloom filter for fast lookups (~96KB)
 #   publish/manifest.json      - Manifest with URLs and checksums
 ```

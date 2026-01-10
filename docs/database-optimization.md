@@ -1,5 +1,7 @@
 # Database Optimization Working Document
 
+> **Note (2025-01-09):** This document is historical. The "slim" variant optimization has been fully implemented - the indexer now uses UPSERT semantics to maintain one row per (attribute_path, version) from the start. There are no separate slim/full variants; the database IS slim by design.
+
 ## Current State (2025-01-07)
 
 ### Index Status
@@ -160,14 +162,15 @@ Measured with `--true-cold` flag (OS cache purged before each cold measurement).
 
 ---
 
-## Implementation
+## Implementation (Completed)
 
-### Update Variants (ollama-style)
+The slim optimization is now the default and only implementation. The indexer uses UPSERT semantics during indexing to maintain exactly one row per (attribute_path, version) pair.
+
+### Update Command
 
 ```bash
-nxv update              # Downloads slim (default)
-nxv update index:slim   # Explicit slim
-nxv update index:full   # Downloads full history
+nxv update              # Downloads the index
+nxv update --force      # Force re-download
 ```
 
 ### Publish Command
@@ -176,18 +179,17 @@ nxv update index:full   # Downloads full history
 nxv publish --output ./publish --compression-level 3
 ```
 
-Generates both variants:
+Generates:
 
-- `index.db.zst` - Slim database (28 MB)
-- `index-full.db.zst` - Full history (1.26 GB)
-- `bloom.bin` - Bloom filter (96 KB)
-- `manifest.json` - With optional `full_history_index` field
+- `index.db.zst` - Compressed database (~28 MB)
+- `bloom.bin` - Bloom filter (~96 KB)
+- `manifest.json` - Index metadata with checksums
 
 ---
 
 ## Notes
 
-- Slim DB preserves all unique (attribute_path, version) pairs
-- Uses `MIN(first_commit_date)` and `MAX(last_commit_date)` for consolidated ranges
+- One row per unique (attribute_path, version) pair
+- UPSERT updates first_commit_date (MIN) and last_commit_date (MAX) during indexing
 - Metadata (description, license, etc.) from most recent commit
-- Full history available via `index:full` variant for users who need commit-level granularity
+- ~31x smaller than the old full-history approach

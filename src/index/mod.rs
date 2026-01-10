@@ -841,8 +841,9 @@ impl Indexer {
 
         let mut db = Database::open(&db_path)?;
 
-        // Check for last indexed commit
-        let last_commit = db.get_meta("last_indexed_commit")?;
+        // Check for last indexed commit across all checkpoint types
+        // This unifies regular incremental and year-range checkpoints
+        let last_commit = db.get_latest_checkpoint()?;
 
         match last_commit {
             Some(hash) => {
@@ -1141,6 +1142,21 @@ impl Indexer {
                     |row| row.get::<_, i64>(0),
                 )
                 .unwrap_or(0) as u64;
+        }
+
+        // Sync global checkpoint to the latest across all ranges
+        // This ensures regular incremental indexing picks up where parallel left off
+        {
+            let db_guard = db.lock().unwrap();
+            if let Ok(Some(latest)) = db_guard.get_latest_checkpoint() {
+                let _ = db_guard.set_meta("last_indexed_commit", &latest);
+                let _ = db_guard.set_meta("last_indexed_date", &chrono::Utc::now().to_rfc3339());
+                debug!(
+                    target: "nxv::index",
+                    "Synced global checkpoint to {}",
+                    &latest[..7]
+                );
+            }
         }
 
         info!(

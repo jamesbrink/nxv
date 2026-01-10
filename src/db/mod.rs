@@ -545,6 +545,46 @@ impl Database {
         Ok(())
     }
 
+    /// Get the latest indexed commit across all checkpoint types.
+    ///
+    /// This unifies the regular incremental checkpoint (`last_indexed_commit`) with
+    /// year-range checkpoints (`last_indexed_commit_YEAR`, etc.) by finding the one
+    /// with the most recent timestamp.
+    ///
+    /// Returns the commit hash with the latest `last_indexed_date*` timestamp.
+    #[cfg(feature = "indexer")]
+    pub fn get_latest_checkpoint(&self) -> Result<Option<String>> {
+        // Get all checkpoint keys (both regular and range-specific)
+        let mut stmt = self.conn.prepare(
+            "SELECT key, value FROM meta WHERE key LIKE 'last_indexed_commit%' AND key NOT LIKE '%_date%'"
+        )?;
+
+        let checkpoints: Vec<(String, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        if checkpoints.is_empty() {
+            return Ok(None);
+        }
+
+        // Find the checkpoint with the latest date
+        let mut latest: Option<(String, i64)> = None;
+        for (key, hash) in checkpoints {
+            let date_key = key.replace("last_indexed_commit", "last_indexed_date");
+            if let Some(date_str) = self.get_meta(&date_key)?
+                && let Ok(date) = chrono::DateTime::parse_from_rfc3339(&date_str)
+            {
+                let ts = date.timestamp();
+                if latest.is_none() || ts > latest.as_ref().unwrap().1 {
+                    latest = Some((hash, ts));
+                }
+            }
+        }
+
+        Ok(latest.map(|(hash, _)| hash))
+    }
+
     /// Get the underlying connection for advanced operations.
     pub fn connection(&self) -> &Connection {
         &self.conn
@@ -1228,5 +1268,169 @@ mod tests {
             db.get_meta("last_indexed_commit").unwrap(),
             Some("main_commit".to_string())
         );
+    }
+
+    #[test]
+    #[cfg(feature = "indexer")]
+    fn test_get_latest_checkpoint_empty() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db = Database::open(&db_path).unwrap();
+
+        // No checkpoints initially
+        assert!(db.get_latest_checkpoint().unwrap().is_none());
+    }
+
+    #[test]
+    #[cfg(feature = "indexer")]
+    fn test_get_latest_checkpoint_only_regular() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db = Database::open(&db_path).unwrap();
+
+        // Set only regular checkpoint
+        db.set_meta("last_indexed_commit", "regular_commit_abc").unwrap();
+        db.set_meta("last_indexed_date", "2020-06-15T12:00:00Z").unwrap();
+
+        let latest = db.get_latest_checkpoint().unwrap().unwrap();
+        assert_eq!(latest, "regular_commit_abc");
+    }
+
+    #[test]
+    #[cfg(feature = "indexer")]
+    fn test_get_latest_checkpoint_only_range() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db = Database::open(&db_path).unwrap();
+
+        // Set only range checkpoints (no regular)
+        db.set_range_checkpoint("2017", "commit_2017").unwrap();
+        // Manually set older date for 2017
+        db.set_meta("last_indexed_date_2017", "2020-01-01T00:00:00Z").unwrap();
+
+        db.set_range_checkpoint("2018", "commit_2018").unwrap();
+        // 2018 is set by set_range_checkpoint to current time (newer)
+
+        // Should return 2018's commit (newer date)
+        let latest = db.get_latest_checkpoint().unwrap().unwrap();
+        assert_eq!(latest, "commit_2018");
+    }
+
+    #[test]
+    #[cfg(feature = "indexer")]
+    fn test_get_latest_checkpoint_mixed_regular_and_range() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db = Database::open(&db_path).unwrap();
+
+        // Set regular checkpoint with older date
+        db.set_meta("last_indexed_commit", "old_regular_commit").unwrap();
+        db.set_meta("last_indexed_date", "2020-01-01T00:00:00Z").unwrap();
+
+        // Set range checkpoint (newer - set_range_checkpoint uses current time)
+        db.set_range_checkpoint("2020-H2", "newer_range_commit").unwrap();
+
+        // Should return the range commit (newer)
+        let latest = db.get_latest_checkpoint().unwrap().unwrap();
+        assert_eq!(latest, "newer_range_commit");
+    }
+
+    #[test]
+    #[cfg(feature = "indexer")]
+    fn test_get_latest_checkpoint_regular_is_newer() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db = Database::open(&db_path).unwrap();
+
+        // Set range checkpoint with older date
+        db.set_range_checkpoint("2017", "old_range_commit").unwrap();
+        db.set_meta("last_indexed_date_2017", "2020-01-01T00:00:00Z").unwrap();
+
+        // Set regular checkpoint with newer date
+        db.set_meta("last_indexed_commit", "newer_regular_commit").unwrap();
+        db.set_meta("last_indexed_date", "2025-12-31T23:59:59Z").unwrap();
+
+        // Should return the regular commit (newer)
+        let latest = db.get_latest_checkpoint().unwrap().unwrap();
+        assert_eq!(latest, "newer_regular_commit");
+    }
+
+    #[test]
+    #[cfg(feature = "indexer")]
+    fn test_get_latest_checkpoint_multiple_ranges_finds_newest() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db = Database::open(&db_path).unwrap();
+
+        // Set multiple range checkpoints with explicit dates
+        db.set_meta("last_indexed_commit_2017", "commit_2017").unwrap();
+        db.set_meta("last_indexed_date_2017", "2020-01-01T00:00:00Z").unwrap();
+
+        db.set_meta("last_indexed_commit_2018", "commit_2018").unwrap();
+        db.set_meta("last_indexed_date_2018", "2020-03-01T00:00:00Z").unwrap();
+
+        db.set_meta("last_indexed_commit_2019", "commit_2019").unwrap();
+        db.set_meta("last_indexed_date_2019", "2020-02-01T00:00:00Z").unwrap();
+
+        db.set_meta("last_indexed_commit_2020", "commit_2020").unwrap();
+        db.set_meta("last_indexed_date_2020", "2020-04-01T00:00:00Z").unwrap();
+
+        // 2020 has the latest date
+        let latest = db.get_latest_checkpoint().unwrap().unwrap();
+        assert_eq!(latest, "commit_2020");
+    }
+
+    #[test]
+    #[cfg(feature = "indexer")]
+    fn test_get_latest_checkpoint_handles_missing_date() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db = Database::open(&db_path).unwrap();
+
+        // Set checkpoint without corresponding date (edge case)
+        db.set_meta("last_indexed_commit", "orphan_commit").unwrap();
+        // No last_indexed_date set
+
+        // Set range checkpoint with date
+        db.set_range_checkpoint("2020", "range_with_date").unwrap();
+
+        // Should return the range commit (has valid date)
+        let latest = db.get_latest_checkpoint().unwrap().unwrap();
+        assert_eq!(latest, "range_with_date");
+    }
+
+    #[test]
+    #[cfg(feature = "indexer")]
+    fn test_get_latest_checkpoint_crash_recovery_scenario() {
+        // Simulates: user ran year-range indexing, some ranges completed, some crashed
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db = Database::open(&db_path).unwrap();
+
+        // 2017 completed
+        db.set_meta("last_indexed_commit_2017", "2017_final").unwrap();
+        db.set_meta("last_indexed_date_2017", "2025-01-10T10:00:00Z").unwrap();
+
+        // 2018 crashed partway (checkpoint exists but earlier)
+        db.set_meta("last_indexed_commit_2018", "2018_partial").unwrap();
+        db.set_meta("last_indexed_date_2018", "2025-01-10T09:00:00Z").unwrap();
+
+        // 2019 completed
+        db.set_meta("last_indexed_commit_2019", "2019_final").unwrap();
+        db.set_meta("last_indexed_date_2019", "2025-01-10T11:00:00Z").unwrap();
+
+        // 2020 completed last (newest)
+        db.set_meta("last_indexed_commit_2020", "2020_final").unwrap();
+        db.set_meta("last_indexed_date_2020", "2025-01-10T12:00:00Z").unwrap();
+
+        // get_latest_checkpoint returns the most recent by date
+        // This is correct behavior - it's NOT responsible for gap detection
+        // Gap detection (2018 incomplete) is a separate concern for the indexer
+        let latest = db.get_latest_checkpoint().unwrap().unwrap();
+        assert_eq!(latest, "2020_final");
+
+        // Note: To detect gaps, user should:
+        // 1. Check get_all_range_checkpoints() to see which ranges have checkpoints
+        // 2. Re-run crashed ranges: nxv index --year-range 2018
     }
 }

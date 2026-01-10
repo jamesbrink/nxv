@@ -16,8 +16,8 @@
 #               port = 8080;
 #               cors.enable = true;
 #               # Logging configuration
-#               logging.level = "nxv=info,tower_http=info,warn";
-#               logging.format = "json";  # or "text" (default)
+#               logging.level = "info";  # error, warn, info, debug, trace
+#               logging.format = "json"; # pretty (default), compact, json
 #               # Database concurrency limits (prevents resource exhaustion)
 #               database.maxConnections = 32;  # Max concurrent DB operations
 #               database.timeoutSeconds = 30;  # Timeout for DB operations
@@ -163,25 +163,40 @@ in
 
     logging = {
       level = mkOption {
-        type = types.str;
-        default = "nxv=info,tower_http=info,warn";
-        example = "nxv=debug,tower_http=debug,info";
+        type = types.enum [ "error" "warn" "info" "debug" "trace" ];
+        default = "info";
+        example = "debug";
         description = ''
-          Log level configuration using RUST_LOG syntax.
+          Log level for the nxv service.
+          - "error": Only errors
+          - "warn": Warnings and errors
+          - "info": Normal operation messages (default)
+          - "debug": Detailed debugging information
+          - "trace": Very verbose tracing
+        '';
+      };
+
+      filter = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "nxv=debug,tower_http=info";
+        description = ''
+          Advanced log filter using RUST_LOG/NXV_LOG syntax.
+          If set, overrides the level option for fine-grained control.
           Common patterns:
-          - "nxv=info,tower_http=info,warn" (default)
-          - "nxv=debug,tower_http=debug,info" (verbose)
-          - "nxv=trace,tower_http=trace,debug" (very verbose)
+          - "nxv=debug,tower_http=info" (debug nxv, info for HTTP)
+          - "nxv=trace,tower_http=debug" (very verbose)
         '';
       };
 
       format = mkOption {
-        type = types.enum [ "text" "json" ];
-        default = "text";
+        type = types.enum [ "pretty" "compact" "json" ];
+        default = "pretty";
         description = ''
           Log output format.
-          - "text": Human-readable format for development and debugging.
-          - "json": Structured JSON format for log aggregation systems.
+          - "pretty": Human-readable multi-line format (default)
+          - "compact": Single-line format
+          - "json": Structured JSON format for log aggregation systems
         '';
       };
     };
@@ -256,11 +271,12 @@ in
       wantedBy = [ "multi-user.target" ];
 
       environment = {
-        RUST_LOG = cfg.logging.level;
+        NXV_LOG_LEVEL = cfg.logging.level;
+        NXV_LOG_FORMAT = cfg.logging.format;
         NXV_MAX_DB_CONNECTIONS = toString cfg.database.maxConnections;
         NXV_DB_TIMEOUT_SECS = toString cfg.database.timeoutSeconds;
-      } // lib.optionalAttrs (cfg.logging.format == "json") {
-        NXV_LOG_FORMAT = "json";
+      } // lib.optionalAttrs (cfg.logging.filter != null) {
+        NXV_LOG = cfg.logging.filter;
       } // lib.optionalAttrs cfg.rateLimit.enable {
         NXV_RATE_LIMIT = toString cfg.rateLimit.requestsPerSecond;
       } // lib.optionalAttrs (cfg.rateLimit.enable && cfg.rateLimit.burst != null) {

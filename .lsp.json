@@ -1,6 +1,6 @@
 {
   "nix": {
-    "command": "nixd",
+    "command": "nil",
     "args": [],
     "extensionToLanguage": {
       ".nix": "nix"

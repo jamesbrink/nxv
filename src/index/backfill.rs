@@ -15,12 +15,12 @@ use crate::db::Database;
 use crate::error::Result;
 use crate::index::extractor;
 use crate::index::git::NixpkgsRepo;
-use crate::theme::Themed;
-use indicatif::{ProgressBar, ProgressStyle};
+use crate::index::ProgressTracker;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use tracing::{debug, info, warn};
 
 /// Result of a backfill operation.
 #[derive(Debug, Default)]
@@ -130,13 +130,13 @@ pub fn run_backfill<P: AsRef<Path>, Q: AsRef<Path>>(
         let db = Database::open(db_path)?;
         let current_commit = db.get_meta("last_indexed_commit")?;
         if current_commit.as_ref() != Some(original_commit) {
-            eprintln!("Warning: last_indexed_commit was unexpectedly modified during backfill.");
-            eprintln!(
-                "  Expected: {}, Found: {:?}",
+            warn!(
+                target: "nxv::backfill",
+                "last_indexed_commit was unexpectedly modified during backfill. \
+                Expected: {}, Found: {:?}. Restoring original value.",
                 &original_commit[..12.min(original_commit.len())],
                 current_commit.as_ref().map(|c| &c[..12.min(c.len())])
             );
-            eprintln!("  Restoring original value to preserve indexer checkpoint.");
             db.set_meta("last_indexed_commit", original_commit)?;
         }
     }
@@ -196,22 +196,23 @@ fn run_backfill_head<P: AsRef<Path>, Q: AsRef<Path>>(
     )?;
 
     if attrs_to_backfill.is_empty() {
-        println!("No packages need backfilling.");
+        info!(target: "nxv::backfill", "No packages need backfilling.");
         return Ok(BackfillResult::default());
     }
 
-    println!(
+    info!(
+        target: "nxv::backfill",
         "Found {} unique packages needing metadata backfill",
         attrs_to_backfill.len()
     );
 
     if config.dry_run {
-        println!("Dry run mode - no changes will be made");
+        info!(target: "nxv::backfill", "Dry run mode - no changes will be made");
         for (attr, _) in attrs_to_backfill.iter().take(20) {
-            println!("  Would backfill: {}", attr);
+            debug!(target: "nxv::backfill", "Would backfill: {}", attr);
         }
         if attrs_to_backfill.len() > 20 {
-            println!("  ... and {} more", attrs_to_backfill.len() - 20);
+            debug!(target: "nxv::backfill", "... and {} more", attrs_to_backfill.len() - 20);
         }
         return Ok(BackfillResult {
             packages_checked: attrs_to_backfill.len(),
@@ -220,26 +221,19 @@ fn run_backfill_head<P: AsRef<Path>, Q: AsRef<Path>>(
     }
 
     // Extract metadata from current nixpkgs
-    println!("Extracting metadata from current nixpkgs HEAD...");
+    info!(target: "nxv::backfill", "Extracting metadata from current nixpkgs HEAD...");
     let attr_list: Vec<String> = attrs_to_backfill.into_keys().collect();
 
     // Process in batches to avoid memory issues
     let batch_size = 1000;
     let mut result = BackfillResult::default();
-
-    let progress = ProgressBar::new(attr_list.len() as u64);
-    progress.set_style(
-        ProgressStyle::default_bar()
-            .template("  [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {msg}")
-            .unwrap()
-            .progress_chars("█▓▒░  "),
-    );
+    let mut progress = ProgressTracker::new(attr_list.len() as u64, "Backfill (HEAD)");
 
     for batch in attr_list.chunks(batch_size) {
         // Check for interruption
         if shutdown_flag.load(Ordering::SeqCst) {
             result.was_interrupted = true;
-            progress.finish_with_message("Interrupted");
+            info!(target: "nxv::backfill", "Interrupted");
             return Ok(result);
         }
 
@@ -250,7 +244,7 @@ fn run_backfill_head<P: AsRef<Path>, Q: AsRef<Path>>(
             match extractor::extract_packages_for_attrs(nixpkgs_path, "x86_64-linux", &batch_vec) {
                 Ok(pkgs) => pkgs,
                 Err(e) => {
-                    progress.println(format!("Warning: Extraction failed for batch: {}", e));
+                    warn!(target: "nxv::backfill", "Extraction failed for batch: {}", e);
                     continue;
                 }
             };
@@ -284,31 +278,23 @@ fn run_backfill_head<P: AsRef<Path>, Q: AsRef<Path>>(
         result.vulnerabilities_filled += updates.3;
         result.packages_checked += batch.len();
 
-        progress.set_position(result.packages_checked as u64);
-        use owo_colors::OwoColorize;
-        progress.set_message(format!(
-            "{} {} {} {} {} {} {} {}",
-            result.records_updated.count(),
-            "updated".dimmed(),
-            result.source_paths_filled.count_found(),
-            "source".dimmed(),
-            result.homepages_filled.count_found(),
-            "home".dimmed(),
-            result.vulnerabilities_filled.count_pending(),
-            "vuln".dimmed()
+        for _ in 0..batch.len() {
+            progress.tick();
+        }
+        progress.log_if_needed(&format!(
+            "updated={} source={} home={} vuln={}",
+            result.records_updated,
+            result.source_paths_filled,
+            result.homepages_filled,
+            result.vulnerabilities_filled
         ));
     }
 
-    {
-        use owo_colors::OwoColorize;
-        progress.finish_with_message(format!(
-            "{} {} {} {}",
-            "Done!".success(),
-            result.records_updated.count(),
-            "records".dimmed(),
-            "updated".dimmed()
-        ));
-    }
+    info!(
+        target: "nxv::backfill",
+        "Backfill complete: {} records updated",
+        result.records_updated
+    );
 
     Ok(result)
 }
@@ -364,31 +350,36 @@ fn run_backfill_historical<P: AsRef<Path>, Q: AsRef<Path>>(
     )?;
 
     if packages_by_commit.is_empty() {
-        println!("No packages need backfilling.");
+        info!(target: "nxv::backfill", "No packages need backfilling.");
         return Ok(BackfillResult::default());
     }
 
     let total_packages: usize = packages_by_commit.values().map(|v| v.len()).sum();
     let total_commits = packages_by_commit.len();
 
-    println!(
+    info!(
+        target: "nxv::backfill",
         "Found {} packages across {} commits needing metadata backfill",
         total_packages, total_commits
     );
 
     if config.dry_run {
-        println!("Dry run mode - no changes will be made");
+        info!(target: "nxv::backfill", "Dry run mode - no changes will be made");
         for (commit, attrs) in packages_by_commit.iter().take(5) {
-            println!("  Commit {}: {} packages", &commit[..12], attrs.len());
+            debug!(
+                target: "nxv::backfill",
+                "Commit {}: {} packages",
+                &commit[..12], attrs.len()
+            );
             for attr in attrs.iter().take(3) {
-                println!("    - {}", attr);
+                debug!(target: "nxv::backfill", "  - {}", attr);
             }
             if attrs.len() > 3 {
-                println!("    ... and {} more", attrs.len() - 3);
+                debug!(target: "nxv::backfill", "  ... and {} more", attrs.len() - 3);
             }
         }
         if total_commits > 5 {
-            println!("  ... and {} more commits", total_commits - 5);
+            debug!(target: "nxv::backfill", "... and {} more commits", total_commits - 5);
         }
         return Ok(BackfillResult {
             packages_checked: total_packages,
@@ -397,7 +388,7 @@ fn run_backfill_historical<P: AsRef<Path>, Q: AsRef<Path>>(
         });
     }
 
-    println!("Traversing git history to extract metadata...");
+    info!(target: "nxv::backfill", "Traversing git history to extract metadata...");
 
     // Apply max_commits limit
     let commits_to_process: Vec<_> = if let Some(max) = config.max_commits {
@@ -408,24 +399,13 @@ fn run_backfill_historical<P: AsRef<Path>, Q: AsRef<Path>>(
 
     let total_commits = commits_to_process.len();
     let mut result = BackfillResult::default();
-
-    // Use shared ETA tracker with larger window for stability
-    let mut eta_tracker = super::EtaTracker::new(50);
-
-    let progress = ProgressBar::new(total_commits as u64);
-    progress.set_style(
-        ProgressStyle::default_bar()
-            .template("  [{bar:40.cyan/blue}] {pos}/{len} commits {msg}")
-            .unwrap()
-            .progress_chars("█▓▒░  "),
-    );
-    progress.enable_steady_tick(std::time::Duration::from_millis(100));
+    let mut progress = ProgressTracker::new(total_commits as u64, "Backfill (history)");
 
     // Get first commit to initialize worktree session
     let first_commit = match commits_to_process.first() {
         Some((commit, _)) => commit.clone(),
         None => {
-            progress.finish_with_message("No commits to process");
+            info!(target: "nxv::backfill", "No commits to process");
             return Ok(result);
         }
     };
@@ -434,33 +414,29 @@ fn run_backfill_historical<P: AsRef<Path>, Q: AsRef<Path>>(
     let session = match WorktreeSession::new(&repo, &first_commit) {
         Ok(s) => s,
         Err(e) => {
-            progress.finish_with_message(format!("Failed to create worktree: {}", e));
+            tracing::error!(target: "nxv::backfill", "Failed to create worktree: {}", e);
             return Err(e);
         }
     };
 
     // Process commits using the worktree session
     for (commit, attr_paths) in &commits_to_process {
-        // Start timing this commit
-        eta_tracker.start_commit();
-        eta_tracker.set_remaining((total_commits - result.commits_processed) as u64);
-
         // Check for interruption
         if shutdown_flag.load(Ordering::SeqCst) {
             result.was_interrupted = true;
-            progress.finish_with_message("Interrupted");
+            info!(target: "nxv::backfill", "Interrupted");
             return Ok(result);
             // WorktreeSession auto-cleans up on drop
         }
 
         // Checkout the commit in the worktree
         if let Err(e) = session.checkout(commit) {
-            progress.println(format!(
-                "Warning: Failed to checkout {}: {}",
-                &commit[..12.min(commit.len())],
-                e
-            ));
-            eta_tracker.finish_commit();
+            warn!(
+                target: "nxv::backfill",
+                "Failed to checkout {}: {}",
+                &commit[..12.min(commit.len())], e
+            );
+            progress.tick();
             continue;
         }
 
@@ -470,12 +446,12 @@ fn run_backfill_historical<P: AsRef<Path>, Q: AsRef<Path>>(
             {
                 Ok(pkgs) => pkgs,
                 Err(e) => {
-                    progress.println(format!(
-                        "Warning: Extraction failed for {}: {}",
-                        &commit[..12.min(commit.len())],
-                        e
-                    ));
-                    eta_tracker.finish_commit();
+                    warn!(
+                        target: "nxv::backfill",
+                        "Extraction failed for {}: {}",
+                        &commit[..12.min(commit.len())], e
+                    );
+                    progress.tick();
                     continue;
                 }
             };
@@ -510,36 +486,19 @@ fn run_backfill_historical<P: AsRef<Path>, Q: AsRef<Path>>(
         result.packages_checked += attr_paths.len();
         result.commits_processed += 1;
 
-        // Record timing
-        eta_tracker.finish_commit();
-
-        progress.set_position(result.commits_processed as u64);
-        {
-            use owo_colors::OwoColorize;
-            progress.set_message(format!(
-                "{} | {} {} {} {}",
-                eta_tracker.progress_string(total_commits as u64),
-                result.packages_checked.count_found(),
-                "pkgs".dimmed(),
-                result.records_updated.count(),
-                "updated".dimmed()
-            ));
-        }
+        progress.tick();
+        progress.log_if_needed(&format!(
+            "pkgs={} updated={}",
+            result.packages_checked, result.records_updated
+        ));
     }
 
     // WorktreeSession auto-cleans up on drop
-    {
-        use owo_colors::OwoColorize;
-        progress.finish_with_message(format!(
-            "{} {} {} {} {} {}",
-            "Done!".success(),
-            result.commits_processed.count(),
-            "commits".dimmed(),
-            result.records_updated.count(),
-            "records".dimmed(),
-            "updated".dimmed()
-        ));
-    }
+    info!(
+        target: "nxv::backfill",
+        "Backfill complete: {} commits, {} records updated",
+        result.commits_processed, result.records_updated
+    );
 
     Ok(result)
 }

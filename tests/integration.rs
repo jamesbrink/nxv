@@ -2896,9 +2896,7 @@ fn test_publish_with_signing() {
             sk_path.to_str().unwrap(),
         ])
         .assert()
-        .success()
-        .stderr(predicate::str::contains("Signing manifest"))
-        .stderr(predicate::str::contains("manifest.json.minisig"));
+        .success();
 
     // Verify all artifacts exist
     assert!(output_dir.join("index.db.zst").exists());

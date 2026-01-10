@@ -7,11 +7,11 @@ use crate::error::{NxvError, Result};
 use crate::remote::download::{compress_zstd, file_sha256};
 use crate::remote::manifest::{DeltaFile, IndexFile, Manifest};
 use chrono::Utc;
-use indicatif::{ProgressBar, ProgressStyle};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
+use tracing::{debug, info};
 
 /// Compression level for zstd (higher = better compression, slower).
 /// Level 19 provides excellent compression ratio at the cost of speed.
@@ -338,12 +338,12 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
-/// Compress a file using zstd with progress indication.
+/// Compress a file using zstd with progress logging.
 fn compress_zstd_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     src: P,
     dest: Q,
     level: i32,
-    show_progress: bool,
+    _show_progress: bool,
 ) -> Result<()> {
     let src = src.as_ref();
     let dest = dest.as_ref();
@@ -355,21 +355,9 @@ fn compress_zstd_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
     let output = BufWriter::new(File::create(dest)?);
     let mut encoder = zstd::Encoder::new(output, level)?;
 
-    let pb = if show_progress {
-        let pb = ProgressBar::new(input_size);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.green} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
-                .unwrap()
-                .progress_chars("=>-"),
-        );
-        Some(pb)
-    } else {
-        None
-    };
-
     let mut buffer = [0u8; 64 * 1024]; // 64KB buffer
     let mut total_read = 0u64;
+    let mut last_pct = 0;
 
     loop {
         let bytes_read = reader.read(&mut buffer)?;
@@ -378,43 +366,32 @@ fn compress_zstd_with_progress<P: AsRef<Path>, Q: AsRef<Path>>(
         }
         encoder.write_all(&buffer[..bytes_read])?;
         total_read += bytes_read as u64;
-        if let Some(ref pb) = pb {
-            pb.set_position(total_read);
+
+        // Log progress every 10%
+        let pct = (total_read * 100 / input_size.max(1)) as u32;
+        if pct >= last_pct + 10 {
+            debug!(
+                target: "nxv::publish",
+                "Compression: {}%",
+                pct
+            );
+            last_pct = pct / 10 * 10;
         }
     }
 
     encoder.finish()?;
 
-    if let Some(pb) = pb {
-        pb.finish_and_clear();
-    }
-
     Ok(())
 }
 
-/// Calculate SHA256 hash of a file with progress indication.
-fn file_sha256_with_progress<P: AsRef<Path>>(path: P, show_progress: bool) -> Result<String> {
+/// Calculate SHA256 hash of a file.
+fn file_sha256_with_progress<P: AsRef<Path>>(path: P, _show_progress: bool) -> Result<String> {
     let path = path.as_ref();
     let file = File::open(path)?;
-    let file_size = file.metadata()?.len();
     let mut reader = BufReader::new(file);
     let mut hasher = Sha256::new();
 
-    let pb = if show_progress {
-        let pb = ProgressBar::new(file_size);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.green} [{bar:40.cyan/blue}] {bytes}/{total_bytes}")
-                .unwrap()
-                .progress_chars("=>-"),
-        );
-        Some(pb)
-    } else {
-        None
-    };
-
     let mut buffer = [0u8; 64 * 1024];
-    let mut total_read = 0u64;
 
     loop {
         let bytes_read = reader.read(&mut buffer)?;
@@ -422,14 +399,6 @@ fn file_sha256_with_progress<P: AsRef<Path>>(path: P, show_progress: bool) -> Re
             break;
         }
         hasher.update(&buffer[..bytes_read]);
-        total_read += bytes_read as u64;
-        if let Some(ref pb) = pb {
-            pb.set_position(total_read);
-        }
-    }
-
-    if let Some(pb) = pb {
-        pb.finish_and_clear();
     }
 
     Ok(format!("{:x}", hasher.finalize()))
@@ -621,7 +590,7 @@ pub fn generate_bloom_filter<P: AsRef<Path>, Q: AsRef<Path>>(
     db_path: P,
     output_dir: Q,
     url_prefix: Option<&str>,
-    show_progress: bool,
+    _show_progress: bool,
 ) -> Result<IndexFile> {
     let db_path = db_path.as_ref();
     let output_dir = output_dir.as_ref();
@@ -637,34 +606,16 @@ pub fn generate_bloom_filter<P: AsRef<Path>, Q: AsRef<Path>>(
     // Create bloom filter with 1% FPR
     let count = attrs.len();
 
-    if show_progress {
-        eprintln!("  Building bloom filter for {} packages...", count);
-    }
+    info!(
+        target: "nxv::publish",
+        "Building bloom filter for {} packages...",
+        count
+    );
 
     let mut filter = PackageBloomFilter::new(count.max(1000), 0.01);
 
-    let pb = if show_progress {
-        let pb = ProgressBar::new(count as u64);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len}")
-                .unwrap()
-                .progress_chars("=>-"),
-        );
-        Some(pb)
-    } else {
-        None
-    };
-
-    for (i, attr) in attrs.iter().enumerate() {
+    for attr in &attrs {
         filter.insert(attr);
-        if let Some(ref pb) = pb {
-            pb.set_position(i as u64 + 1);
-        }
-    }
-
-    if let Some(pb) = pb {
-        pb.finish_and_clear();
     }
 
     // Save the filter
@@ -674,9 +625,11 @@ pub fn generate_bloom_filter<P: AsRef<Path>, Q: AsRef<Path>>(
     let sha256 = file_sha256(&bloom_path)?;
     let size = fs::metadata(&bloom_path)?.len();
 
-    if show_progress {
-        eprintln!("  Bloom filter: {}", format_bytes(size));
-    }
+    info!(
+        target: "nxv::publish",
+        "Bloom filter: {}",
+        format_bytes(size)
+    );
 
     let url = match url_prefix {
         Some(prefix) => format!("{}/{}", prefix.trim_end_matches('/'), BLOOM_FILTER_NAME),
@@ -714,9 +667,7 @@ pub fn publish_index<P: AsRef<Path>, Q: AsRef<Path>>(
     fs::create_dir_all(output_dir)?;
 
     // Step 1: Compress the database
-    if show_progress {
-        eprintln!("Generating compressed index...");
-    }
+    info!(target: "nxv::publish", "Generating compressed index...");
     let (index_file, last_commit) = generate_index(
         db_path,
         output_dir,
@@ -727,17 +678,11 @@ pub fn publish_index<P: AsRef<Path>, Q: AsRef<Path>>(
     )?;
 
     // Step 2: Generate bloom filter
-    if show_progress {
-        eprintln!();
-        eprintln!("Generating bloom filter...");
-    }
+    info!(target: "nxv::publish", "Generating bloom filter...");
     let bloom_filter = generate_bloom_filter(db_path, output_dir, url_prefix, show_progress)?;
 
     // Step 3: Write manifest
-    if show_progress {
-        eprintln!();
-        eprintln!("Writing manifest...");
-    }
+    info!(target: "nxv::publish", "Writing manifest...");
     generate_manifest(
         output_dir,
         index_file.clone(),
@@ -749,10 +694,7 @@ pub fn publish_index<P: AsRef<Path>, Q: AsRef<Path>>(
 
     // Sign the manifest if a secret key was provided
     let signed = if let Some(sk) = secret_key {
-        if show_progress {
-            eprintln!();
-            eprintln!("Signing manifest...");
-        }
+        info!(target: "nxv::publish", "Signing manifest...");
         let manifest_path = output_dir.join(MANIFEST_NAME);
         sign_manifest(&manifest_path, sk)?;
         true
@@ -760,32 +702,38 @@ pub fn publish_index<P: AsRef<Path>, Q: AsRef<Path>>(
         false
     };
 
-    if show_progress {
-        let commit_display = if last_commit.is_empty() {
-            "unknown (missing meta)".to_string()
-        } else {
-            last_commit[..12.min(last_commit.len())].to_string()
-        };
+    let commit_display = if last_commit.is_empty() {
+        "unknown (missing meta)".to_string()
+    } else {
+        last_commit[..12.min(last_commit.len())].to_string()
+    };
 
-        eprintln!();
-        eprintln!("Published artifacts to: {}", output_dir.display());
-        eprintln!(
-            "  - {} ({})",
-            INDEX_DB_NAME,
-            format_bytes(index_file.size_bytes)
-        );
-        eprintln!(
-            "  - {} ({})",
-            BLOOM_FILTER_NAME,
-            format_bytes(bloom_filter.size_bytes)
-        );
-        eprintln!("  - {}", MANIFEST_NAME);
-        if signed {
-            eprintln!("  - {}", MANIFEST_SIG_NAME);
-        }
-        eprintln!();
-        eprintln!("Last indexed commit: {}", commit_display);
+    info!(
+        target: "nxv::publish",
+        "Published artifacts to: {}",
+        output_dir.display()
+    );
+    info!(
+        target: "nxv::publish",
+        "  {} ({})",
+        INDEX_DB_NAME,
+        format_bytes(index_file.size_bytes)
+    );
+    info!(
+        target: "nxv::publish",
+        "  {} ({})",
+        BLOOM_FILTER_NAME,
+        format_bytes(bloom_filter.size_bytes)
+    );
+    info!(target: "nxv::publish", "  {}", MANIFEST_NAME);
+    if signed {
+        info!(target: "nxv::publish", "  {}", MANIFEST_SIG_NAME);
     }
+    info!(
+        target: "nxv::publish",
+        "Last indexed commit: {}",
+        commit_display
+    );
 
     Ok(())
 }
@@ -838,33 +786,29 @@ fn generate_index<P: AsRef<Path>, Q: AsRef<Path>>(
     db.checkpoint()?;
     let input_size = fs::metadata(db_path)?.len();
 
-    if show_progress {
-        eprintln!(
-            "  Compressing database ({}) with zstd level {}...",
-            format_bytes(input_size),
-            compression_level
-        );
-    }
+    info!(
+        target: "nxv::publish",
+        "Compressing database ({}) with zstd level {}...",
+        format_bytes(input_size),
+        compression_level
+    );
 
     // Compress the database with progress
     compress_zstd_with_progress(db_path, &compressed_path, compression_level, show_progress)?;
 
     // Calculate hash of compressed file
-    if show_progress {
-        eprintln!("  Calculating checksum...");
-    }
+    debug!(target: "nxv::publish", "Calculating checksum...");
     let sha256 = file_sha256_with_progress(&compressed_path, show_progress)?;
     let size = fs::metadata(&compressed_path)?.len();
 
-    if show_progress {
-        let ratio = (size as f64 / input_size as f64) * 100.0;
-        eprintln!(
-            "  Compressed: {} → {} ({:.1}% of original)",
-            format_bytes(input_size),
-            format_bytes(size),
-            ratio
-        );
-    }
+    let ratio = (size as f64 / input_size as f64) * 100.0;
+    info!(
+        target: "nxv::publish",
+        "Compressed: {} -> {} ({:.1}% of original)",
+        format_bytes(input_size),
+        format_bytes(size),
+        ratio
+    );
 
     let url = match url_prefix {
         Some(prefix) => format!("{}/{}", prefix.trim_end_matches('/'), INDEX_DB_NAME),

@@ -52,14 +52,12 @@ fn is_after_store_path_cutoff(date: DateTime<Utc>) -> bool {
     let cutoff = Utc.with_ymd_and_hms(year, month, day, 0, 0, 0).unwrap();
     date >= cutoff
 }
-use crate::theme::Themed;
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
-use tracing::{debug, info_span, instrument, trace};
+use std::time::Instant;
+use tracing::{debug, info, info_span, instrument, trace, warn};
 
 /// A year range for parallel indexing.
 ///
@@ -304,7 +302,8 @@ pub struct RangeIndexResult {
 pub struct IndexerConfig {
     /// Number of commits between checkpoints.
     pub checkpoint_interval: usize,
-    /// Whether to show progress bars.
+    /// Whether to show progress output (currently unused, reserved for future use).
+    #[allow(dead_code)]
     pub show_progress: bool,
     /// Systems to evaluate for arch coverage.
     pub systems: Vec<String>,
@@ -575,209 +574,84 @@ fn set_to_json(values: &HashSet<String>) -> Option<String> {
     serde_json::to_string(&list).ok()
 }
 
-/// Tracks timing data for smoothed ETA calculations using exponential moving average (EMA).
+/// Simple progress tracker that tracks percentage completion.
 ///
-/// Uses EMA blended with median for stability:
-/// - Commit processing times vary wildly (some touch 1 file, others touch thousands)
-/// - Pure EMA is too volatile, pure median too slow to adapt
-/// - Blending provides smooth, stable estimates
-pub(super) struct EtaTracker {
-    /// Exponential moving average of commit duration (in seconds)
-    ema_secs: Option<f64>,
-    /// EMA smoothing factor (0.0-1.0, higher = more responsive)
-    alpha: f64,
-    /// When the current commit started processing
-    commit_start: Option<Instant>,
-    /// Total remaining commits
-    total_remaining: u64,
-    /// Number of commits processed (for warm-up)
-    commits_processed: u64,
-    /// Minimum samples before showing ETA
-    warmup_count: u64,
-    /// Recent durations for median calculation and outlier detection
-    recent_durations: VecDeque<f64>,
-    /// Window size for median calculation
-    median_window: usize,
+/// This is a lightweight replacement for EtaTracker that only tracks
+/// progress percentage without ETA calculations.
+pub(super) struct ProgressTracker {
+    /// Number of items processed
+    processed: u64,
+    /// Total items to process
+    total: u64,
+    /// Label for logging
+    label: String,
+    /// Interval for logging progress (percentage points)
+    log_interval_pct: f64,
+    /// Last logged percentage (to avoid duplicate logs)
+    last_logged_pct: f64,
 }
 
-impl EtaTracker {
-    /// Creates an EtaTracker with exponential moving average smoothing.
+impl ProgressTracker {
+    /// Creates a new progress tracker.
     ///
-    /// `window_size` controls the effective smoothing - larger values mean
-    /// more smoothing (less responsive but more stable).
-    ///
-    /// The EMA alpha is calculated as 2/(window_size+1), which gives:
-    /// - window_size=50 -> alpha=0.039 (very smooth)
-    /// - window_size=100 -> alpha=0.020 (extremely smooth)
-    fn new(window_size: usize) -> Self {
-        // Convert window size to EMA alpha: alpha = 2/(N+1)
-        // This gives equivalent smoothing to a simple moving average of size N
-        let alpha = 2.0 / (window_size as f64 + 1.0);
-
+    /// # Arguments
+    /// * `total` - Total number of items to process
+    /// * `label` - Label for log messages
+    fn new(total: u64, label: &str) -> Self {
         Self {
-            ema_secs: None,
-            alpha,
-            commit_start: None,
-            total_remaining: 0,
-            commits_processed: 0,
-            warmup_count: 20, // Don't show ETA until 20 commits processed
-            recent_durations: VecDeque::with_capacity(100),
-            median_window: 100,
+            processed: 0,
+            total,
+            label: label.to_string(),
+            log_interval_pct: 5.0, // Log every 5%
+            last_logged_pct: -1.0,
         }
     }
 
-    /// Begin timing for the current commit.
-    fn start_commit(&mut self) {
-        self.commit_start = Some(Instant::now());
+    /// Record that an item was processed.
+    fn tick(&mut self) {
+        self.processed += 1;
     }
 
-    /// Stops the current commit timer and updates the EMA.
-    ///
-    /// Uses outlier rejection for very fast commits (skipped commits)
-    /// to prevent them from making the ETA too optimistic.
-    /// Slow commits are given full weight since they represent real work.
-    fn finish_commit(&mut self) {
-        if let Some(start) = self.commit_start.take() {
-            let elapsed_secs = start.elapsed().as_secs_f64();
-            self.commits_processed += 1;
-
-            // Track recent durations for median calculation
-            self.recent_durations.push_back(elapsed_secs);
-            if self.recent_durations.len() > self.median_window {
-                self.recent_durations.pop_front();
-            }
-
-            // Calculate median for outlier detection
-            let median = self.calculate_median();
-
-            // Only dampen very fast commits (likely skipped commits)
-            // Slow commits get full weight - they represent real work and
-            // dampening them makes ETA too optimistic
-            let effective_alpha = if let Some(med) = median {
-                if elapsed_secs < med * 0.1 {
-                    // Outlier (very fast): reduce impact to avoid ETA being too optimistic
-                    self.alpha * 0.3
-                } else {
-                    self.alpha
-                }
-            } else {
-                self.alpha
-            };
-
-            // Update EMA: new_ema = alpha * sample + (1-alpha) * old_ema
-            self.ema_secs = Some(match self.ema_secs {
-                Some(current) => effective_alpha * elapsed_secs + (1.0 - effective_alpha) * current,
-                None => elapsed_secs, // First sample becomes the initial EMA
-            });
-        }
-    }
-
-    /// Skip the current commit timer without updating the EMA.
-    ///
-    /// Use this for commits that are skipped early (no packages to extract).
-    /// This prevents fast skips from making the ETA too optimistic.
-    fn skip_commit(&mut self) {
-        self.commit_start = None;
-        self.commits_processed += 1;
-    }
-
-    /// Calculate median of recent durations for outlier detection.
-    fn calculate_median(&self) -> Option<f64> {
-        if self.recent_durations.len() < 5 {
-            return None;
-        }
-
-        let mut sorted: Vec<f64> = self.recent_durations.iter().copied().collect();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-        let mid = sorted.len() / 2;
-        if sorted.len().is_multiple_of(2) {
-            Some((sorted[mid - 1] + sorted[mid]) / 2.0)
-        } else {
-            Some(sorted[mid])
-        }
-    }
-
-    /// Sets the number of remaining commits used to compute the ETA.
-    fn set_remaining(&mut self, remaining: u64) {
-        self.total_remaining = remaining;
-    }
-
-    /// Get the number of commits processed.
-    #[allow(dead_code)]
-    fn processed(&self) -> u64 {
-        self.commits_processed
-    }
-
-    /// Calculate percentage complete.
-    fn percentage(&self, total: u64) -> f64 {
-        if total == 0 {
+    /// Get current percentage complete.
+    fn percentage(&self) -> f64 {
+        if self.total == 0 {
             return 100.0;
         }
-        (self.commits_processed as f64 / total as f64) * 100.0
+        (self.processed as f64 / self.total as f64) * 100.0
     }
 
-    /// Returns a formatted progress string with percentage and ETA.
-    fn progress_string(&self, total: u64) -> String {
-        let pct = self.percentage(total);
-        let eta = self.eta_string();
-        format!("{:.1}% | {}", pct, eta)
-    }
-
-    /// Compute the average duration per commit from the EMA.
+    /// Get number of items processed.
     #[allow(dead_code)]
-    fn avg_time_per_commit(&self) -> Option<Duration> {
-        self.ema_secs.map(Duration::from_secs_f64)
+    fn processed(&self) -> u64 {
+        self.processed
     }
 
-    /// Compute the estimated remaining duration.
-    ///
-    /// Returns None during warm-up period to avoid showing wildly inaccurate ETAs.
-    /// Uses a blend of EMA and median for stability - EMA adapts to trends while
-    /// median resists outliers.
-    fn eta(&self) -> Option<Duration> {
-        // Don't show ETA until we have enough samples
-        if self.commits_processed < self.warmup_count {
-            return None;
-        }
-
-        let ema = self.ema_secs?;
-        let median = self.calculate_median()?;
-
-        // Blend EMA (40%) with median (60%) for stability
-        // Median is more stable, EMA helps track trends
-        let blended_avg = ema * 0.4 + median * 0.6;
-        let remaining_secs = blended_avg * self.total_remaining as f64;
-
-        // Cap at reasonable maximum (30 days)
-        let max_secs = 30.0 * 24.0 * 3600.0;
-        Some(Duration::from_secs_f64(remaining_secs.min(max_secs)))
+    /// Check if we should log progress at this point.
+    fn should_log(&self) -> bool {
+        let pct = self.percentage();
+        let pct_floored = (pct / self.log_interval_pct).floor() * self.log_interval_pct;
+        pct_floored > self.last_logged_pct
     }
 
-    /// Returns a human-readable ETA string for the remaining work.
-    ///
-    /// Shows "warming up..." during initial sample collection,
-    /// then provides stable ETA estimates.
-    fn eta_string(&self) -> String {
-        if self.commits_processed < self.warmup_count {
-            let remaining = self.warmup_count - self.commits_processed;
-            return format!("warming up ({} more)...", remaining);
-        }
+    /// Mark progress as logged at current percentage.
+    fn mark_logged(&mut self) {
+        let pct = self.percentage();
+        self.last_logged_pct = (pct / self.log_interval_pct).floor() * self.log_interval_pct;
+    }
 
-        match self.eta() {
-            Some(eta) => {
-                let secs = eta.as_secs();
-                if secs < 60 {
-                    format!("{}s", secs)
-                } else if secs < 3600 {
-                    format!("{}m {}s", secs / 60, secs % 60)
-                } else {
-                    let hours = secs / 3600;
-                    let mins = (secs % 3600) / 60;
-                    format!("{}h {}m", hours, mins)
-                }
-            }
-            None => "calculating...".to_string(),
+    /// Log progress if it's time.
+    fn log_if_needed(&mut self, extra_info: &str) {
+        if self.should_log() {
+            info!(
+                target: "nxv::index",
+                "{}: {:.1}% ({}/{}) {}",
+                self.label,
+                self.percentage(),
+                self.processed,
+                self.total,
+                extra_info
+            );
+            self.mark_logged();
         }
     }
 }
@@ -832,20 +706,18 @@ impl Indexer {
 
         // Check store health before starting
         if !gc::verify_store() {
-            eprintln!(
-                "{} Nix store verification failed. Run 'nix-store --verify --repair' to fix.",
-                "Warning:".warning()
+            warn!(
+                target: "nxv::index",
+                "Nix store verification failed. Run 'nix-store --verify --repair' to fix."
             );
         }
 
         // Check available disk space
         if gc::is_store_low_on_space(self.config.gc_min_free_bytes) {
-            eprintln!(
-                "{} Low disk space detected. Running garbage collection...",
-                "Warning:".warning()
-            );
+            warn!(target: "nxv::index", "Low disk space detected. Running garbage collection...");
             if let Some(duration) = gc::run_garbage_collection() {
-                eprintln!(
+                info!(
+                    target: "nxv::index",
                     "Garbage collection completed in {:.1}s",
                     duration.as_secs_f64()
                 );
@@ -854,8 +726,9 @@ impl Indexer {
 
         let mut db = Database::open(&db_path)?;
 
-        eprintln!("Performing full index rebuild...");
-        eprintln!(
+        info!(target: "nxv::index", "Performing full index rebuild...");
+        debug!(
+            target: "nxv::index",
             "Checkpoint interval: {} commits",
             self.config.checkpoint_interval
         );
@@ -871,7 +744,8 @@ impl Indexer {
         }
         let total_commits = commits.len();
 
-        eprintln!(
+        info!(
+            target: "nxv::index",
             "Found {} indexable commits with package changes (starting from {})",
             total_commits,
             self.config
@@ -882,7 +756,8 @@ impl Indexer {
 
         // Report temp store cleanup after "Found X commits"
         if temp_store_freed > 0 {
-            eprintln!(
+            info!(
+                target: "nxv::index",
                 "Cleaned up eval stores ({:.1} MB freed)",
                 temp_store_freed as f64 / 1_000_000.0
             );
@@ -928,20 +803,18 @@ impl Indexer {
 
         // Check store health before starting
         if !gc::verify_store() {
-            eprintln!(
-                "{} Nix store verification failed. Run 'nix-store --verify --repair' to fix.",
-                "Warning:".warning()
+            warn!(
+                target: "nxv::index",
+                "Nix store verification failed. Run 'nix-store --verify --repair' to fix."
             );
         }
 
         // Check available disk space
         if gc::is_store_low_on_space(self.config.gc_min_free_bytes) {
-            eprintln!(
-                "{} Low disk space detected. Running garbage collection...",
-                "Warning:".warning()
-            );
+            warn!(target: "nxv::index", "Low disk space detected. Running garbage collection...");
             if let Some(duration) = gc::run_garbage_collection() {
-                eprintln!(
+                info!(
+                    target: "nxv::index",
                     "Garbage collection completed in {:.1}s",
                     duration.as_secs_f64()
                 );
@@ -955,8 +828,13 @@ impl Indexer {
 
         match last_commit {
             Some(hash) => {
-                eprintln!("Performing incremental index from commit {}...", &hash[..7]);
-                eprintln!(
+                info!(
+                    target: "nxv::index",
+                    "Performing incremental index from commit {}...",
+                    &hash[..7]
+                );
+                debug!(
+                    target: "nxv::index",
                     "Checkpoint interval: {} commits",
                     self.config.checkpoint_interval
                 );
@@ -969,27 +847,16 @@ impl Indexer {
                 if head_hash != hash {
                     match repo.is_ancestor(&head_hash, &hash) {
                         Ok(true) => {
-                            eprintln!(
-                                "Error: Repository HEAD ({}) is older than last indexed commit ({}).",
+                            tracing::error!(
+                                target: "nxv::index",
+                                "Repository HEAD ({}) is older than last indexed commit ({}). \
+                                This can happen if the repository was reset or the submodule is out of date. \
+                                Update your nixpkgs repository or use --full to rebuild the index.",
                                 &head_hash[..7],
                                 &hash[..7]
                             );
-                            eprintln!(
-                                "This can happen if the repository was reset or the submodule is out of date."
-                            );
-                            eprintln!();
-                            eprintln!("To fix this, either:");
-                            eprintln!("  1. Update your nixpkgs repository to a newer commit:");
-                            eprintln!(
-                                "     git -C <nixpkgs-path> fetch origin && git -C <nixpkgs-path> checkout origin/nixpkgs-unstable"
-                            );
-                            eprintln!();
-                            eprintln!(
-                                "  2. Or use --full to rebuild the index from the current state:"
-                            );
-                            eprintln!("     nxv index --nixpkgs-path <path> --full");
                             return Err(NxvError::Git(git2::Error::from_str(
-                                "Repository HEAD is behind last indexed commit. See above for solutions.",
+                                "Repository HEAD is behind last indexed commit. Run with --full to rebuild.",
                             )));
                         }
                         Ok(false) => {
@@ -997,7 +864,11 @@ impl Indexer {
                         }
                         Err(e) => {
                             // If we can't check ancestry, warn but continue
-                            eprintln!("Warning: Could not verify commit ancestry: {}", e);
+                            warn!(
+                                target: "nxv::index",
+                                "Could not verify commit ancestry: {}",
+                                e
+                            );
                         }
                     }
                 }
@@ -1014,7 +885,7 @@ impl Indexer {
                             commits.truncate(limit);
                         }
                         if commits.is_empty() {
-                            eprintln!("Index is already up to date.");
+                            info!(target: "nxv::index", "Index is already up to date.");
                             // Still update the indexed date to record when we last checked
                             db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
                             return Ok(IndexResult {
@@ -1026,11 +897,16 @@ impl Indexer {
                                 extraction_failures: 0,
                             });
                         }
-                        eprintln!("Found {} new commits to process", commits.len());
+                        info!(
+                            target: "nxv::index",
+                            "Found {} new commits to process",
+                            commits.len()
+                        );
 
                         // Report temp store cleanup after "Found X commits"
                         if temp_store_freed > 0 {
-                            eprintln!(
+                            info!(
+                                target: "nxv::index",
                                 "Cleaned up eval stores ({:.1} MB freed)",
                                 temp_store_freed as f64 / 1_000_000.0
                             );
@@ -1039,11 +915,12 @@ impl Indexer {
                         self.process_commits(&mut db, &nixpkgs_path, &repo, commits, Some(&hash))
                     }
                     Err(_) => {
-                        eprintln!(
-                            "Warning: Last indexed commit {} not found in repository.",
+                        warn!(
+                            target: "nxv::index",
+                            "Last indexed commit {} not found in repository. \
+                            This may indicate a rebase. Consider running with --full.",
                             &hash[..7]
                         );
-                        eprintln!("This may indicate a rebase. Consider running with --full.");
                         Err(NxvError::Git(git2::Error::from_str(
                             "Last indexed commit not found. Run with --full to rebuild.",
                         )))
@@ -1051,7 +928,7 @@ impl Indexer {
                 }
             }
             None => {
-                eprintln!("No previous index found, performing full index.");
+                info!(target: "nxv::index", "No previous index found, performing full index.");
                 self.index_full(nixpkgs_path, db_path)
             }
         }
@@ -1102,7 +979,8 @@ impl Indexer {
         // Clean up all eval stores from previous runs
         let temp_store_freed = gc::cleanup_all_eval_stores();
         if temp_store_freed > 0 {
-            eprintln!(
+            info!(
+                target: "nxv::index",
                 "Cleaned up temp eval store ({:.1} MB freed)",
                 temp_store_freed as f64 / 1_000_000.0
             );
@@ -1110,20 +988,18 @@ impl Indexer {
 
         // Check store health
         if !gc::verify_store() {
-            eprintln!(
-                "{} Nix store verification failed. Run 'nix-store --verify --repair' to fix.",
-                "Warning:".warning()
+            warn!(
+                target: "nxv::index",
+                "Nix store verification failed. Run 'nix-store --verify --repair' to fix."
             );
         }
 
         // Check available disk space
         if gc::is_store_low_on_space(self.config.gc_min_free_bytes) {
-            eprintln!(
-                "{} Low disk space detected. Running garbage collection...",
-                "Warning:".warning()
-            );
+            warn!(target: "nxv::index", "Low disk space detected. Running garbage collection...");
             if let Some(duration) = gc::run_garbage_collection() {
-                eprintln!(
+                info!(
+                    target: "nxv::index",
                     "Garbage collection completed in {:.1}s",
                     duration.as_secs_f64()
                 );
@@ -1133,40 +1009,18 @@ impl Indexer {
         // Open database with mutex for thread-safe access
         let db = Arc::new(Mutex::new(Database::open(db_path)?));
 
-        eprintln!("Starting parallel indexing with {} ranges:", ranges.len());
+        info!(
+            target: "nxv::index",
+            "Starting parallel indexing with {} ranges",
+            ranges.len()
+        );
         for range in &ranges {
-            eprintln!("  - {} ({} to {})", range.label, range.since, range.until);
+            info!(
+                target: "nxv::index",
+                "  Range {}: {} to {}",
+                range.label, range.since, range.until
+            );
         }
-
-        // Set up multi-progress bar
-        let multi_progress = if self.config.show_progress {
-            Some(MultiProgress::new())
-        } else {
-            None
-        };
-
-        // Create progress bars for each range
-        let progress_bars: Vec<Option<ProgressBar>> = if let Some(ref mp) = multi_progress {
-            ranges
-                .iter()
-                .map(|range| {
-                    let pb = mp.add(ProgressBar::new(0)); // Length set when commits are fetched
-                    pb.set_style(
-                        ProgressStyle::default_bar()
-                            .template(&format!(
-                                "{{spinner:.green}} {} [{{bar:30.cyan/blue}}] {{pos}}/{{len}} {{msg}}",
-                                range.label
-                            ))
-                            .expect("Invalid progress bar template")
-                            .progress_chars("█▓▒░  "),
-                    );
-                    pb.enable_steady_tick(Duration::from_millis(100));
-                    Some(pb)
-                })
-                .collect()
-        } else {
-            ranges.iter().map(|_| None).collect()
-        };
 
         // Shared shutdown flag
         let shutdown = self.shutdown.clone();
@@ -1175,18 +1029,19 @@ impl Indexer {
         let results: Arc<Mutex<Vec<RangeIndexResult>>> = Arc::new(Mutex::new(Vec::new()));
         let errors: Arc<Mutex<Vec<(String, NxvError)>>> = Arc::new(Mutex::new(Vec::new()));
 
-        // Zip ranges with progress bars for batched processing
-        let range_items: Vec<_> = ranges.into_iter().zip(progress_bars).collect();
-
         // Limit the number of concurrent range workers
-        let effective_max_workers = max_range_workers.max(1).min(range_items.len());
-        eprintln!("Using {} concurrent range workers", effective_max_workers);
+        let effective_max_workers = max_range_workers.max(1).min(ranges.len());
+        info!(
+            target: "nxv::index",
+            "Using {} concurrent range workers",
+            effective_max_workers
+        );
 
         // Process ranges in batches to limit concurrency
-        for batch in range_items.chunks(effective_max_workers) {
+        for batch in ranges.chunks(effective_max_workers) {
             // Check for shutdown before starting new batch
             if shutdown.load(std::sync::atomic::Ordering::SeqCst) {
-                eprintln!("Shutdown requested, skipping remaining batches");
+                info!(target: "nxv::index", "Shutdown requested, skipping remaining batches");
                 break;
             }
 
@@ -1194,7 +1049,7 @@ impl Indexer {
             thread::scope(|s| {
                 let handles: Vec<_> = batch
                     .iter()
-                    .map(|(range, progress_bar)| {
+                    .map(|range| {
                         let db = db.clone();
                         let nixpkgs_path = nixpkgs_path.to_path_buf();
                         let shutdown = shutdown.clone();
@@ -1202,7 +1057,6 @@ impl Indexer {
                         let errors = errors.clone();
                         let config = self.config.clone();
                         let range = range.clone();
-                        let progress_bar = progress_bar.clone();
 
                         s.spawn(move || {
                             match process_range_worker(
@@ -1211,7 +1065,6 @@ impl Indexer {
                                 range.clone(),
                                 &config,
                                 shutdown,
-                                progress_bar,
                             ) {
                                 Ok(result) => {
                                     results.lock().unwrap().push(result);
@@ -1235,7 +1088,11 @@ impl Indexer {
         let errors = errors.lock().unwrap();
         if !errors.is_empty() {
             for (label, error) in errors.iter() {
-                eprintln!("Error in range {}: {}", label, error);
+                tracing::error!(
+                    target: "nxv::index",
+                    "Error in range {}: {}",
+                    label, error
+                );
             }
             // Return first error
             if let Some((label, _)) = errors.first() {
@@ -1266,8 +1123,9 @@ impl Indexer {
                 .unwrap_or(0) as u64;
         }
 
-        eprintln!(
-            "\nParallel indexing complete: {} commits, {} packages upserted",
+        info!(
+            target: "nxv::index",
+            "Parallel indexing complete: {} commits, {} packages upserted",
             final_result.commits_processed, final_result.packages_upserted
         );
 
@@ -1337,15 +1195,17 @@ impl Indexer {
             };
             match worker::WorkerPool::new(pool_config) {
                 Ok(pool) => {
-                    eprintln!(
+                    info!(
+                        target: "nxv::index",
                         "Using parallel evaluation with {} workers",
                         pool.worker_count()
                     );
                     Some(pool)
                 }
                 Err(e) => {
-                    eprintln!(
-                        "Warning: Failed to create worker pool ({}), falling back to sequential",
+                    warn!(
+                        target: "nxv::index",
+                        "Failed to create worker pool ({}), falling back to sequential",
                         e
                     );
                     None
@@ -1353,33 +1213,13 @@ impl Indexer {
             }
         } else {
             if systems.len() > 1 {
-                eprintln!("Using sequential evaluation (--workers=1)");
+                info!(target: "nxv::index", "Using sequential evaluation (--workers=1)");
             }
             None
         };
 
-        // Set up progress bar if enabled
-        let multi_progress = if self.config.show_progress {
-            Some(MultiProgress::new())
-        } else {
-            None
-        };
-
-        let progress_bar = multi_progress.as_ref().map(|mp| {
-            let pb = mp.add(ProgressBar::new(total_commits as u64));
-            pb.set_style(
-                ProgressStyle::default_bar()
-                    .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} {msg}")
-                    // Template is a compile-time constant, this should never fail
-                    .expect("Invalid progress bar template")
-                    .progress_chars("█▓▒░  "),
-            );
-            pb.enable_steady_tick(std::time::Duration::from_millis(100));
-            pb
-        });
-
-        // ETA tracker with window size 50 and EMA/median blending for stable estimates
-        let mut eta_tracker = EtaTracker::new(50);
+        // Progress tracking
+        let mut progress = ProgressTracker::new(total_commits as u64, "Indexing");
 
         // Track unique package names for bloom filter
         let mut unique_names: HashSet<String> = HashSet::new();
@@ -1414,37 +1254,20 @@ impl Indexer {
             match build_file_attr_map(worktree_path, systems, worker_pool.as_ref()) {
                 Ok(map) => (map, first_commit.hash.clone()),
                 Err(e) => {
-                    eprintln!(
-                        "Warning: Initial file-to-attribute map failed ({}), using empty map",
+                    warn!(
+                        target: "nxv::index",
+                        "Initial file-to-attribute map failed ({}), using empty map",
                         e
                     );
                     (HashMap::new(), String::new())
                 }
             };
 
-        // Helper to print warnings without disrupting progress bar
-        let warn = |pb: &Option<ProgressBar>, msg: String| {
-            if let Some(bar) = pb {
-                bar.println(format!("⚠ {}", msg));
-            } else {
-                eprintln!("Warning: {}", msg);
-            }
-        };
-
         // Process commits sequentially
         for (commit_idx, commit) in commits.iter().enumerate() {
-            // Start timing this commit
-            eta_tracker.start_commit();
-            eta_tracker.set_remaining((total_commits - commit_idx) as u64);
-
             // Check for shutdown
             if self.is_shutdown_requested() {
-                if let Some(ref pb) = progress_bar {
-                    pb.println(format!(
-                        "{} saving checkpoint...",
-                        "Shutdown requested,".warning()
-                    ));
-                }
+                info!(target: "nxv::index", "Shutdown requested, saving checkpoint...");
                 result.was_interrupted = true;
 
                 // UPSERT any pending packages before exiting
@@ -1457,42 +1280,24 @@ impl Indexer {
                     db.set_meta("last_indexed_commit", last_hash)?;
                     db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
                     db.checkpoint()?;
-
-                    if let Some(ref pb) = progress_bar {
-                        pb.println(format!(
-                            "{} checkpoint at {}",
-                            "Saved".success(),
-                            &last_hash[..7]
-                        ));
-                    }
+                    info!(
+                        target: "nxv::index",
+                        "Saved checkpoint at {}",
+                        &last_hash[..7]
+                    );
                 }
 
                 break;
             }
 
-            // Update progress bar with percentage and smoothed ETA
-            if let Some(ref pb) = progress_bar {
-                use owo_colors::OwoColorize;
-                pb.set_position(commit_idx as u64);
-                pb.set_message(format!(
-                    "{} | {} {} | {} {} | {} {}",
-                    eta_tracker.progress_string(total_commits as u64),
-                    commit.short_hash.commit(),
-                    format!("({})", commit.date.format("%Y-%m-%d")).dimmed(),
-                    result.packages_found.count_found(),
-                    "pkgs".dimmed(),
-                    (result.packages_upserted + pending_upserts.len() as u64).count(),
-                    "upserted".dimmed()
-                ));
-            }
-
             // Checkout the commit in the worktree
             if let Err(e) = session.checkout(&commit.hash) {
-                warn(
-                    &progress_bar,
-                    format!("Failed to checkout {}: {}", &commit.short_hash, e),
+                warn!(
+                    target: "nxv::index",
+                    "Failed to checkout {}: {}",
+                    &commit.short_hash, e
                 );
-                eta_tracker.skip_commit();
+                progress.tick();
                 continue;
             }
 
@@ -1500,11 +1305,12 @@ impl Indexer {
             let changed_paths = match repo.get_commit_changed_paths(&commit.hash) {
                 Ok(paths) => paths,
                 Err(e) => {
-                    warn(
-                        &progress_bar,
-                        format!("Failed to list changes for {}: {}", &commit.short_hash, e),
+                    warn!(
+                        target: "nxv::index",
+                        "Failed to list changes for {}: {}",
+                        &commit.short_hash, e
                     );
-                    eta_tracker.skip_commit();
+                    progress.tick();
                     continue;
                 }
             };
@@ -1638,7 +1444,7 @@ impl Indexer {
             if target_attr_paths.is_empty() {
                 result.commits_processed += 1;
                 last_processed_commit = Some(commit.hash.clone());
-                eta_tracker.skip_commit();
+                progress.tick();
                 continue;
             }
 
@@ -1705,19 +1511,18 @@ impl Indexer {
                     }
                     Err(e) => {
                         result.extraction_failures += 1;
-                        tracing::warn!(
-                            commit = %commit.short_hash,
-                            system = %system,
-                            error = %e,
-                            "Extraction failed for system"
-                        );
                         if self.config.verbose {
-                            warn(
-                                &progress_bar,
-                                format!(
-                                    "Extraction failed at {} ({}): {}",
-                                    &commit.short_hash, system, e
-                                ),
+                            warn!(
+                                target: "nxv::index",
+                                "Extraction failed at {} ({}): {}",
+                                &commit.short_hash, system, e
+                            );
+                        } else {
+                            debug!(
+                                commit = %commit.short_hash,
+                                system = %system,
+                                error = %e,
+                                "Extraction failed for system"
                             );
                         }
                         continue;
@@ -1764,8 +1569,13 @@ impl Indexer {
             result.commits_processed += 1;
             last_processed_commit = Some(commit.hash.clone());
 
-            // Record commit processing time for ETA calculation
-            eta_tracker.finish_commit();
+            // Update progress and log if needed
+            progress.tick();
+            progress.log_if_needed(&format!(
+                "pkgs={} upserted={}",
+                result.packages_found,
+                result.packages_upserted + pending_upserts.len() as u64
+            ));
 
             // Checkpoint if needed
             if (commit_idx + 1).is_multiple_of(self.config.checkpoint_interval)
@@ -1802,34 +1612,26 @@ impl Indexer {
                 };
 
                 if should_gc {
-                    if let Some(ref pb) = progress_bar {
-                        pb.set_message("Running garbage collection...".to_string());
-                    }
+                    debug!(target: "nxv::index", "Running garbage collection...");
 
                     // Clean up all eval stores to free disk space
                     let bytes = gc::cleanup_all_eval_stores();
-                    if bytes > 0
-                        && let Some(ref pb) = progress_bar
-                    {
-                        pb.println(format!(
+                    if bytes > 0 {
+                        info!(
+                            target: "nxv::index",
                             "Cleaned up eval stores ({:.1} MB freed)",
                             bytes as f64 / 1_000_000.0
-                        ));
+                        );
                     }
 
                     if let Some(duration) = gc::run_garbage_collection() {
-                        if let Some(ref pb) = progress_bar {
-                            pb.println(format!(
-                                "{} garbage collection in {:.1}s",
-                                "Completed".success(),
-                                duration.as_secs_f64()
-                            ));
-                        }
-                    } else if let Some(ref pb) = progress_bar {
-                        pb.println(format!(
-                            "{} garbage collection (GC command failed)",
-                            "Skipped".warning()
-                        ));
+                        info!(
+                            target: "nxv::index",
+                            "Completed garbage collection in {:.1}s",
+                            duration.as_secs_f64()
+                        );
+                    } else {
+                        debug!(target: "nxv::index", "Skipped garbage collection (GC command failed)");
                     }
                     checkpoints_since_gc = 0;
                 }
@@ -1858,27 +1660,22 @@ impl Indexer {
         // Set final unique names count
         result.unique_names = unique_names.len() as u64;
 
-        // Finish progress bar
-        if let Some(ref pb) = progress_bar {
-            use owo_colors::OwoColorize;
-            pb.finish_with_message(format!(
-                "{} | {} {} | {} {} | {} {}",
-                "done".success(),
-                result.commits_processed.count(),
-                "commits".dimmed(),
-                result.packages_found.count_found(),
-                "pkgs".dimmed(),
-                result.packages_upserted.count(),
-                "upserted".dimmed()
-            ));
-        }
+        // Log final summary
+        info!(
+            target: "nxv::index",
+            "Indexing complete: {} commits, {} pkgs found, {} upserted",
+            result.commits_processed,
+            result.packages_found,
+            result.packages_upserted
+        );
 
         // WorktreeSession auto-cleans on drop - no need to restore HEAD
 
         // Clean up all eval stores on exit
         let bytes = gc::cleanup_all_eval_stores();
         if bytes > 0 {
-            eprintln!(
+            info!(
+                target: "nxv::index",
                 "Cleaned up eval stores ({:.1} MB freed)",
                 bytes as f64 / 1_000_000.0
             );
@@ -2189,7 +1986,6 @@ fn process_range_worker(
     range: YearRange,
     config: &IndexerConfig,
     shutdown: Arc<AtomicBool>,
-    progress_bar: Option<ProgressBar>,
 ) -> Result<RangeIndexResult> {
     use crate::db::queries::PackageVersion;
 
@@ -2209,9 +2005,7 @@ fn process_range_worker(
     )?;
 
     if commits.is_empty() {
-        if let Some(pb) = &progress_bar {
-            pb.finish_with_message("no commits");
-        }
+        debug!(target: "nxv::index", "Range {}: no commits", range.label);
         return Ok(result);
     }
 
@@ -2236,18 +2030,16 @@ fn process_range_worker(
 
     let total_commits = commits.len();
     if total_commits == 0 {
-        if let Some(pb) = &progress_bar {
-            pb.finish_with_message("already complete");
-        }
+        debug!(target: "nxv::index", "Range {}: already complete", range.label);
         return Ok(result);
     }
 
-    // Update progress bar with commit count
-    if let Some(pb) = &progress_bar {
-        pb.set_length(total_commits as u64);
-        if resume_from.is_some() {
-            pb.set_message("resuming...");
-        }
+    // Log progress for this range
+    let mut progress = ProgressTracker::new(total_commits as u64, &format!("Range {}", range.label));
+    if resume_from.is_some() {
+        info!(target: "nxv::index", "Range {}: resuming ({} commits)", range.label, total_commits);
+    } else {
+        info!(target: "nxv::index", "Range {}: processing {} commits", range.label, total_commits);
     }
 
     // Get first commit for worktree creation
@@ -2308,9 +2100,7 @@ fn process_range_worker(
                 db_guard.set_range_checkpoint(&range.label, &last.hash)?;
             }
 
-            if let Some(pb) = &progress_bar {
-                pb.finish_with_message("interrupted");
-            }
+            info!(target: "nxv::index", "Range {}: interrupted", range.label);
             return Ok(result);
         }
 
@@ -2393,9 +2183,7 @@ fn process_range_worker(
         if target_attrs.is_empty() {
             // No packages to extract for this commit
             result.commits_processed += 1;
-            if let Some(pb) = &progress_bar {
-                pb.inc(1);
-            }
+            progress.tick();
             continue;
         }
 
@@ -2459,9 +2247,8 @@ fn process_range_worker(
         }
 
         result.commits_processed += 1;
-        if let Some(pb) = &progress_bar {
-            pb.inc(1);
-        }
+        progress.tick();
+        progress.log_if_needed(&format!("pkgs={}", result.packages_found));
 
         // Checkpoint periodically
         if (commit_idx + 1) % config.checkpoint_interval == 0 {
@@ -2506,9 +2293,13 @@ fn process_range_worker(
         db_guard.checkpoint()?;
     }
 
-    if let Some(pb) = &progress_bar {
-        pb.finish_with_message("done");
-    }
+    info!(
+        target: "nxv::index",
+        "Range {}: complete ({} commits, {} pkgs)",
+        range.label,
+        result.commits_processed,
+        result.packages_found
+    );
 
     Ok(result)
 }
@@ -2572,121 +2363,64 @@ mod tests {
     use crate::db::queries;
     use chrono::TimeZone;
     use std::process::Command;
-    use std::thread;
     use tempfile::tempdir;
 
     #[test]
-    fn test_eta_tracker_empty() {
-        let tracker = EtaTracker::new(10);
-        assert!(tracker.avg_time_per_commit().is_none());
-        assert!(tracker.eta().is_none());
-        // Shows warm-up message when no commits processed
-        assert!(tracker.eta_string().contains("warming up"));
+    fn test_progress_tracker_new() {
+        let tracker = ProgressTracker::new(100, "Test");
+        assert_eq!(tracker.processed(), 0);
+        assert!((tracker.percentage() - 0.0).abs() < f64::EPSILON);
     }
 
     #[test]
-    fn test_eta_tracker_warmup_period() {
-        let mut tracker = EtaTracker::new(10);
-        tracker.set_remaining(100);
+    fn test_progress_tracker_tick() {
+        let mut tracker = ProgressTracker::new(100, "Test");
+        tracker.tick();
+        assert_eq!(tracker.processed(), 1);
+        assert!((tracker.percentage() - 1.0).abs() < f64::EPSILON);
 
-        // Process fewer commits than warmup_count
-        for _ in 0..5 {
-            tracker.start_commit();
-            thread::sleep(Duration::from_millis(5));
-            tracker.finish_commit();
+        for _ in 0..49 {
+            tracker.tick();
         }
-
-        // Should still show warming up
-        assert!(tracker.eta_string().contains("warming up"));
-        assert!(tracker.eta().is_none());
+        assert_eq!(tracker.processed(), 50);
+        assert!((tracker.percentage() - 50.0).abs() < f64::EPSILON);
     }
 
     #[test]
-    fn test_eta_tracker_after_warmup() {
-        let mut tracker = EtaTracker::new(10);
-        tracker.set_remaining(50);
-
-        // Process more commits than warmup_count (20)
-        for _ in 0..25 {
-            tracker.start_commit();
-            thread::sleep(Duration::from_millis(5));
-            tracker.finish_commit();
+    fn test_progress_tracker_percentage_complete() {
+        let mut tracker = ProgressTracker::new(100, "Test");
+        for _ in 0..100 {
+            tracker.tick();
         }
-
-        // Should now show actual ETA
-        let eta = tracker.eta();
-        assert!(eta.is_some());
-        assert!(!tracker.eta_string().contains("warming up"));
+        assert_eq!(tracker.processed(), 100);
+        assert!((tracker.percentage() - 100.0).abs() < f64::EPSILON);
     }
 
     #[test]
-    fn test_eta_tracker_ema_smoothing() {
-        let mut tracker = EtaTracker::new(10);
-        tracker.set_remaining(10);
-
-        // Add consistent commits to establish baseline (~20ms each)
-        for _ in 0..15 {
-            tracker.start_commit();
-            thread::sleep(Duration::from_millis(20));
-            tracker.finish_commit();
-        }
-
-        let ema_before = tracker.ema_secs.unwrap();
-
-        // Very fast commits (skipped) should be dampened to prevent ETA from being too optimistic
-        // These represent skipped commits that didn't do real work
-        for _ in 0..5 {
-            tracker.start_commit();
-            thread::sleep(Duration::from_millis(1)); // Very fast - < 10% of median
-            tracker.finish_commit();
-        }
-
-        let ema_after_fast = tracker.ema_secs.unwrap();
-
-        // EMA should not have dropped dramatically despite fast outliers
-        // (fast outliers get reduced alpha to prevent optimistic ETA)
-        assert!(
-            ema_after_fast > ema_before * 0.5,
-            "EMA dropped too much after fast outliers: before={:.4}, after={:.4}",
-            ema_before,
-            ema_after_fast
-        );
-
-        // Slow commits (real work) should have full weight
-        tracker.start_commit();
-        thread::sleep(Duration::from_millis(100)); // Slow - represents real work
-        tracker.finish_commit();
-
-        let ema_after_slow = tracker.ema_secs.unwrap();
-
-        // EMA should increase noticeably because slow commits aren't dampened
-        assert!(
-            ema_after_slow > ema_after_fast,
-            "Slow commit should increase EMA: fast={:.4}, slow={:.4}",
-            ema_after_fast,
-            ema_after_slow
-        );
+    fn test_progress_tracker_empty_total() {
+        let tracker = ProgressTracker::new(0, "Test");
+        // Empty total should return 100% to avoid division by zero
+        assert!((tracker.percentage() - 100.0).abs() < f64::EPSILON);
     }
 
     #[test]
-    fn test_eta_tracker_formatting() {
-        let mut tracker = EtaTracker::new(5);
-        tracker.set_remaining(1);
+    fn test_progress_tracker_should_log() {
+        let mut tracker = ProgressTracker::new(100, "Test");
 
-        // Process enough commits to pass warmup (20)
-        for _ in 0..25 {
-            tracker.start_commit();
-            thread::sleep(Duration::from_millis(5));
-            tracker.finish_commit();
+        // Initially should log at 0%
+        assert!(tracker.should_log());
+        tracker.mark_logged();
+        assert!(!tracker.should_log()); // Not until next interval
+
+        // Advance to just under 5%
+        for _ in 0..4 {
+            tracker.tick();
         }
+        assert!(!tracker.should_log());
 
-        // Should format with time units
-        let eta_str = tracker.eta_string();
-        assert!(
-            eta_str.contains("s") || eta_str.contains("m") || eta_str.contains("h"),
-            "Expected time format, got: {}",
-            eta_str
-        );
+        // Hit 5%
+        tracker.tick();
+        assert!(tracker.should_log());
     }
 
     /// Creates a temporary git repository resembling a minimal nixpkgs checkout.

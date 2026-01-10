@@ -384,6 +384,7 @@
           packages = [
             pkgs.bashInteractive  # Use interactive bash (stdenv bash lacks readline/progcomp)
             pkgs.rust-analyzer
+            pkgs.nixd  # Nix language server
             pkgs.cargo-watch
             pkgs.cargo-edit
             pkgs.miniserve  # Simple HTTP server for frontend dev

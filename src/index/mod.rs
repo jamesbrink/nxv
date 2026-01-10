@@ -1431,41 +1431,15 @@ impl Indexer {
 
             for path in &changed_paths {
                 if let Some(attr_paths) = file_attr_map.get(path) {
+                    // Path is in the file-to-attr map (built from HEAD)
                     for attr in attr_paths {
                         target_attr_paths.insert(attr.clone());
                     }
-                } else if path.starts_with("pkgs/") && path.ends_with(".nix") {
-                    let parts: Vec<&str> = path.split('/').collect();
-                    if parts.len() >= 2 {
-                        // pkgs/by-name/XX/pkgname/package.nix -> pkgname
-                        // These are auto-discovered and don't need all_attrs validation
-                        if path.starts_with("pkgs/by-name/") && parts.len() >= 4 {
-                            let pkg_name = parts[3];
-                            if !pkg_name.is_empty() {
-                                target_attr_paths.insert(pkg_name.to_string());
-                            }
-                        } else {
-                            // Traditional paths: extract name and validate against all_attrs
-                            let potential_name =
-                                // pkgs/.../something/default.nix -> something
-                                if parts.last() == Some(&"default.nix") && parts.len() >= 2 {
-                                    parts[parts.len() - 2]
-                                }
-                                // pkgs/.../something.nix -> something
-                                else {
-                                    parts
-                                        .last()
-                                        .map(|f| f.trim_end_matches(".nix"))
-                                        .unwrap_or("")
-                                };
-
-                            if let Some(all_attrs_list) = all_attrs
-                                && all_attrs_list.contains(&potential_name.to_string())
-                            {
-                                target_attr_paths.insert(potential_name.to_string());
-                            }
-                        }
-                    }
+                } else if let Some(attr) = extract_attr_from_path(path) {
+                    // Fallback: extract attr name from path structure
+                    // No validation against all_attrs - this allows detecting changes
+                    // to packages that have moved (e.g., to pkgs/by-name/) since HEAD
+                    target_attr_paths.insert(attr);
                 }
             }
 
@@ -1741,6 +1715,72 @@ const INFRASTRUCTURE_FILES: &[&str] = &[
     "pkgs/top-level/all-packages.nix",
     "pkgs/top-level/aliases.nix",
 ];
+
+/// Directories under pkgs/ that contain infrastructure, not packages.
+/// Files in these directories should not be treated as package definitions.
+const NON_PACKAGE_PREFIXES: &[&str] = &[
+    "pkgs/build-support/",
+    "pkgs/stdenv/",
+    "pkgs/top-level/",
+    "pkgs/test/",
+    "pkgs/pkgs-lib/",
+];
+
+/// Extract an attribute name from a nixpkgs file path.
+///
+/// This function handles both modern `pkgs/by-name/` structure and traditional
+/// paths like `pkgs/tools/graphics/jhead/default.nix`.
+///
+/// Returns `None` for:
+/// - Infrastructure files (build-support, stdenv, etc.)
+/// - Files that don't match expected patterns
+/// - Empty or invalid names
+///
+/// # Examples
+/// - `pkgs/by-name/jh/jhead/package.nix` → `Some("jhead")`
+/// - `pkgs/tools/graphics/jhead/default.nix` → `Some("jhead")`
+/// - `pkgs/development/python-modules/requests/default.nix` → `Some("requests")`
+/// - `pkgs/build-support/fetchurl/default.nix` → `None`
+fn extract_attr_from_path(path: &str) -> Option<String> {
+    // Must be a .nix file under pkgs/
+    if !path.starts_with("pkgs/") || !path.ends_with(".nix") {
+        return None;
+    }
+
+    // Skip infrastructure directories
+    if NON_PACKAGE_PREFIXES.iter().any(|prefix| path.starts_with(prefix)) {
+        return None;
+    }
+
+    let parts: Vec<&str> = path.split('/').collect();
+    if parts.len() < 2 {
+        return None;
+    }
+
+    // pkgs/by-name/XX/pkgname/package.nix → pkgname
+    if path.starts_with("pkgs/by-name/") && parts.len() >= 4 {
+        let pkg_name = parts[3];
+        if !pkg_name.is_empty() {
+            return Some(pkg_name.to_string());
+        }
+        return None;
+    }
+
+    // Traditional paths: extract from directory or filename
+    let potential_name = if parts.last() == Some(&"default.nix") && parts.len() >= 2 {
+        // pkgs/.../something/default.nix → something
+        parts[parts.len() - 2]
+    } else {
+        // pkgs/.../something.nix → something
+        parts.last().map(|f| f.trim_end_matches(".nix")).unwrap_or("")
+    };
+
+    if potential_name.is_empty() {
+        return None;
+    }
+
+    Some(potential_name.to_string())
+}
 
 /// Maximum number of lines in a diff before we fall back to full extraction.
 /// Large diffs typically indicate bulk updates where parsing individual attributes
@@ -2219,9 +2259,15 @@ fn process_range_worker(
         // Add attrs from changed package files
         for path in &changed_paths {
             if let Some(attr_paths) = file_attr_map.get(path) {
+                // Path is in the file-to-attr map (built from HEAD)
                 for attr in attr_paths {
                     target_attr_paths.insert(attr.clone());
                 }
+            } else if let Some(attr) = extract_attr_from_path(path) {
+                // Fallback: extract attr name from path structure
+                // No validation against all_attrs - this allows detecting changes
+                // to packages that have moved (e.g., to pkgs/by-name/) since HEAD
+                target_attr_paths.insert(attr);
             }
         }
 
@@ -2650,6 +2696,82 @@ mod tests {
             "pkgs/other/file.nix".to_string(),
         ];
         assert!(should_refresh_file_map(&changed));
+    }
+
+    #[test]
+    fn test_extract_attr_from_path_by_name() {
+        // pkgs/by-name structure
+        assert_eq!(
+            extract_attr_from_path("pkgs/by-name/jh/jhead/package.nix"),
+            Some("jhead".to_string())
+        );
+        assert_eq!(
+            extract_attr_from_path("pkgs/by-name/he/hello/package.nix"),
+            Some("hello".to_string())
+        );
+        assert_eq!(
+            extract_attr_from_path("pkgs/by-name/fi/firefox/package.nix"),
+            Some("firefox".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_attr_from_path_traditional() {
+        // Traditional paths with default.nix
+        assert_eq!(
+            extract_attr_from_path("pkgs/tools/graphics/jhead/default.nix"),
+            Some("jhead".to_string())
+        );
+        assert_eq!(
+            extract_attr_from_path("pkgs/applications/editors/vim/default.nix"),
+            Some("vim".to_string())
+        );
+        assert_eq!(
+            extract_attr_from_path("pkgs/development/python-modules/requests/default.nix"),
+            Some("requests".to_string())
+        );
+        // Traditional paths with named .nix file
+        assert_eq!(
+            extract_attr_from_path("pkgs/servers/nginx.nix"),
+            Some("nginx".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_attr_from_path_infrastructure_excluded() {
+        // Infrastructure directories should return None
+        assert_eq!(
+            extract_attr_from_path("pkgs/build-support/fetchurl/default.nix"),
+            None
+        );
+        assert_eq!(
+            extract_attr_from_path("pkgs/stdenv/linux/default.nix"),
+            None
+        );
+        assert_eq!(
+            extract_attr_from_path("pkgs/top-level/all-packages.nix"),
+            None
+        );
+        assert_eq!(
+            extract_attr_from_path("pkgs/test/simple/default.nix"),
+            None
+        );
+        assert_eq!(
+            extract_attr_from_path("pkgs/pkgs-lib/formats.nix"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_extract_attr_from_path_invalid() {
+        // Non-pkgs paths
+        assert_eq!(extract_attr_from_path("lib/something.nix"), None);
+        assert_eq!(extract_attr_from_path("nixos/modules/foo.nix"), None);
+        // Non-.nix files
+        assert_eq!(extract_attr_from_path("pkgs/tools/misc/hello/README.md"), None);
+        // Empty/malformed
+        assert_eq!(extract_attr_from_path(""), None);
+        assert_eq!(extract_attr_from_path("pkgs/"), None);
     }
 
     #[test]

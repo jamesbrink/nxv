@@ -55,7 +55,7 @@ fn create_test_db(path: &std::path::Path) {
             maintainers TEXT,
             platforms TEXT,
             known_vulnerabilities TEXT,
-            UNIQUE(attribute_path, version, first_commit_hash)
+            UNIQUE(attribute_path, version)
         );
 
         CREATE INDEX IF NOT EXISTS idx_packages_name ON package_versions(name);
@@ -79,7 +79,7 @@ fn create_test_db(path: &std::path::Path) {
     conn.execute_batch(
         r#"
         INSERT INTO meta (key, value) VALUES ('last_indexed_commit', 'abc1234567890123456789012345678901234567');
-        INSERT INTO meta (key, value) VALUES ('schema_version', '1');
+        INSERT INTO meta (key, value) VALUES ('schema_version', '4');
 
         INSERT INTO package_versions
             (name, version, first_commit_hash, first_commit_date, last_commit_hash, last_commit_date,
@@ -722,7 +722,7 @@ fn test_search_version_sort_order() {
             maintainers TEXT,
             platforms TEXT,
             known_vulnerabilities TEXT,
-            UNIQUE(attribute_path, version, first_commit_hash)
+            UNIQUE(attribute_path, version)
         );
         CREATE INDEX idx_packages_name ON package_versions(name);
         CREATE VIRTUAL TABLE package_versions_fts USING fts5(name, description, content=package_versions, content_rowid=id);
@@ -1181,7 +1181,7 @@ fn create_compressed_test_db() -> (Vec<u8>, String) {
             maintainers TEXT,
             platforms TEXT,
             known_vulnerabilities TEXT,
-            UNIQUE(attribute_path, version, first_commit_hash)
+            UNIQUE(attribute_path, version)
         );
         CREATE INDEX idx_packages_name ON package_versions(name);
         CREATE INDEX idx_packages_name_version ON package_versions(name, version, first_commit_date);
@@ -1194,7 +1194,7 @@ fn create_compressed_test_db() -> (Vec<u8>, String) {
         END;
 
         INSERT INTO meta (key, value) VALUES ('last_indexed_commit', 'abc1234567890123456789012345678901234567');
-        INSERT INTO meta (key, value) VALUES ('schema_version', '1');
+        INSERT INTO meta (key, value) VALUES ('schema_version', '4');
 
         INSERT INTO package_versions
             (name, version, first_commit_hash, first_commit_date, last_commit_hash, last_commit_date,
@@ -1514,7 +1514,7 @@ COMMIT;
             maintainers TEXT,
             platforms TEXT,
             known_vulnerabilities TEXT,
-            UNIQUE(attribute_path, version, first_commit_hash)
+            UNIQUE(attribute_path, version)
         );
         CREATE INDEX idx_packages_name ON package_versions(name);
         INSERT INTO meta (key, value) VALUES ('last_indexed_commit', '{}');
@@ -2207,7 +2207,7 @@ fn test_full_delta_update_workflow() {
                 homepage TEXT,
                 maintainers TEXT,
                 platforms TEXT,
-                UNIQUE(attribute_path, version, first_commit_hash)
+                UNIQUE(attribute_path, version)
             );
             CREATE INDEX idx_packages_name ON package_versions(name);
             CREATE VIRTUAL TABLE package_versions_fts USING fts5(name, description, content=package_versions, content_rowid=id);
@@ -2216,7 +2216,7 @@ fn test_full_delta_update_workflow() {
             END;
 
             INSERT INTO meta (key, value) VALUES ('last_indexed_commit', 'initial123456789012345678901234567890abc');
-            INSERT INTO meta (key, value) VALUES ('schema_version', '1');
+            INSERT INTO meta (key, value) VALUES ('schema_version', '4');
             INSERT INTO package_versions
                 (name, version, first_commit_hash, first_commit_date, last_commit_hash, last_commit_date, attribute_path, description)
             VALUES
@@ -2546,10 +2546,10 @@ fn test_incremental_index_processes_only_new_commits() {
                 homepage TEXT,
                 maintainers TEXT,
                 platforms TEXT,
-                UNIQUE(attribute_path, version, first_commit_hash)
+                UNIQUE(attribute_path, version)
             );
             CREATE INDEX idx_packages_name ON package_versions(name);
-            INSERT INTO meta (key, value) VALUES ('schema_version', '1');
+            INSERT INTO meta (key, value) VALUES ('schema_version', '4');
             "#,
         )
         .unwrap();
@@ -2625,10 +2625,10 @@ fn test_index_resumable_after_interrupt() {
                 homepage TEXT,
                 maintainers TEXT,
                 platforms TEXT,
-                UNIQUE(attribute_path, version, first_commit_hash)
+                UNIQUE(attribute_path, version)
             );
             CREATE INDEX idx_packages_name ON package_versions(name);
-            INSERT INTO meta (key, value) VALUES ('schema_version', '1');
+            INSERT INTO meta (key, value) VALUES ('schema_version', '4');
             "#,
         )
         .unwrap();

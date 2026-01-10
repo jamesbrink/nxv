@@ -296,7 +296,7 @@ impl Backend {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "indexer"))]
 mod tests {
     use super::*;
     use crate::db::queries::PackageVersion;
@@ -310,7 +310,7 @@ mod tests {
         let db_path = dir.path().join("test.db");
         let mut db = Database::open(&db_path).unwrap();
 
-        // Insert test packages
+        // Insert test packages using upsert_packages_batch
         let packages = vec![
             PackageVersion {
                 id: 0,
@@ -371,7 +371,7 @@ mod tests {
             },
         ];
 
-        db.insert_package_ranges_batch(&packages).unwrap();
+        db.upsert_packages_batch(&packages).unwrap();
         db.set_meta("last_indexed_commit", "abc123def456").unwrap();
 
         (dir, db)

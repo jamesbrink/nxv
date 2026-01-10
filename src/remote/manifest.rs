@@ -37,13 +37,8 @@ pub struct Manifest {
     pub min_version: Option<u32>,
     pub latest_commit: String,
     pub latest_commit_date: String,
-    /// The main index file (slim database with one row per attr+version).
-    /// This is what users download by default.
+    /// The index file (database with one row per attr+version).
     pub full_index: IndexFile,
-    /// Optional full history index with all version ranges.
-    /// Only downloaded when user explicitly requests it with --full.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub full_history_index: Option<IndexFile>,
     pub bloom_filter: IndexFile,
     #[serde(default)]
     pub deltas: Vec<DeltaFile>,

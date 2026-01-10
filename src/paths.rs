@@ -2,12 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
-/// Default database filename (slim/optimized - one row per attr+version).
+/// Default database filename.
 pub const INDEX_DB_FILENAME: &str = "index.db";
-
-/// Full database filename (complete history with all version ranges).
-#[allow(dead_code)] // Used by download logic when full_history variant is requested
-pub const INDEX_FULL_DB_FILENAME: &str = "index-full.db";
 
 /// Get the data directory for nxv.
 ///
@@ -22,15 +18,9 @@ pub fn get_data_dir() -> PathBuf {
     })
 }
 
-/// Get the path to the SQLite index database (slim/default).
+/// Get the path to the SQLite index database.
 pub fn get_index_path() -> PathBuf {
     get_data_dir().join(INDEX_DB_FILENAME)
-}
-
-/// Get the path to the full SQLite index database (complete history).
-#[allow(dead_code)] // Used by download logic when full_history variant is requested
-pub fn get_full_index_path() -> PathBuf {
-    get_data_dir().join(INDEX_FULL_DB_FILENAME)
 }
 
 /// Derives the bloom filter path from the database path.

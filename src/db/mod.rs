@@ -4,17 +4,23 @@ pub mod import;
 pub mod queries;
 
 use crate::error::{NxvError, Result};
+#[cfg(feature = "indexer")]
 use queries::PackageVersion;
 use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
-use std::time::{Duration, Instant};
-use tracing::{instrument, trace};
+use std::time::Duration;
+#[cfg(feature = "indexer")]
+use std::time::Instant;
+use tracing::instrument;
+#[cfg(feature = "indexer")]
+use tracing::trace;
 
 /// Default timeout for SQLite busy handler (in seconds).
 /// When the database is locked, SQLite will retry for this duration before returning SQLITE_BUSY.
 const DEFAULT_BUSY_TIMEOUT_SECS: u64 = 5;
 
 /// Current schema version.
+/// v4: UPSERT model - one row per (attribute_path, version), added version_source column
 #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
 const SCHEMA_VERSION: u32 = 4;
 
@@ -212,7 +218,7 @@ impl Database {
                 store_path_aarch64_linux TEXT,
                 store_path_x86_64_darwin TEXT,
                 store_path_aarch64_darwin TEXT,
-                UNIQUE(attribute_path, version, first_commit_hash)
+                UNIQUE(attribute_path, version)
             );
 
             -- Indexes for common query patterns
@@ -229,28 +235,6 @@ impl Database {
             );
             CREATE INDEX IF NOT EXISTS idx_name_attr_date_covering ON package_versions(
                 name, attribute_path, last_commit_date DESC
-            );
-
-            -- Checkpoint table for persisting open ranges across restarts
-            CREATE TABLE IF NOT EXISTS checkpoint_open_ranges (
-                key TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                version TEXT NOT NULL,
-                version_source TEXT,
-                first_commit_hash TEXT NOT NULL,
-                first_commit_date INTEGER NOT NULL,
-                attribute_path TEXT NOT NULL,
-                description TEXT,
-                license TEXT,
-                homepage TEXT,
-                maintainers TEXT,
-                platforms TEXT,
-                source_path TEXT,
-                known_vulnerabilities TEXT,
-                store_path_x86_64_linux TEXT,
-                store_path_aarch64_linux TEXT,
-                store_path_x86_64_darwin TEXT,
-                store_path_aarch64_darwin TEXT
             );
             "#,
         )?;
@@ -399,35 +383,7 @@ impl Database {
         }
 
         // Ensure all schema elements exist (runs unconditionally for idempotent upgrades)
-        // This handles v3 databases that may be missing newer columns/tables
         {
-            // Create checkpoint_open_ranges table with all columns including per-arch store paths
-            self.conn.execute_batch(
-                r#"
-                CREATE TABLE IF NOT EXISTS checkpoint_open_ranges (
-                    key TEXT PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    version TEXT NOT NULL,
-                    version_source TEXT,
-                    first_commit_hash TEXT NOT NULL,
-                    first_commit_date INTEGER NOT NULL,
-                    attribute_path TEXT NOT NULL,
-                    description TEXT,
-                    license TEXT,
-                    homepage TEXT,
-                    maintainers TEXT,
-                    platforms TEXT,
-                    source_path TEXT,
-                    known_vulnerabilities TEXT,
-                    store_path TEXT,
-                    store_path_x86_64_linux TEXT,
-                    store_path_aarch64_linux TEXT,
-                    store_path_x86_64_darwin TEXT,
-                    store_path_aarch64_darwin TEXT
-                );
-                "#,
-            )?;
-
             // Add store_path column to package_versions if not present
             let has_store_path: bool = self
                 .conn
@@ -548,36 +504,96 @@ impl Database {
     /// # use crate::db::Database;
     /// # use crate::db::queries::PackageVersion;
     /// # fn example(mut db: Database, packages: Vec<PackageVersion>) {
-    /// let inserted = db.insert_package_ranges_batch(&packages).unwrap();
-    /// assert!(inserted <= packages.len());
+    /// let upserted = db.upsert_packages_batch(&packages).unwrap();
     /// # }
     /// ```
-    #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
+    #[cfg(feature = "indexer")]
     #[instrument(skip(self, packages), fields(batch_size = packages.len()))]
-    pub fn insert_package_ranges_batch(&mut self, packages: &[PackageVersion]) -> Result<usize> {
+    pub fn upsert_packages_batch(&mut self, packages: &[PackageVersion]) -> Result<usize> {
         let batch_start = Instant::now();
         let tx = self.conn.transaction()?;
         let tx_start_time = batch_start.elapsed();
 
-        let mut inserted = 0;
-        let mut duplicates = 0;
+        let mut upserted = 0;
 
         {
+            // UPSERT: Insert new rows, or update existing ones.
+            // - first_commit: keep the earlier date
+            // - last_commit: keep the later date
+            // - metadata: use values from the row with later last_commit_date
+            // - store_paths: merge (first non-null wins per architecture)
             let mut stmt = tx.prepare_cached(
                 r#"
-                INSERT OR IGNORE INTO package_versions
+                INSERT INTO package_versions
                     (name, version, version_source, first_commit_hash, first_commit_date,
                      last_commit_hash, last_commit_date, attribute_path,
                      description, license, homepage, maintainers, platforms, source_path,
                      known_vulnerabilities,
                      store_path_x86_64_linux, store_path_aarch64_linux,
                      store_path_x86_64_darwin, store_path_aarch64_darwin)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+                ON CONFLICT(attribute_path, version) DO UPDATE SET
+                    -- Update first_commit if new one is earlier
+                    first_commit_hash = CASE
+                        WHEN excluded.first_commit_date < first_commit_date
+                        THEN excluded.first_commit_hash
+                        ELSE first_commit_hash
+                    END,
+                    first_commit_date = MIN(first_commit_date, excluded.first_commit_date),
+                    -- Update last_commit if new one is later
+                    last_commit_hash = CASE
+                        WHEN excluded.last_commit_date > last_commit_date
+                        THEN excluded.last_commit_hash
+                        ELSE last_commit_hash
+                    END,
+                    last_commit_date = MAX(last_commit_date, excluded.last_commit_date),
+                    -- Update metadata from the row with later last_commit_date
+                    description = CASE
+                        WHEN excluded.last_commit_date > last_commit_date
+                        THEN COALESCE(excluded.description, description)
+                        ELSE description
+                    END,
+                    license = CASE
+                        WHEN excluded.last_commit_date > last_commit_date
+                        THEN COALESCE(excluded.license, license)
+                        ELSE license
+                    END,
+                    homepage = CASE
+                        WHEN excluded.last_commit_date > last_commit_date
+                        THEN COALESCE(excluded.homepage, homepage)
+                        ELSE homepage
+                    END,
+                    maintainers = CASE
+                        WHEN excluded.last_commit_date > last_commit_date
+                        THEN COALESCE(excluded.maintainers, maintainers)
+                        ELSE maintainers
+                    END,
+                    platforms = CASE
+                        WHEN excluded.last_commit_date > last_commit_date
+                        THEN COALESCE(excluded.platforms, platforms)
+                        ELSE platforms
+                    END,
+                    source_path = COALESCE(source_path, excluded.source_path),
+                    known_vulnerabilities = CASE
+                        WHEN excluded.last_commit_date > last_commit_date
+                        THEN COALESCE(excluded.known_vulnerabilities, known_vulnerabilities)
+                        ELSE known_vulnerabilities
+                    END,
+                    version_source = CASE
+                        WHEN excluded.last_commit_date > last_commit_date
+                        THEN COALESCE(excluded.version_source, version_source)
+                        ELSE version_source
+                    END,
+                    -- Store paths: first non-null wins per architecture
+                    store_path_x86_64_linux = COALESCE(store_path_x86_64_linux, excluded.store_path_x86_64_linux),
+                    store_path_aarch64_linux = COALESCE(store_path_aarch64_linux, excluded.store_path_aarch64_linux),
+                    store_path_x86_64_darwin = COALESCE(store_path_x86_64_darwin, excluded.store_path_x86_64_darwin),
+                    store_path_aarch64_darwin = COALESCE(store_path_aarch64_darwin, excluded.store_path_aarch64_darwin)
                 "#,
             )?;
 
             for pkg in packages {
-                let changes = stmt.execute(rusqlite::params![
+                stmt.execute(rusqlite::params![
                     pkg.name,
                     pkg.version,
                     pkg.version_source,
@@ -598,11 +614,7 @@ impl Database {
                     pkg.store_paths.get("x86_64-darwin"),
                     pkg.store_paths.get("aarch64-darwin"),
                 ])?;
-                if changes > 0 {
-                    inserted += changes;
-                } else {
-                    duplicates += 1;
-                }
+                upserted += 1;
             }
         }
 
@@ -612,190 +624,15 @@ impl Database {
 
         trace!(
             batch_size = packages.len(),
-            inserted = inserted,
-            duplicates = duplicates,
+            upserted = upserted,
             tx_start_ms = tx_start_time.as_millis(),
             insert_ms = insert_time.as_millis(),
             commit_ms = (total_time - insert_time).as_millis(),
             total_ms = total_time.as_millis(),
-            "Batch insert completed"
+            "Batch upsert completed"
         );
 
-        Ok(inserted)
-    }
-
-    /// Save checkpoint open ranges to the database.
-    ///
-    /// This persists the current open ranges so they can be restored on resume.
-    /// Called during periodic checkpoints and graceful shutdown.
-    #[cfg(feature = "indexer")]
-    #[instrument(skip(self, ranges), fields(range_count = ranges.len()))]
-    pub fn save_checkpoint_ranges(
-        &mut self,
-        ranges: &std::collections::HashMap<String, crate::index::CheckpointRange>,
-    ) -> Result<()> {
-        let tx = self.conn.transaction()?;
-
-        // Clear existing checkpoint ranges
-        tx.execute("DELETE FROM checkpoint_open_ranges", [])?;
-
-        // Insert all current ranges
-        {
-            let mut stmt = tx.prepare_cached(
-                r#"
-                INSERT INTO checkpoint_open_ranges
-                    (key, name, version, version_source, first_commit_hash, first_commit_date,
-                     attribute_path, description, license, homepage, maintainers,
-                     platforms, source_path, known_vulnerabilities,
-                     store_path_x86_64_linux, store_path_aarch64_linux,
-                     store_path_x86_64_darwin, store_path_aarch64_darwin)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                "#,
-            )?;
-
-            for (key, range) in ranges {
-                stmt.execute(rusqlite::params![
-                    key,
-                    range.name,
-                    range.version,
-                    range.version_source,
-                    range.first_commit_hash,
-                    range.first_commit_date.timestamp(),
-                    range.attribute_path,
-                    range.description,
-                    range.license,
-                    range.homepage,
-                    range.maintainers,
-                    range.platforms,
-                    range.source_path,
-                    range.known_vulnerabilities,
-                    range.store_paths.get("x86_64-linux"),
-                    range.store_paths.get("aarch64-linux"),
-                    range.store_paths.get("x86_64-darwin"),
-                    range.store_paths.get("aarch64-darwin"),
-                ])?;
-            }
-        }
-
-        tx.commit()?;
-        Ok(())
-    }
-
-    /// Load checkpoint open ranges from the database.
-    ///
-    /// Returns the previously saved open ranges for resuming indexing.
-    #[cfg(feature = "indexer")]
-    #[instrument(skip(self))]
-    pub fn load_checkpoint_ranges(
-        &self,
-    ) -> Result<std::collections::HashMap<String, crate::index::CheckpointRange>> {
-        use chrono::{TimeZone, Utc};
-        use std::collections::HashMap;
-
-        let mut ranges = HashMap::new();
-
-        let mut stmt = self.conn.prepare(
-            r#"
-            SELECT key, name, version, version_source, first_commit_hash, first_commit_date,
-                   attribute_path, description, license, homepage, maintainers,
-                   platforms, source_path, known_vulnerabilities,
-                   store_path_x86_64_linux, store_path_aarch64_linux,
-                   store_path_x86_64_darwin, store_path_aarch64_darwin
-            FROM checkpoint_open_ranges
-            "#,
-        )?;
-
-        let rows = stmt.query_map([], |row| {
-            let key: String = row.get(0)?;
-            let timestamp: i64 = row.get(5)?;
-
-            let mut store_paths = HashMap::new();
-            if let Some(path) = row.get::<_, Option<String>>(14)? {
-                store_paths.insert("x86_64-linux".to_string(), path);
-            }
-            if let Some(path) = row.get::<_, Option<String>>(15)? {
-                store_paths.insert("aarch64-linux".to_string(), path);
-            }
-            if let Some(path) = row.get::<_, Option<String>>(16)? {
-                store_paths.insert("x86_64-darwin".to_string(), path);
-            }
-            if let Some(path) = row.get::<_, Option<String>>(17)? {
-                store_paths.insert("aarch64-darwin".to_string(), path);
-            }
-
-            Ok((
-                key,
-                crate::index::CheckpointRange {
-                    name: row.get(1)?,
-                    version: row.get(2)?,
-                    version_source: row.get(3)?,
-                    first_commit_hash: row.get(4)?,
-                    first_commit_date: Utc.timestamp_opt(timestamp, 0).single().unwrap_or_default(),
-                    attribute_path: row.get(6)?,
-                    description: row.get(7)?,
-                    license: row.get(8)?,
-                    homepage: row.get(9)?,
-                    maintainers: row.get(10)?,
-                    platforms: row.get(11)?,
-                    source_path: row.get(12)?,
-                    known_vulnerabilities: row.get(13)?,
-                    store_paths,
-                },
-            ))
-        })?;
-
-        for row in rows {
-            let (key, range) = row?;
-            ranges.insert(key, range);
-        }
-
-        Ok(ranges)
-    }
-
-    /// Clear checkpoint open ranges from the database.
-    ///
-    /// Called when indexing completes successfully.
-    #[cfg(feature = "indexer")]
-    #[instrument(skip(self))]
-    pub fn clear_checkpoint_ranges(&self) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM checkpoint_open_ranges", [])?;
-        Ok(())
-    }
-
-    /// Update the last_commit fields for an existing package version range.
-    ///
-    /// Used during incremental indexing to extend a range's end point.
-    #[allow(dead_code)]
-    pub fn update_package_range_end(
-        &self,
-        attr_path: &str,
-        version: &str,
-        first_commit_hash: &str,
-        last_commit_hash: &str,
-        last_commit_date: i64,
-        description: Option<&str>,
-    ) -> Result<bool> {
-        let changes = self.conn.execute(
-            r#"
-            UPDATE package_versions
-            SET last_commit_hash = ?,
-                last_commit_date = ?,
-                description = COALESCE(?, description)
-            WHERE attribute_path = ?
-              AND version = ?
-              AND first_commit_hash = ?
-            "#,
-            rusqlite::params![
-                last_commit_hash,
-                last_commit_date,
-                description,
-                attr_path,
-                version,
-                first_commit_hash
-            ],
-        )?;
-        Ok(changes > 0)
+        Ok(upserted)
     }
 }
 
@@ -865,7 +702,8 @@ mod tests {
     }
 
     #[test]
-    fn test_batch_insert() {
+    #[cfg(feature = "indexer")]
+    fn test_upsert_new_packages() {
         use chrono::Utc;
 
         let dir = tempdir().unwrap();
@@ -914,8 +752,8 @@ mod tests {
             },
         ];
 
-        let inserted = db.insert_package_ranges_batch(&packages).unwrap();
-        assert_eq!(inserted, 2);
+        let upserted = db.upsert_packages_batch(&packages).unwrap();
+        assert_eq!(upserted, 2);
 
         // Verify data was inserted
         let count: i32 = db
@@ -928,23 +766,28 @@ mod tests {
     }
 
     #[test]
-    fn test_batch_insert_duplicate_handling() {
-        use chrono::Utc;
+    #[cfg(feature = "indexer")]
+    fn test_upsert_updates_commit_bounds() {
+        use chrono::{TimeZone, Utc};
 
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("test.db");
         let mut db = Database::open(&db_path).unwrap();
 
-        let now = Utc::now();
-        let pkg = PackageVersion {
+        let date1 = Utc.with_ymd_and_hms(2022, 1, 1, 0, 0, 0).unwrap();
+        let date2 = Utc.with_ymd_and_hms(2022, 6, 1, 0, 0, 0).unwrap();
+        let date3 = Utc.with_ymd_and_hms(2021, 6, 1, 0, 0, 0).unwrap(); // Earlier than date1
+
+        // First insert
+        let pkg1 = PackageVersion {
             id: 0,
             name: "python".to_string(),
             version: "3.11.0".to_string(),
-            version_source: None,
-            first_commit_hash: "abc1234567890".to_string(),
-            first_commit_date: now,
-            last_commit_hash: "def1234567890".to_string(),
-            last_commit_date: now,
+            version_source: Some("direct".to_string()),
+            first_commit_hash: "commit_jan".to_string(),
+            first_commit_date: date1,
+            last_commit_hash: "commit_jan".to_string(),
+            last_commit_date: date1,
             attribute_path: "python311".to_string(),
             description: Some("Python interpreter".to_string()),
             license: None,
@@ -955,30 +798,165 @@ mod tests {
             known_vulnerabilities: None,
             store_paths: std::collections::HashMap::new(),
         };
+        db.upsert_packages_batch(&[pkg1]).unwrap();
 
-        // First insert should succeed
-        let inserted1 = db
-            .insert_package_ranges_batch(std::slice::from_ref(&pkg))
-            .unwrap();
-        assert_eq!(inserted1, 1);
+        // Second upsert with later last_commit
+        let pkg2 = PackageVersion {
+            id: 0,
+            name: "python".to_string(),
+            version: "3.11.0".to_string(),
+            version_source: Some("direct".to_string()),
+            first_commit_hash: "commit_jun".to_string(),
+            first_commit_date: date2,
+            last_commit_hash: "commit_jun".to_string(),
+            last_commit_date: date2,
+            attribute_path: "python311".to_string(),
+            description: Some("Updated description".to_string()),
+            license: None,
+            homepage: None,
+            maintainers: None,
+            platforms: None,
+            source_path: None,
+            known_vulnerabilities: None,
+            store_paths: std::collections::HashMap::new(),
+        };
+        db.upsert_packages_batch(&[pkg2]).unwrap();
 
-        // Second insert of same package should be ignored (no error)
-        let inserted2 = db
-            .insert_package_ranges_batch(std::slice::from_ref(&pkg))
-            .unwrap();
-        assert_eq!(inserted2, 0);
+        // Third upsert with earlier first_commit
+        let pkg3 = PackageVersion {
+            id: 0,
+            name: "python".to_string(),
+            version: "3.11.0".to_string(),
+            version_source: Some("direct".to_string()),
+            first_commit_hash: "commit_2021".to_string(),
+            first_commit_date: date3,
+            last_commit_hash: "commit_2021".to_string(),
+            last_commit_date: date3,
+            attribute_path: "python311".to_string(),
+            description: Some("Old description".to_string()),
+            license: None,
+            homepage: None,
+            maintainers: None,
+            platforms: None,
+            source_path: None,
+            known_vulnerabilities: None,
+            store_paths: std::collections::HashMap::new(),
+        };
+        db.upsert_packages_batch(&[pkg3]).unwrap();
 
-        // Verify only one row exists
+        // Verify: should be one row with first=2021, last=2022-06, description from 2022-06
         let count: i32 = db
             .conn
             .query_row("SELECT COUNT(*) FROM package_versions", [], |row| {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(count, 1);
+        assert_eq!(count, 1, "Should have exactly one row");
+
+        let (first_hash, last_hash, desc): (String, String, String) = db
+            .conn
+            .query_row(
+                "SELECT first_commit_hash, last_commit_hash, description FROM package_versions WHERE attribute_path = 'python311'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+
+        assert_eq!(
+            first_hash, "commit_2021",
+            "first_commit should be the earliest"
+        );
+        assert_eq!(last_hash, "commit_jun", "last_commit should be the latest");
+        assert_eq!(
+            desc, "Updated description",
+            "description should be from latest"
+        );
     }
 
     #[test]
+    #[cfg(feature = "indexer")]
+    fn test_upsert_store_paths_merge() {
+        use chrono::Utc;
+        use std::collections::HashMap;
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let mut db = Database::open(&db_path).unwrap();
+
+        let now = Utc::now();
+
+        // First insert with x86_64-linux store path
+        let mut store_paths1 = HashMap::new();
+        store_paths1.insert(
+            "x86_64-linux".to_string(),
+            "/nix/store/abc-hello".to_string(),
+        );
+
+        let pkg1 = PackageVersion {
+            id: 0,
+            name: "hello".to_string(),
+            version: "2.10".to_string(),
+            version_source: None,
+            first_commit_hash: "commit1".to_string(),
+            first_commit_date: now,
+            last_commit_hash: "commit1".to_string(),
+            last_commit_date: now,
+            attribute_path: "hello".to_string(),
+            description: None,
+            license: None,
+            homepage: None,
+            maintainers: None,
+            platforms: None,
+            source_path: None,
+            known_vulnerabilities: None,
+            store_paths: store_paths1,
+        };
+        db.upsert_packages_batch(&[pkg1]).unwrap();
+
+        // Second insert with aarch64-linux store path
+        let mut store_paths2 = HashMap::new();
+        store_paths2.insert(
+            "aarch64-linux".to_string(),
+            "/nix/store/def-hello".to_string(),
+        );
+
+        let pkg2 = PackageVersion {
+            id: 0,
+            name: "hello".to_string(),
+            version: "2.10".to_string(),
+            version_source: None,
+            first_commit_hash: "commit2".to_string(),
+            first_commit_date: now,
+            last_commit_hash: "commit2".to_string(),
+            last_commit_date: now,
+            attribute_path: "hello".to_string(),
+            description: None,
+            license: None,
+            homepage: None,
+            maintainers: None,
+            platforms: None,
+            source_path: None,
+            known_vulnerabilities: None,
+            store_paths: store_paths2,
+        };
+        db.upsert_packages_batch(&[pkg2]).unwrap();
+
+        // Verify both store paths are present
+        let (x86_path, aarch64_path): (Option<String>, Option<String>) = db
+            .conn
+            .query_row(
+                "SELECT store_path_x86_64_linux, store_path_aarch64_linux FROM package_versions WHERE attribute_path = 'hello'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+
+        assert_eq!(x86_path, Some("/nix/store/abc-hello".to_string()));
+        assert_eq!(aarch64_path, Some("/nix/store/def-hello".to_string()));
+    }
+
+    #[test]
+    #[cfg(feature = "indexer")]
     fn test_fts5_trigger_sync() {
         use chrono::Utc;
 
@@ -1007,7 +985,7 @@ mod tests {
             store_paths: std::collections::HashMap::new(),
         };
 
-        db.insert_package_ranges_batch(&[pkg]).unwrap();
+        db.upsert_packages_batch(&[pkg]).unwrap();
 
         // FTS5 should be searchable
         let fts_count: i32 = db
@@ -1022,7 +1000,8 @@ mod tests {
     }
 
     #[test]
-    fn test_batch_insert_10k_performance() {
+    #[cfg(feature = "indexer")]
+    fn test_upsert_10k_performance() {
         use chrono::Utc;
         use std::time::Instant;
 
@@ -1054,13 +1033,13 @@ mod tests {
             .collect();
 
         let start = Instant::now();
-        let inserted = db.insert_package_ranges_batch(&packages).unwrap();
+        let upserted = db.upsert_packages_batch(&packages).unwrap();
         let duration = start.elapsed();
 
-        assert_eq!(inserted, 10_000);
+        assert_eq!(upserted, 10_000);
         assert!(
             duration.as_secs() < 5,
-            "Batch insert took {:?}, expected < 5 seconds",
+            "Batch upsert took {:?}, expected < 5 seconds",
             duration
         );
 

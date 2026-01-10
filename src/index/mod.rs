@@ -1,6 +1,10 @@
 //! Indexer module for building the package index from nixpkgs.
 //!
 //! This module is only available when the `indexer` feature is enabled.
+//!
+//! The indexer uses UPSERT semantics: one row per (attribute_path, version) pair.
+//! When the same package version is seen across multiple commits, the database
+//! row is updated to track the earliest first_commit and latest last_commit.
 
 pub mod backfill;
 pub mod extractor;
@@ -9,28 +13,6 @@ pub mod git;
 pub mod nix_ffi;
 pub mod publisher;
 pub mod worker;
-
-/// A checkpoint-serializable version of OpenRange for database persistence.
-/// This is used to save/restore open ranges across indexer restarts.
-#[derive(Debug, Clone)]
-pub struct CheckpointRange {
-    pub name: String,
-    pub version: String,
-    /// Source of version information: "direct", "unwrapped", "passthru", "name", or None.
-    pub version_source: Option<String>,
-    pub first_commit_hash: String,
-    pub first_commit_date: chrono::DateTime<chrono::Utc>,
-    pub attribute_path: String,
-    pub description: Option<String>,
-    pub license: Option<String>,
-    pub homepage: Option<String>,
-    pub maintainers: Option<String>,
-    pub platforms: Option<String>,
-    pub source_path: Option<String>,
-    pub known_vulnerabilities: Option<String>,
-    /// Store paths per architecture (e.g., {"x86_64-linux": "/nix/store/..."})
-    pub store_paths: std::collections::HashMap<String, String>,
-}
 
 use crate::bloom::PackageBloomFilter;
 use crate::db::Database;
@@ -132,193 +114,6 @@ impl Default for IndexerConfig {
             gc_interval: 20, // GC every 20 checkpoints (2000 commits by default)
             gc_min_free_bytes: 10 * 1024 * 1024 * 1024, // 10 GB
         }
-    }
-}
-
-/// Tracks an open version range for a package.
-#[derive(Debug, Clone)]
-struct OpenRange {
-    name: String,
-    version: String,
-    /// Source of version information: "direct", "unwrapped", "passthru", "name", or None.
-    version_source: Option<String>,
-    first_commit_hash: String,
-    first_commit_date: DateTime<Utc>,
-    attribute_path: String,
-    description: Option<String>,
-    license: Option<String>,
-    homepage: Option<String>,
-    maintainers: Option<String>,
-    platforms: Option<String>,
-    source_path: Option<String>,
-    known_vulnerabilities: Option<String>,
-    /// Store paths per architecture
-    store_paths: HashMap<String, String>,
-}
-
-impl OpenRange {
-    /// Convert this OpenRange into a PackageVersion using the provided last commit metadata.
-    ///
-    /// The returned PackageVersion contains all metadata carried by the OpenRange plus the
-    /// supplied `last_commit_hash` and `last_commit_date`.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// // Construct an OpenRange and finalize it into a PackageVersion:
-    /// let open = OpenRange { /* populate fields */ };
-    /// let pv = open.to_package_version("deadbeef", chrono::Utc::now());
-    /// assert_eq!(pv.last_commit_hash, "deadbeef");
-    /// ```
-    fn to_package_version(
-        &self,
-        last_commit_hash: &str,
-        last_commit_date: DateTime<Utc>,
-    ) -> PackageVersion {
-        PackageVersion {
-            id: 0,
-            name: self.name.clone(),
-            version: self.version.clone(),
-            version_source: self.version_source.clone(),
-            first_commit_hash: self.first_commit_hash.clone(),
-            first_commit_date: self.first_commit_date,
-            last_commit_hash: last_commit_hash.to_string(),
-            last_commit_date,
-            attribute_path: self.attribute_path.clone(),
-            description: self.description.clone(),
-            license: self.license.clone(),
-            homepage: self.homepage.clone(),
-            maintainers: self.maintainers.clone(),
-            platforms: self.platforms.clone(),
-            source_path: self.source_path.clone(),
-            known_vulnerabilities: self.known_vulnerabilities.clone(),
-            store_paths: self.store_paths.clone(),
-        }
-    }
-
-    /// Convert to a CheckpointRange for serialization.
-    fn to_checkpoint(&self) -> CheckpointRange {
-        CheckpointRange {
-            name: self.name.clone(),
-            version: self.version.clone(),
-            version_source: self.version_source.clone(),
-            first_commit_hash: self.first_commit_hash.clone(),
-            first_commit_date: self.first_commit_date,
-            attribute_path: self.attribute_path.clone(),
-            description: self.description.clone(),
-            license: self.license.clone(),
-            homepage: self.homepage.clone(),
-            maintainers: self.maintainers.clone(),
-            platforms: self.platforms.clone(),
-            source_path: self.source_path.clone(),
-            known_vulnerabilities: self.known_vulnerabilities.clone(),
-            store_paths: self.store_paths.clone(),
-        }
-    }
-
-    /// Create from a CheckpointRange for deserialization.
-    fn from_checkpoint(cr: CheckpointRange) -> Self {
-        Self {
-            name: cr.name,
-            version: cr.version,
-            version_source: cr.version_source,
-            first_commit_hash: cr.first_commit_hash,
-            first_commit_date: cr.first_commit_date,
-            attribute_path: cr.attribute_path,
-            description: cr.description,
-            license: cr.license,
-            homepage: cr.homepage,
-            maintainers: cr.maintainers,
-            platforms: cr.platforms,
-            source_path: cr.source_path,
-            known_vulnerabilities: cr.known_vulnerabilities,
-            store_paths: cr.store_paths,
-        }
-    }
-
-    /// Conditionally updates the stored metadata fields with the provided values.
-    ///
-    /// Each optional field replaces the corresponding stored value if it differs.
-    /// The `source_path` is set only if the existing `source_path` is `None` and
-    /// a new `Some` value is provided; it is never overwritten once set.
-    ///
-    /// # Returns
-    ///
-    /// `true` if any field was changed, `false` otherwise.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// let mut r = OpenRange {
-    ///     name: "pkg".into(),
-    ///     version: "1.0".into(),
-    ///     first_commit_hash: "abc".into(),
-    ///     first_commit_date: "2020-01-01".into(),
-    ///     attribute_path: "pkgs.pkg".into(),
-    ///     description: None,
-    ///     license: None,
-    ///     homepage: None,
-    ///     maintainers: None,
-    ///     platforms: None,
-    ///     source_path: None,
-    /// };
-    ///
-    /// let changed = r.update_metadata(
-    ///     Some("desc".into()),
-    ///     Some("MIT".into()),
-    ///     None,
-    ///     None,
-    ///     None,
-    ///     Some("path/to/source".into()),
-    /// );
-    ///
-    /// assert!(changed);
-    /// assert_eq!(r.description, Some("desc".into()));
-    /// assert_eq!(r.source_path, Some("path/to/source".into()));
-    /// ```
-    #[allow(clippy::too_many_arguments)]
-    fn update_metadata(
-        &mut self,
-        description: Option<String>,
-        license: Option<String>,
-        homepage: Option<String>,
-        maintainers: Option<String>,
-        platforms: Option<String>,
-        source_path: Option<String>,
-        known_vulnerabilities: Option<String>,
-    ) -> bool {
-        let mut updated = false;
-
-        if self.description != description {
-            self.description = description;
-            updated = true;
-        }
-        if self.license != license {
-            self.license = license;
-            updated = true;
-        }
-        if self.homepage != homepage {
-            self.homepage = homepage;
-            updated = true;
-        }
-        if self.maintainers != maintainers {
-            self.maintainers = maintainers;
-            updated = true;
-        }
-        if self.platforms != platforms {
-            self.platforms = platforms;
-            updated = true;
-        }
-        if self.source_path.is_none() && source_path.is_some() {
-            self.source_path = source_path;
-            updated = true;
-        }
-        if self.known_vulnerabilities != known_vulnerabilities {
-            self.known_vulnerabilities = known_vulnerabilities;
-            updated = true;
-        }
-
-        updated
     }
 }
 
@@ -474,10 +269,6 @@ impl PackageAggregate {
         }
     }
 
-    fn key(&self) -> String {
-        format!("{}::{}", self.attribute_path, self.version)
-    }
-
     fn license_json(&self) -> Option<String> {
         set_to_json(&self.license)
     }
@@ -495,6 +286,32 @@ impl PackageAggregate {
             .as_ref()
             .filter(|v| !v.is_empty())
             .map(|v| serde_json::to_string(v).unwrap_or_default())
+    }
+
+    /// Convert this aggregate into a PackageVersion for database insertion.
+    ///
+    /// The commit hash and date are used for both first and last commit fields.
+    /// When UPSERT is used, the database will update these bounds appropriately.
+    fn to_package_version(&self, commit_hash: &str, commit_date: DateTime<Utc>) -> PackageVersion {
+        PackageVersion {
+            id: 0,
+            name: self.name.clone(),
+            version: self.version.clone(),
+            version_source: self.version_source.clone(),
+            first_commit_hash: commit_hash.to_string(),
+            first_commit_date: commit_date,
+            last_commit_hash: commit_hash.to_string(),
+            last_commit_date: commit_date,
+            attribute_path: self.attribute_path.clone(),
+            description: self.description.clone(),
+            license: self.license_json(),
+            homepage: self.homepage.clone(),
+            maintainers: self.maintainers_json(),
+            platforms: self.platforms_json(),
+            source_path: self.source_path.clone(),
+            known_vulnerabilities: self.known_vulnerabilities_json(),
+            store_paths: self.store_paths.clone(),
+        }
     }
 }
 
@@ -967,7 +784,7 @@ impl Indexer {
                             return Ok(IndexResult {
                                 commits_processed: 0,
                                 packages_found: 0,
-                                ranges_created: 0,
+                                packages_upserted: 0,
                                 unique_names: 0,
                                 was_interrupted: false,
                                 extraction_failures: 0,
@@ -1006,25 +823,23 @@ impl Indexer {
         }
     }
 
-    /// Processes a sequence of commits: extracts package metadata for configured systems,
-    /// tracks open version ranges across commits, finalizes and inserts package versions
-    /// into the database, and updates indexing checkpoint metadata.
+    /// Processes a sequence of commits: extracts package metadata for configured systems
+    /// and UPSERTs package versions into the database.
     ///
     /// This method iterates the provided commits in order, checking out each commit,
-    /// extracting packages for the indexer's configured target systems, merging per-system
-    /// metadata, and maintaining "open" version ranges for packages that persist across
-    /// commits. When a range ends (the package disappears or a checkpoint is reached),
-    /// the range is converted to a PackageVersion and written to the database in batches.
-    /// The method also supports graceful shutdown (saving a checkpoint and flushing pending
-    /// inserts), periodic checkpoints controlled by the indexer's configuration, and optional
-    /// progress reporting with a smoothed ETA. It updates database meta keys such as
-    /// "last_indexed_commit" and "checkpoint_open_ranges" and attempts to restore the
-    /// repository's original HEAD upon completion.
+    /// extracting packages for the indexer's configured target systems, and merging per-system
+    /// metadata. Package versions are UPSERTed in batches - the database maintains one row
+    /// per (attribute_path, version) pair, updating the first/last commit bounds as packages
+    /// are seen across multiple commits.
+    ///
+    /// The method supports graceful shutdown (saving a checkpoint and flushing pending
+    /// UPSERTs), periodic checkpoints controlled by the indexer's configuration, and optional
+    /// progress reporting with a smoothed ETA. It updates the "last_indexed_commit" meta key.
     ///
     /// # Returns
     ///
     /// An `IndexResult` summarizing the indexing operation: number of commits processed,
-    /// packages found, ranges created, unique package names observed, and whether the run
+    /// packages found, packages upserted, unique package names observed, and whether the run
     /// was interrupted.
     ///
     /// # Errors
@@ -1115,58 +930,22 @@ impl Indexer {
         // ETA tracker with window size 50 and EMA/median blending for stable estimates
         let mut eta_tracker = EtaTracker::new(50);
 
-        // Track open ranges: attribute_path+version -> OpenRange
-        // Try to load from checkpoint if resuming
-        let mut open_ranges: HashMap<String, OpenRange> = if resume_from.is_some() {
-            match db.load_checkpoint_ranges() {
-                Ok(checkpoint_ranges) => {
-                    if !checkpoint_ranges.is_empty() {
-                        if let Some(ref pb) = progress_bar {
-                            pb.println(format!(
-                                "{} {} open ranges from checkpoint",
-                                "Restored".success(),
-                                checkpoint_ranges.len().count_pending()
-                            ));
-                        } else {
-                            eprintln!(
-                                "{} {} open ranges from checkpoint",
-                                "Restored".success(),
-                                checkpoint_ranges.len().count_pending()
-                            );
-                        }
-                        checkpoint_ranges
-                            .into_iter()
-                            .map(|(k, v)| (k, OpenRange::from_checkpoint(v)))
-                            .collect()
-                    } else {
-                        HashMap::new()
-                    }
-                }
-                Err(e) => {
-                    eprintln!("Warning: Could not load checkpoint ranges: {}", e);
-                    HashMap::new()
-                }
-            }
-        } else {
-            HashMap::new()
-        };
-
         // Track unique package names for bloom filter
         let mut unique_names: HashSet<String> = HashSet::new();
 
         let mut result = IndexResult {
             commits_processed: 0,
             packages_found: 0,
-            ranges_created: 0,
+            packages_upserted: 0,
             unique_names: 0,
             was_interrupted: false,
             extraction_failures: 0,
         };
 
-        let mut prev_commit_hash: Option<String> = resume_from.map(String::from);
-        let mut prev_commit_date: Option<DateTime<Utc>> = None;
-        let mut pending_inserts: Vec<PackageVersion> = Vec::new();
+        // Buffer for batch UPSERT operations
+        let mut pending_upserts: Vec<PackageVersion> = Vec::new();
         let mut checkpoints_since_gc: usize = 0;
+        let mut last_processed_commit: Option<String> = resume_from.map(String::from);
 
         // Build the initial file-to-attribute map
         let first_commit = commits
@@ -1217,32 +996,22 @@ impl Indexer {
                 }
                 result.was_interrupted = true;
 
-                // Insert any pending ranges (ranges that were closed during this run)
-                if !pending_inserts.is_empty() {
-                    result.ranges_created +=
-                        db.insert_package_ranges_batch(&pending_inserts)? as u64;
+                // UPSERT any pending packages before exiting
+                if !pending_upserts.is_empty() {
+                    result.packages_upserted += db.upsert_packages_batch(&pending_upserts)? as u64;
                 }
 
-                // Save checkpoint with open ranges for resume
-                if let Some(ref prev_hash) = prev_commit_hash {
-                    db.set_meta("last_indexed_commit", prev_hash)?;
+                // Save checkpoint - just the last processed commit
+                if let Some(ref last_hash) = last_processed_commit {
+                    db.set_meta("last_indexed_commit", last_hash)?;
                     db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
-                    db.set_meta("checkpoint_open_ranges", &open_ranges.len().to_string())?;
-
-                    // Save open ranges to checkpoint table for resume capability
-                    let checkpoint_ranges: HashMap<String, CheckpointRange> = open_ranges
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.to_checkpoint()))
-                        .collect();
-                    db.save_checkpoint_ranges(&checkpoint_ranges)?;
-
                     db.checkpoint()?;
 
                     if let Some(ref pb) = progress_bar {
                         pb.println(format!(
-                            "{} {} open ranges to checkpoint",
+                            "{} checkpoint at {}",
                             "Saved".success(),
-                            open_ranges.len().count_pending()
+                            &last_hash[..7]
                         ));
                     }
                 }
@@ -1255,16 +1024,14 @@ impl Indexer {
                 use owo_colors::OwoColorize;
                 pb.set_position(commit_idx as u64);
                 pb.set_message(format!(
-                    "{} | {} {} | {} {} | {} {} {} {}",
+                    "{} | {} {} | {} {} | {} {}",
                     eta_tracker.progress_string(total_commits as u64),
                     commit.short_hash.commit(),
                     format!("({})", commit.date.format("%Y-%m-%d")).dimmed(),
                     result.packages_found.count_found(),
                     "pkgs".dimmed(),
-                    open_ranges.len().count_pending(),
-                    "open".dimmed(),
-                    (result.ranges_created + pending_inserts.len() as u64).count(),
-                    "closed".dimmed()
+                    (result.packages_upserted + pending_upserts.len() as u64).count(),
+                    "upserted".dimmed()
                 ));
             }
 
@@ -1274,8 +1041,6 @@ impl Indexer {
                     &progress_bar,
                     format!("Failed to checkout {}: {}", &commit.short_hash, e),
                 );
-                prev_commit_hash = Some(commit.hash.clone());
-                prev_commit_date = Some(commit.date);
                 eta_tracker.skip_commit();
                 continue;
             }
@@ -1288,8 +1053,6 @@ impl Indexer {
                         &progress_bar,
                         format!("Failed to list changes for {}: {}", &commit.short_hash, e),
                     );
-                    prev_commit_hash = Some(commit.hash.clone());
-                    prev_commit_date = Some(commit.date);
                     eta_tracker.skip_commit();
                     continue;
                 }
@@ -1423,8 +1186,7 @@ impl Indexer {
 
             if target_attr_paths.is_empty() {
                 result.commits_processed += 1;
-                prev_commit_hash = Some(commit.hash.clone());
-                prev_commit_date = Some(commit.date);
+                last_processed_commit = Some(commit.hash.clone());
                 eta_tracker.skip_commit();
                 continue;
             }
@@ -1536,88 +1298,20 @@ impl Indexer {
             trace!(
                 commit = %commit.short_hash,
                 unique_packages = aggregates.len(),
-                open_ranges = open_ranges.len(),
                 "Aggregation complete"
             );
 
-            // Track which packages we saw in this commit
-            let mut seen_keys: HashSet<String> = HashSet::new();
-            let target_set: HashSet<String> = target_list.iter().cloned().collect();
-
+            // Convert aggregates to PackageVersions and add to pending upserts
             for aggregate in aggregates.values() {
-                let key = aggregate.key();
-                seen_keys.insert(key.clone());
-
                 // Track unique package names for bloom filter
                 unique_names.insert(aggregate.name.clone());
 
-                let license_json = aggregate.license_json();
-                let maintainers_json = aggregate.maintainers_json();
-                let platforms_json = aggregate.platforms_json();
-
-                if let Some(existing) = open_ranges.get_mut(&key) {
-                    existing.update_metadata(
-                        aggregate.description.clone(),
-                        license_json,
-                        aggregate.homepage.clone(),
-                        maintainers_json,
-                        platforms_json,
-                        aggregate.source_path.clone(),
-                        aggregate.known_vulnerabilities_json(),
-                    );
-                } else {
-                    open_ranges.insert(
-                        key.clone(),
-                        OpenRange {
-                            name: aggregate.name.clone(),
-                            version: aggregate.version.clone(),
-                            version_source: aggregate.version_source.clone(),
-                            first_commit_hash: commit.hash.clone(),
-                            first_commit_date: commit.date,
-                            attribute_path: aggregate.attribute_path.clone(),
-                            description: aggregate.description.clone(),
-                            license: license_json,
-                            homepage: aggregate.homepage.clone(),
-                            maintainers: maintainers_json,
-                            platforms: platforms_json,
-                            source_path: aggregate.source_path.clone(),
-                            known_vulnerabilities: aggregate.known_vulnerabilities_json(),
-                            store_paths: aggregate.store_paths.clone(),
-                        },
-                    );
-                }
-            }
-
-            // Close ranges for packages that disappeared
-            let disappeared: Vec<String> = open_ranges
-                .iter()
-                .filter(|(key, range)| {
-                    target_set.contains(&range.attribute_path) && !seen_keys.contains(*key)
-                })
-                .map(|(key, _)| key.clone())
-                .collect();
-
-            if !disappeared.is_empty() {
-                trace!(
-                    commit = %commit.short_hash,
-                    disappeared_count = disappeared.len(),
-                    disappeared_keys = ?disappeared,
-                    "Closing ranges for disappeared packages"
-                );
-            }
-
-            for key in disappeared {
-                if let Some(range) = open_ranges.remove(&key)
-                    && let (Some(prev_hash), Some(prev_date)) =
-                        (&prev_commit_hash, prev_commit_date)
-                {
-                    pending_inserts.push(range.to_package_version(prev_hash, prev_date));
-                }
+                // Convert aggregate to PackageVersion for UPSERT
+                pending_upserts.push(aggregate.to_package_version(&commit.hash, commit.date));
             }
 
             result.commits_processed += 1;
-            prev_commit_hash = Some(commit.hash.clone());
-            prev_commit_date = Some(commit.date);
+            last_processed_commit = Some(commit.hash.clone());
 
             // Record commit processing time for ETA calculation
             eta_tracker.finish_commit();
@@ -1628,33 +1322,21 @@ impl Indexer {
             {
                 let checkpoint_start = Instant::now();
 
-                if !pending_inserts.is_empty() {
-                    let insert_start = Instant::now();
-                    let insert_count = pending_inserts.len();
-                    result.ranges_created +=
-                        db.insert_package_ranges_batch(&pending_inserts)? as u64;
+                if !pending_upserts.is_empty() {
+                    let upsert_start = Instant::now();
+                    let upsert_count = pending_upserts.len();
+                    result.packages_upserted += db.upsert_packages_batch(&pending_upserts)? as u64;
                     trace!(
-                        insert_count = insert_count,
-                        insert_time_ms = insert_start.elapsed().as_millis(),
-                        "Database batch insert completed"
+                        upsert_count = upsert_count,
+                        upsert_time_ms = upsert_start.elapsed().as_millis(),
+                        "Database batch upsert completed"
                     );
-                    pending_inserts.clear();
+                    pending_upserts.clear();
                 }
 
-                if let Some(ref prev_hash) = prev_commit_hash {
-                    db.set_meta("last_indexed_commit", prev_hash)?;
-                    db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
-                    db.set_meta("checkpoint_open_ranges", &open_ranges.len().to_string())?;
-
-                    // Save open ranges to checkpoint table for resume capability
-                    let checkpoint_ranges: HashMap<String, CheckpointRange> = open_ranges
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.to_checkpoint()))
-                        .collect();
-                    db.save_checkpoint_ranges(&checkpoint_ranges)?;
-
-                    db.checkpoint()?;
-                }
+                db.set_meta("last_indexed_commit", &commit.hash)?;
+                db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
+                db.checkpoint()?;
 
                 // Garbage collection: run periodically or when disk is low
                 checkpoints_since_gc += 1;
@@ -1704,32 +1386,22 @@ impl Indexer {
                 trace!(
                     commit_idx = commit_idx + 1,
                     checkpoint_time_ms = checkpoint_start.elapsed().as_millis(),
-                    open_ranges = open_ranges.len(),
                     "Checkpoint completed"
                 );
             }
         }
 
-        // Final: close all remaining open ranges at the last commit
+        // Final: UPSERT any remaining pending packages
+        if !result.was_interrupted && !pending_upserts.is_empty() {
+            result.packages_upserted += db.upsert_packages_batch(&pending_upserts)? as u64;
+        }
+
+        // Update final metadata
         if !result.was_interrupted
-            && let (Some(last_hash), Some(last_date)) =
-                (prev_commit_hash.as_ref(), prev_commit_date)
+            && let Some(ref last_hash) = last_processed_commit
         {
-            for range in open_ranges.values() {
-                pending_inserts.push(range.to_package_version(last_hash, last_date));
-            }
-
-            if !pending_inserts.is_empty() {
-                result.ranges_created += db.insert_package_ranges_batch(&pending_inserts)? as u64;
-            }
-
-            if let Some(ref last_hash) = prev_commit_hash {
-                db.set_meta("last_indexed_commit", last_hash)?;
-                db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
-            }
-
-            // Clear checkpoint ranges - indexing completed successfully
-            db.clear_checkpoint_ranges()?;
+            db.set_meta("last_indexed_commit", last_hash)?;
+            db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
         }
 
         // Set final unique names count
@@ -1745,8 +1417,8 @@ impl Indexer {
                 "commits".dimmed(),
                 result.packages_found.count_found(),
                 "pkgs".dimmed(),
-                result.ranges_created.count(),
-                "ranges".dimmed()
+                result.packages_upserted.count(),
+                "upserted".dimmed()
             ));
         }
 
@@ -2029,8 +1701,8 @@ pub struct IndexResult {
     pub commits_processed: u64,
     /// Total number of package extractions (may count same package multiple times).
     pub packages_found: u64,
-    /// Number of version ranges created in the database.
-    pub ranges_created: u64,
+    /// Number of packages upserted into the database.
+    pub packages_upserted: u64,
     /// Number of unique package names found.
     pub unique_names: u64,
     /// Whether the indexing was interrupted (e.g., by Ctrl+C).
@@ -2307,32 +1979,34 @@ mod tests {
     }
 
     #[test]
-    fn test_open_range_to_package_version() {
-        let range = OpenRange {
+    fn test_package_aggregate_to_package_version() {
+        let pkg_info = extractor::PackageInfo {
             name: "hello".to_string(),
-            version: "1.0.0".to_string(),
-            version_source: None,
-            first_commit_hash: "abc123".to_string(),
-            first_commit_date: Utc::now(),
+            version: Some("1.0.0".to_string()),
+            version_source: Some("direct".to_string()),
             attribute_path: "hello".to_string(),
             description: Some("A test package".to_string()),
-            license: None,
-            homepage: None,
+            license: Some(vec!["MIT".to_string()]),
+            homepage: Some("https://example.org".to_string()),
             maintainers: None,
             platforms: None,
             source_path: Some("pkgs/hello/default.nix".to_string()),
             known_vulnerabilities: None,
-            store_paths: HashMap::new(),
+            out_path: Some("/nix/store/abc-hello-1.0.0".to_string()),
         };
 
-        let last_date = Utc::now();
-        let pkg = range.to_package_version("def456", last_date);
+        let aggregate = PackageAggregate::new(pkg_info, "x86_64-linux");
+        let commit_date = Utc::now();
+        let pkg = aggregate.to_package_version("abc123", commit_date);
 
         assert_eq!(pkg.name, "hello");
         assert_eq!(pkg.version, "1.0.0");
+        assert_eq!(pkg.version_source, Some("direct".to_string()));
         assert_eq!(pkg.first_commit_hash, "abc123");
-        assert_eq!(pkg.last_commit_hash, "def456");
+        assert_eq!(pkg.last_commit_hash, "abc123");
         assert_eq!(pkg.attribute_path, "hello");
+        assert_eq!(pkg.description, Some("A test package".to_string()));
+        assert!(pkg.store_paths.contains_key("x86_64-linux"));
     }
 
     #[test]
@@ -2340,7 +2014,7 @@ mod tests {
         let result = IndexResult {
             commits_processed: 0,
             packages_found: 0,
-            ranges_created: 0,
+            packages_upserted: 0,
             unique_names: 0,
             was_interrupted: false,
             extraction_failures: 0,
@@ -2463,7 +2137,8 @@ mod tests {
         {
             let db = Database::open(&db_path).unwrap();
             db.set_meta("last_indexed_commit", "abc123def456").unwrap();
-            db.set_meta("checkpoint_open_ranges", "5").unwrap();
+            db.set_meta("last_indexed_date", "2024-01-15T10:00:00Z")
+                .unwrap();
         }
 
         // Verify checkpoint state is recoverable
@@ -2472,15 +2147,14 @@ mod tests {
             let last_commit = db.get_meta("last_indexed_commit").unwrap();
             assert_eq!(last_commit, Some("abc123def456".to_string()));
 
-            let open_ranges = db.get_meta("checkpoint_open_ranges").unwrap();
-            assert_eq!(open_ranges, Some("5".to_string()));
+            let last_date = db.get_meta("last_indexed_date").unwrap();
+            assert_eq!(last_date, Some("2024-01-15T10:00:00Z".to_string()));
         }
     }
 
     #[test]
-    fn test_incremental_vs_full_consistency() {
-        // Test that the database operations are consistent whether
-        // inserting incrementally or in bulk
+    fn test_upsert_batch_consistency() {
+        // Test that the database UPSERT operations work correctly
         let db_dir = tempdir().unwrap();
         let db_path = db_dir.path().join("test.db");
 
@@ -2492,8 +2166,8 @@ mod tests {
                 version_source: None,
                 first_commit_hash: "aaa111".to_string(),
                 first_commit_date: Utc.timestamp_opt(1700000000, 0).unwrap(),
-                last_commit_hash: "bbb222".to_string(),
-                last_commit_date: Utc.timestamp_opt(1700100000, 0).unwrap(),
+                last_commit_hash: "aaa111".to_string(),
+                last_commit_date: Utc.timestamp_opt(1700000000, 0).unwrap(),
                 attribute_path: "python311".to_string(),
                 description: Some("Python".to_string()),
                 license: Some(r#"["MIT"]"#.to_string()),
@@ -2511,8 +2185,8 @@ mod tests {
                 version_source: None,
                 first_commit_hash: "ccc333".to_string(),
                 first_commit_date: Utc.timestamp_opt(1700200000, 0).unwrap(),
-                last_commit_hash: "ddd444".to_string(),
-                last_commit_date: Utc.timestamp_opt(1700300000, 0).unwrap(),
+                last_commit_hash: "ccc333".to_string(),
+                last_commit_date: Utc.timestamp_opt(1700200000, 0).unwrap(),
                 attribute_path: "nodejs_20".to_string(),
                 description: Some("Node.js".to_string()),
                 license: Some(r#"["MIT"]"#.to_string()),
@@ -2525,11 +2199,11 @@ mod tests {
             },
         ];
 
-        // Insert as batch
+        // UPSERT as batch
         {
             let mut db = Database::open(&db_path).unwrap();
-            let inserted = db.insert_package_ranges_batch(&packages).unwrap();
-            assert_eq!(inserted, 2);
+            let upserted = db.upsert_packages_batch(&packages).unwrap();
+            assert_eq!(upserted, 2);
         }
 
         // Verify all packages are searchable
@@ -2556,7 +2230,7 @@ mod tests {
         {
             let mut db = Database::open(&db_path).unwrap();
 
-            // Insert some packages
+            // UPSERT some packages
             let pkg = PackageVersion {
                 id: 0,
                 name: "firefox".to_string(),
@@ -2576,7 +2250,7 @@ mod tests {
                 known_vulnerabilities: None,
                 store_paths: HashMap::new(),
             };
-            db.insert_package_ranges_batch(&[pkg]).unwrap();
+            db.upsert_packages_batch(&[pkg]).unwrap();
 
             // Save checkpoint (simulating interrupted state)
             db.set_meta("last_indexed_commit", "checkpoint123").unwrap();
@@ -2614,7 +2288,7 @@ mod tests {
                 known_vulnerabilities: None,
                 store_paths: HashMap::new(),
             };
-            db.insert_package_ranges_batch(&[pkg]).unwrap();
+            db.upsert_packages_batch(&[pkg]).unwrap();
 
             // Update checkpoint
             db.set_meta("last_indexed_commit", "final789").unwrap();
@@ -2828,29 +2502,11 @@ index abc123..def456 100644
 
         assert_eq!(aggregate.version_source, Some("unwrapped".to_string()));
 
-        // Test conversion to OpenRange preserves version_source
-        let open_range = OpenRange {
-            name: aggregate.name.clone(),
-            version: aggregate.version.clone(),
-            version_source: aggregate.version_source.clone(),
-            first_commit_hash: "def456".to_string(),
-            first_commit_date: Utc::now(),
-            attribute_path: aggregate.attribute_path.clone(),
-            description: aggregate.description.clone(),
-            license: None,
-            homepage: None,
-            maintainers: None,
-            platforms: None,
-            source_path: None,
-            known_vulnerabilities: None,
-            store_paths: HashMap::new(),
-        };
-
-        assert_eq!(open_range.version_source, Some("unwrapped".to_string()));
-
         // Test conversion to PackageVersion preserves version_source
-        let pkg_version = open_range.to_package_version("ghi789", Utc::now());
+        let pkg_version = aggregate.to_package_version("ghi789", Utc::now());
         assert_eq!(pkg_version.version_source, Some("unwrapped".to_string()));
+        assert_eq!(pkg_version.name, "neovim");
+        assert_eq!(pkg_version.version, "0.9.5");
     }
 
     #[test]

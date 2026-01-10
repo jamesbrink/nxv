@@ -225,7 +225,6 @@ fn get_backend_with_prompt(cli: &Cli) -> Result<backend::Backend> {
                 if input.is_empty() || input == "y" || input == "yes" {
                     // Run the update command
                     let update_args = cli::UpdateArgs {
-                        variant: cli::IndexVariant::Slim,
                         force: false,
                         manifest_url: None,
                         skip_verify: false,
@@ -474,16 +473,10 @@ fn cmd_update(cli: &Cli, args: &cli::UpdateArgs) -> Result<()> {
         }
     }
 
-    let full_history = args.variant == cli::IndexVariant::Full;
-
     if args.force {
         eprintln!("Forcing full re-download of index...");
     } else {
         eprintln!("Checking for updates...");
-    }
-
-    if full_history {
-        eprintln!("Requesting {} (complete version history)...", args.variant);
     }
 
     let status = perform_update(
@@ -494,7 +487,6 @@ fn cmd_update(cli: &Cli, args: &cli::UpdateArgs) -> Result<()> {
         args.skip_verify,
         args.public_key.as_deref(),
         Some(cli.api_timeout),
-        full_history,
     )?;
 
     match status {
@@ -1193,7 +1185,7 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
     eprintln!("Indexing complete!");
     eprintln!("  Commits processed: {}", result.commits_processed);
     eprintln!("  Total packages found: {}", result.packages_found);
-    eprintln!("  Version ranges created: {}", result.ranges_created);
+    eprintln!("  Packages upserted: {}", result.packages_upserted);
     eprintln!("  Unique package names: {}", result.unique_names);
 
     // Build and save bloom filter from current database state

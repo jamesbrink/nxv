@@ -1230,14 +1230,7 @@ impl Indexer {
                 ..Default::default()
             };
             match worker::WorkerPool::new(pool_config) {
-                Ok(pool) => {
-                    info!(
-                        target: "nxv::index",
-                        "Using parallel evaluation with {} workers",
-                        pool.worker_count()
-                    );
-                    Some(pool)
-                }
+                Ok(pool) => Some(pool),
                 Err(e) => {
                     warn!(
                         target: "nxv::index",
@@ -1480,6 +1473,7 @@ impl Indexer {
                 info!(
                     target: "nxv::index",
                     commit = %commit.short_hash,
+                    date = %commit.date.format("%Y-%m-%d"),
                     progress = %format!("{}/{}", commit_idx + 1, total_commits),
                     percent = progress_pct,
                     targets = target_list.len(),
@@ -2307,6 +2301,7 @@ fn process_range_worker(
                 target: "nxv::index",
                 range = %range.label,
                 commit = %commit.short_hash,
+                date = %commit.date.format("%Y-%m-%d"),
                 progress = %format!("{}/{}", commit_idx + 1, total_commits),
                 percent = progress_pct,
                 targets = target_attrs.len(),

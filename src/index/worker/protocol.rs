@@ -65,7 +65,12 @@ pub enum WorkResponse {
 
     /// Worker requests restart (memory threshold exceeded).
     #[serde(rename = "restart")]
-    Restart,
+    Restart {
+        /// Current memory usage in MiB
+        memory_mib: usize,
+        /// Memory threshold in MiB
+        threshold_mib: usize,
+    },
 }
 
 impl WorkRequest {
@@ -118,6 +123,14 @@ impl WorkResponse {
     pub fn error(message: impl Into<String>) -> Self {
         Self::Error {
             message: message.into(),
+        }
+    }
+
+    /// Create a restart response with memory info.
+    pub fn restart(memory_mib: usize, threshold_mib: usize) -> Self {
+        Self::Restart {
+            memory_mib,
+            threshold_mib,
         }
     }
 
@@ -195,9 +208,18 @@ mod tests {
 
     #[test]
     fn test_work_response_restart() {
-        let resp = WorkResponse::Restart;
+        let resp = WorkResponse::restart(4500, 6144);
         let line = resp.to_line();
         let parsed = WorkResponse::from_line(&line).unwrap();
-        assert!(matches!(parsed, WorkResponse::Restart));
+        match parsed {
+            WorkResponse::Restart {
+                memory_mib,
+                threshold_mib,
+            } => {
+                assert_eq!(memory_mib, 4500);
+                assert_eq!(threshold_mib, 6144);
+            }
+            _ => panic!("Expected Restart variant"),
+        }
     }
 }

@@ -151,9 +151,12 @@ impl Worker {
                     self.id, message
                 ));
             }
-            Some(WorkResponse::Restart) => {
+            Some(WorkResponse::Restart {
+                memory_mib,
+                threshold_mib,
+            }) => {
                 // Worker requested restart - respawn and retry
-                self.handle_restart()?;
+                self.handle_restart_with_memory(Some(memory_mib), Some(threshold_mib))?;
                 return self.extract(system, repo_path, attrs);
             }
             Some(WorkResponse::Ready) | Some(WorkResponse::PositionsResult { .. }) => {
@@ -184,9 +187,12 @@ impl Worker {
                 self.jobs_completed += 1;
                 Ok(packages)
             }
-            Some(WorkResponse::Restart) => {
+            Some(WorkResponse::Restart {
+                memory_mib,
+                threshold_mib,
+            }) => {
                 self.jobs_completed += 1;
-                self.handle_restart()?;
+                self.handle_restart_with_memory(Some(memory_mib), Some(threshold_mib))?;
                 Ok(packages)
             }
             Some(other) => Err(NxvError::Worker(format!(
@@ -227,9 +233,12 @@ impl Worker {
                     self.id, message
                 ));
             }
-            Some(WorkResponse::Restart) => {
+            Some(WorkResponse::Restart {
+                memory_mib,
+                threshold_mib,
+            }) => {
                 // Worker requested restart - respawn and retry
-                self.handle_restart()?;
+                self.handle_restart_with_memory(Some(memory_mib), Some(threshold_mib))?;
                 return self.extract_positions(system, repo_path);
             }
             Some(WorkResponse::Ready) => {
@@ -269,9 +278,12 @@ impl Worker {
                 self.jobs_completed += 1;
                 Ok(positions)
             }
-            Some(WorkResponse::Restart) => {
+            Some(WorkResponse::Restart {
+                memory_mib,
+                threshold_mib,
+            }) => {
                 self.jobs_completed += 1;
-                self.handle_restart()?;
+                self.handle_restart_with_memory(Some(memory_mib), Some(threshold_mib))?;
                 Ok(positions)
             }
             Some(other) => Err(NxvError::Worker(format!(
@@ -296,8 +308,11 @@ impl Worker {
         if let Some(proc) = self.proc.as_mut() {
             match proc.recv() {
                 Ok(Some(WorkResponse::Ready)) => {}
-                Ok(Some(WorkResponse::Restart)) => {
-                    let _ = self.handle_restart();
+                Ok(Some(WorkResponse::Restart {
+                    memory_mib,
+                    threshold_mib,
+                })) => {
+                    let _ = self.handle_restart_with_memory(Some(memory_mib), Some(threshold_mib));
                 }
                 _ => {
                     // Worker died or sent unexpected response - mark for respawn
@@ -314,8 +329,11 @@ impl Worker {
         if let Some(proc) = self.proc.as_mut() {
             match proc.recv() {
                 Ok(Some(WorkResponse::Ready)) => {}
-                Ok(Some(WorkResponse::Restart)) => {
-                    let _ = self.handle_restart();
+                Ok(Some(WorkResponse::Restart {
+                    memory_mib,
+                    threshold_mib,
+                })) => {
+                    let _ = self.handle_restart_with_memory(Some(memory_mib), Some(threshold_mib));
                 }
                 _ => {
                     // Worker died or sent unexpected response - mark for respawn
@@ -328,12 +346,34 @@ impl Worker {
 
     /// Handle worker restart request.
     fn handle_restart(&mut self) -> Result<()> {
-        tracing::info!(
-            worker_id = self.id,
-            restart_count = self.restarts + 1,
-            jobs_completed = self.jobs_completed,
-            "Worker requesting restart (memory threshold exceeded)"
-        );
+        self.handle_restart_with_memory(None, None)
+    }
+
+    /// Handle worker restart request with memory info.
+    fn handle_restart_with_memory(
+        &mut self,
+        memory_mib: Option<usize>,
+        threshold_mib: Option<usize>,
+    ) -> Result<()> {
+        if let (Some(mem), Some(thresh)) = (memory_mib, threshold_mib) {
+            tracing::debug!(
+                worker_id = self.id,
+                cycle = self.restarts + 1,
+                jobs_completed = self.jobs_completed,
+                memory_mib = mem,
+                threshold_mib = thresh,
+                "Worker recycling ({}MiB / {}MiB threshold)",
+                mem,
+                thresh
+            );
+        } else {
+            tracing::debug!(
+                worker_id = self.id,
+                cycle = self.restarts + 1,
+                jobs_completed = self.jobs_completed,
+                "Worker recycling for memory management"
+            );
+        }
         if let Some(mut proc) = self.proc.take() {
             proc.stop(Duration::from_secs(5))?;
         }
@@ -416,6 +456,13 @@ pub struct WorkerPool {
 impl WorkerPool {
     /// Create a new worker pool and spawn worker processes.
     pub fn new(config: WorkerPoolConfig) -> Result<Self> {
+        tracing::info!(
+            workers = config.worker_count,
+            memory_limit_mib = config.max_memory_mib,
+            total_memory_budget_gib = (config.worker_count * config.max_memory_mib) / 1024,
+            "Initializing worker pool"
+        );
+
         let mut workers = Vec::with_capacity(config.worker_count);
         for id in 0..config.worker_count {
             // Each worker gets its own eval store to avoid SQLite contention
@@ -438,6 +485,8 @@ impl WorkerPool {
                 NxvError::Worker(format!("Worker {} failed to initialize: {}", id, e))
             })?;
         }
+
+        tracing::info!(workers = config.worker_count, "All workers ready");
 
         Ok(Self {
             workers,

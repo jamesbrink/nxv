@@ -7,8 +7,13 @@
 
 use super::proc::Proc;
 use crate::error::{NxvError, Result};
+use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::sync::Once;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Counter for unique worker IDs (used for stderr logging threads).
+static WORKER_STDERR_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Configuration for worker processes.
 #[derive(Debug, Clone)]
@@ -90,7 +95,7 @@ pub fn spawn_worker(config: &WorkerConfig) -> Result<Proc> {
     // Set up IPC pipes
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::inherit()); // Worker errors go to parent's stderr
+    cmd.stderr(Stdio::piped()); // Capture stderr to log through tracing
 
     // Environment variables for Nix
     cmd.env("GC_DONT_GC", "1");
@@ -113,11 +118,57 @@ pub fn spawn_worker(config: &WorkerConfig) -> Result<Proc> {
         "accept-flake-config = true\nallow-import-from-derivation = true\nauto-optimise-store = false",
     );
 
-    let child = cmd
+    let mut child = cmd
         .spawn()
         .map_err(|e| NxvError::Worker(format!("Failed to spawn worker: {}", e)))?;
 
+    // Spawn a thread to read and log stderr
+    if let Some(stderr) = child.stderr.take() {
+        let worker_id = WORKER_STDERR_COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::thread::Builder::new()
+            .name(format!("worker-{}-stderr", worker_id))
+            .spawn(move || {
+                log_worker_stderr(worker_id, stderr);
+            })
+            .ok(); // Ignore thread spawn errors - stderr logging is best-effort
+    }
+
     Proc::from_child(child)
+}
+
+/// Log worker stderr output through tracing.
+///
+/// Filters and categorizes nix output:
+/// - `trace:` lines → TRACE level
+/// - `warning:` lines → DEBUG level (these are nix evaluation warnings, not errors)
+/// - `error:` lines → WARN level
+/// - Other lines → DEBUG level
+fn log_worker_stderr(worker_id: usize, stderr: std::process::ChildStderr) {
+    let reader = BufReader::new(stderr);
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => break, // Pipe closed
+        };
+
+        // Skip empty lines
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        // Categorize and log based on content
+        let line_lower = line.to_lowercase();
+        if line_lower.starts_with("trace:") {
+            tracing::trace!(worker_id, "{}", line);
+        } else if line_lower.contains("warning:") || line_lower.starts_with("warning:") {
+            // Nix evaluation warnings - log at debug since they're usually informational
+            tracing::debug!(worker_id, nix_warning = true, "{}", line);
+        } else if line_lower.contains("error:") || line_lower.starts_with("error:") {
+            tracing::warn!(worker_id, nix_error = true, "{}", line);
+        } else {
+            tracing::debug!(worker_id, "{}", line);
+        }
+    }
 }
 
 /// Stack size for collector threads (64 MiB).

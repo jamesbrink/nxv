@@ -120,8 +120,10 @@ fn worker_loop(reader: &mut LineReader, writer: &mut LineWriter) -> io::Result<(
 
                 // Check memory after extraction
                 if is_over_memory_threshold() {
-                    // Request restart
-                    writer.write_line(&WorkResponse::Restart.to_line())?;
+                    // Request restart with memory info
+                    let current = get_memory_usage_mib();
+                    let threshold = MAX_MEMORY_MIB.load(std::sync::atomic::Ordering::Relaxed);
+                    writer.write_line(&WorkResponse::restart(current, threshold).to_line())?;
                     return Ok(());
                 }
 
@@ -136,8 +138,10 @@ fn worker_loop(reader: &mut LineReader, writer: &mut LineWriter) -> io::Result<(
 
                 // Check memory after extraction (positions can be memory-intensive)
                 if is_over_memory_threshold() {
-                    // Request restart
-                    writer.write_line(&WorkResponse::Restart.to_line())?;
+                    // Request restart with memory info
+                    let current = get_memory_usage_mib();
+                    let threshold = MAX_MEMORY_MIB.load(std::sync::atomic::Ordering::Relaxed);
+                    writer.write_line(&WorkResponse::restart(current, threshold).to_line())?;
                     return Ok(());
                 }
 

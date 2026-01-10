@@ -15,12 +15,16 @@ use std::sync::Once;
 pub struct WorkerConfig {
     /// Memory threshold (MiB) before worker requests restart.
     pub max_memory_mib: usize,
+    /// Custom eval store path (for parallel range isolation).
+    /// If None, uses the default TEMP_EVAL_STORE_PATH.
+    pub eval_store_path: Option<String>,
 }
 
 impl Default for WorkerConfig {
     fn default() -> Self {
         Self {
             max_memory_mib: 6 * 1024, // 6 GiB
+            eval_store_path: None,
         }
     }
 }
@@ -90,6 +94,11 @@ pub fn spawn_worker(config: &WorkerConfig) -> Result<Proc> {
 
     // Environment variables for Nix
     cmd.env("GC_DONT_GC", "1");
+
+    // Pass custom eval store path if specified (for parallel range isolation)
+    if let Some(ref store_path) = config.eval_store_path {
+        cmd.env("NXV_EVAL_STORE_PATH", store_path);
+    }
 
     // macOS-specific: disable fork safety check for Objective-C
     #[cfg(target_os = "macos")]

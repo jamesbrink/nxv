@@ -91,14 +91,69 @@ impl YearRange {
 
     /// Create a range for a specific month (useful for testing).
     #[cfg(test)]
+    #[allow(dead_code)]
     pub fn new_month(year: u16, month: u8) -> Self {
-        let next_month = if month == 12 { 1 } else { month + 1 };
-        let next_year = if month == 12 { year + 1 } else { year };
+        Self::new_months(year, month, year, month)
+    }
+
+    /// Create a range spanning from start month to end month (inclusive).
+    ///
+    /// # Arguments
+    /// * `start_year` - Starting year
+    /// * `start_month` - Starting month (1-12, inclusive)
+    /// * `end_year` - Ending year
+    /// * `end_month` - Ending month (1-12, inclusive)
+    pub fn new_months(start_year: u16, start_month: u8, end_year: u16, end_month: u8) -> Self {
+        // Calculate the month after end_month for exclusive end date
+        let (next_year, next_month) = if end_month == 12 {
+            (end_year + 1, 1)
+        } else {
+            (end_year, end_month + 1)
+        };
+
+        // Create a descriptive label
+        let label = if start_year == end_year && start_month == end_month {
+            format!("{}-{:02}", start_year, start_month)
+        } else if start_year == end_year {
+            format!("{}-{:02}-{:02}", start_year, start_month, end_month)
+        } else {
+            format!(
+                "{}-{:02}_{}-{:02}",
+                start_year, start_month, end_year, end_month
+            )
+        };
+
         Self {
-            label: format!("{}-{:02}", year, month),
-            since: format!("{}-{:02}-01", year, month),
+            label,
+            since: format!("{}-{:02}-01", start_year, start_month),
             until: format!("{}-{:02}-01", next_year, next_month),
         }
+    }
+
+    /// Create a half-year range (H1 = Jan-Jun, H2 = Jul-Dec).
+    pub fn new_half(year: u16, half: u8) -> Self {
+        let (start_month, end_month) = match half {
+            1 => (1, 6),
+            2 => (7, 12),
+            _ => (1, 6), // Default to H1
+        };
+        let mut range = Self::new_months(year, start_month, year, end_month);
+        range.label = format!("{}-H{}", year, half);
+        range
+    }
+
+    /// Create a quarter range (Q1-Q4).
+    pub fn new_quarter(year: u16, quarter: u8) -> Self {
+        let (start_month, end_month) = match quarter {
+            1 => (1, 3),
+            2 => (4, 6),
+            3 => (7, 9),
+            4 => (10, 12),
+            _ => (1, 3), // Default to Q1
+        };
+        let mut range = Self::new_months(year, start_month, year, end_month);
+        range.label = format!("{}-Q{}", year, quarter);
+        range
     }
 
     /// Parse a range specification string.
@@ -109,6 +164,8 @@ impl YearRange {
     /// - `"2017-2020"` - Year range (2017 through 2019, exclusive end)
     /// - `"2017,2018,2019"` - Multiple individual years
     /// - `"2017-2019,2020-2024"` - Multiple ranges
+    /// - `"2018-H1,2018-H2"` - Half-year ranges (H1=Jan-Jun, H2=Jul-Dec)
+    /// - `"2018-Q1,2018-Q2"` - Quarter ranges (Q1-Q4)
     ///
     /// # Arguments
     /// * `spec` - The range specification string
@@ -132,7 +189,9 @@ impl YearRange {
                 return Ok(vec![Self::new(year, year + 1)]);
             }
             if count == 0 {
-                return Err(NxvError::Config("Range count must be greater than 0".into()));
+                return Err(NxvError::Config(
+                    "Range count must be greater than 0".into(),
+                ));
             }
             let total_years = (max_year - min_year) as usize;
             if count > total_years {
@@ -164,14 +223,40 @@ impl YearRange {
                 continue;
             }
 
-            if let Some((start_str, end_str)) = part.split_once('-') {
+            if let Some((year_str, suffix)) = part.split_once('-') {
+                let year_str = year_str.trim();
+                let suffix = suffix.trim().to_uppercase();
+
+                // Check for half-year format: "2018-H1" or "2018-H2"
+                if suffix == "H1" || suffix == "H2" {
+                    let year: u16 = year_str
+                        .parse()
+                        .map_err(|_| NxvError::Config(format!("Invalid year: {}", year_str)))?;
+                    let half: u8 = suffix.chars().last().unwrap().to_digit(10).unwrap() as u8;
+                    ranges.push(Self::new_half(year, half));
+                    continue;
+                }
+
+                // Check for quarter format: "2018-Q1" through "2018-Q4"
+                if suffix.starts_with('Q')
+                    && suffix.len() == 2
+                    && let Some(q) = suffix.chars().last().and_then(|c| c.to_digit(10))
+                    && (1..=4).contains(&q)
+                {
+                    let year: u16 = year_str
+                        .parse()
+                        .map_err(|_| NxvError::Config(format!("Invalid year: {}", year_str)))?;
+                    ranges.push(Self::new_quarter(year, q as u8));
+                    continue;
+                }
+
                 // Range format: "2017-2020"
-                let start: u16 = start_str.trim().parse().map_err(|_| {
-                    NxvError::Config(format!("Invalid year: {}", start_str))
-                })?;
-                let end: u16 = end_str.trim().parse().map_err(|_| {
-                    NxvError::Config(format!("Invalid year: {}", end_str))
-                })?;
+                let start: u16 = year_str
+                    .parse()
+                    .map_err(|_| NxvError::Config(format!("Invalid year: {}", year_str)))?;
+                let end: u16 = suffix
+                    .parse()
+                    .map_err(|_| NxvError::Config(format!("Invalid year or suffix: {}", suffix)))?;
                 if start >= end {
                     return Err(NxvError::Config(format!(
                         "Invalid range: {} must be less than {}",
@@ -181,9 +266,9 @@ impl YearRange {
                 ranges.push(Self::new(start, end + 1)); // +1 because end is inclusive in input
             } else {
                 // Single year: "2017"
-                let year: u16 = part.parse().map_err(|_| {
-                    NxvError::Config(format!("Invalid year: {}", part))
-                })?;
+                let year: u16 = part
+                    .parse()
+                    .map_err(|_| NxvError::Config(format!("Invalid year: {}", part)))?;
                 ranges.push(Self::new(year, year + 1));
             }
         }
@@ -742,8 +827,8 @@ impl Indexer {
         // Clean up orphaned worktrees from previous crashed runs
         repo.prune_worktrees()?;
 
-        // Clean up temp eval store from previous runs (silently at startup)
-        let temp_store_freed = gc::cleanup_temp_eval_store();
+        // Clean up all eval stores from previous runs (save result to report later)
+        let temp_store_freed = gc::cleanup_all_eval_stores();
 
         // Check store health before starting
         if !gc::verify_store() {
@@ -796,12 +881,10 @@ impl Indexer {
         );
 
         // Report temp store cleanup after "Found X commits"
-        if let Some(bytes) = temp_store_freed
-            && bytes > 0
-        {
+        if temp_store_freed > 0 {
             eprintln!(
-                "Cleaned up temp eval store ({:.1} MB freed)",
-                bytes as f64 / 1_000_000.0
+                "Cleaned up eval stores ({:.1} MB freed)",
+                temp_store_freed as f64 / 1_000_000.0
             );
         }
 
@@ -840,8 +923,8 @@ impl Indexer {
         // Clean up orphaned worktrees from previous crashed runs
         repo.prune_worktrees()?;
 
-        // Clean up temp eval store from previous runs (silently at startup)
-        let temp_store_freed = gc::cleanup_temp_eval_store();
+        // Clean up all eval stores from previous runs (save result to report later)
+        let temp_store_freed = gc::cleanup_all_eval_stores();
 
         // Check store health before starting
         if !gc::verify_store() {
@@ -946,12 +1029,10 @@ impl Indexer {
                         eprintln!("Found {} new commits to process", commits.len());
 
                         // Report temp store cleanup after "Found X commits"
-                        if let Some(bytes) = temp_store_freed
-                            && bytes > 0
-                        {
+                        if temp_store_freed > 0 {
                             eprintln!(
-                                "Cleaned up temp eval store ({:.1} MB freed)",
-                                bytes as f64 / 1_000_000.0
+                                "Cleaned up eval stores ({:.1} MB freed)",
+                                temp_store_freed as f64 / 1_000_000.0
                             );
                         }
 
@@ -1008,7 +1089,9 @@ impl Indexer {
 
         // Validate we have ranges to process
         if ranges.is_empty() {
-            return Err(NxvError::Config("No ranges specified for parallel indexing".into()));
+            return Err(NxvError::Config(
+                "No ranges specified for parallel indexing".into(),
+            ));
         }
 
         let repo = NixpkgsRepo::open(nixpkgs_path)?;
@@ -1016,14 +1099,12 @@ impl Indexer {
         // Clean up orphaned worktrees from previous crashed runs
         repo.prune_worktrees()?;
 
-        // Clean up temp eval store from previous runs
-        let temp_store_freed = gc::cleanup_temp_eval_store();
-        if let Some(bytes) = temp_store_freed
-            && bytes > 0
-        {
+        // Clean up all eval stores from previous runs
+        let temp_store_freed = gc::cleanup_all_eval_stores();
+        if temp_store_freed > 0 {
             eprintln!(
                 "Cleaned up temp eval store ({:.1} MB freed)",
-                bytes as f64 / 1_000_000.0
+                temp_store_freed as f64 / 1_000_000.0
             );
         }
 
@@ -1052,10 +1133,7 @@ impl Indexer {
         // Open database with mutex for thread-safe access
         let db = Arc::new(Mutex::new(Database::open(db_path)?));
 
-        eprintln!(
-            "Starting parallel indexing with {} ranges:",
-            ranges.len()
-        );
+        eprintln!("Starting parallel indexing with {} ranges:", ranges.len());
         for range in &ranges {
             eprintln!("  - {} ({} to {})", range.label, range.since, range.until);
         }
@@ -1102,10 +1180,7 @@ impl Indexer {
 
         // Limit the number of concurrent range workers
         let effective_max_workers = max_range_workers.max(1).min(range_items.len());
-        eprintln!(
-            "Using {} concurrent range workers",
-            effective_max_workers
-        );
+        eprintln!("Using {} concurrent range workers", effective_max_workers);
 
         // Process ranges in batches to limit concurrency
         for batch in range_items.chunks(effective_max_workers) {
@@ -1731,13 +1806,13 @@ impl Indexer {
                         pb.set_message("Running garbage collection...".to_string());
                     }
 
-                    // Clean up temp eval store to free disk space
-                    if let Some(bytes) = gc::cleanup_temp_eval_store()
-                        && bytes > 0
+                    // Clean up all eval stores to free disk space
+                    let bytes = gc::cleanup_all_eval_stores();
+                    if bytes > 0
                         && let Some(ref pb) = progress_bar
                     {
                         pb.println(format!(
-                            "Cleaned up temp eval store ({:.1} MB freed)",
+                            "Cleaned up eval stores ({:.1} MB freed)",
                             bytes as f64 / 1_000_000.0
                         ));
                     }
@@ -1800,12 +1875,11 @@ impl Indexer {
 
         // WorktreeSession auto-cleans on drop - no need to restore HEAD
 
-        // Clean up temp eval store on exit
-        if let Some(bytes) = gc::cleanup_temp_eval_store()
-            && bytes > 0
-        {
+        // Clean up all eval stores on exit
+        let bytes = gc::cleanup_all_eval_stores();
+        if bytes > 0 {
             eprintln!(
-                "Cleaned up temp eval store ({:.1} MB freed)",
+                "Cleaned up eval stores ({:.1} MB freed)",
                 bytes as f64 / 1_000_000.0
             );
         }
@@ -2177,9 +2251,9 @@ fn process_range_worker(
     }
 
     // Get first commit for worktree creation
-    let first_commit = commits.first().ok_or_else(|| {
-        NxvError::Git(git2::Error::from_str("No commits to process in range"))
-    })?;
+    let first_commit = commits
+        .first()
+        .ok_or_else(|| NxvError::Git(git2::Error::from_str("No commits to process in range")))?;
 
     // Create dedicated worktree for this range
     let worktree = WorktreeSession::new(&repo, &first_commit.hash)?;
@@ -2191,10 +2265,13 @@ fn process_range_worker(
     let worker_count = config.worker_count.unwrap_or(systems.len());
 
     // Create worker pool for parallel system evaluation (if enabled)
+    // Each range gets its own eval store to avoid SQLite contention
     let worker_pool = if use_parallel && worker_count > 1 {
+        let eval_store_path = format!("{}-{}", gc::TEMP_EVAL_STORE_PATH, range.label);
         let pool_config = worker::WorkerPoolConfig {
             worker_count,
             max_memory_mib: config.max_memory_mib,
+            eval_store_path: Some(eval_store_path),
             ..Default::default()
         };
         worker::WorkerPool::new(pool_config).ok()
@@ -2214,6 +2291,8 @@ fn process_range_worker(
 
     // Process commits
     for (commit_idx, commit) in commits.iter().enumerate() {
+        let commit_start = std::time::Instant::now();
+
         // Check for shutdown
         if shutdown.load(Ordering::SeqCst) {
             result.was_interrupted = true;
@@ -2221,7 +2300,8 @@ fn process_range_worker(
             // Save checkpoint and flush pending
             if !pending_upserts.is_empty() {
                 let mut db_guard = db.lock().unwrap();
-                result.packages_upserted += db_guard.upsert_packages_batch(&pending_upserts)? as u64;
+                result.packages_upserted +=
+                    db_guard.upsert_packages_batch(&pending_upserts)? as u64;
             }
             if let Some(last) = commits.get(commit_idx.saturating_sub(1)) {
                 let db_guard = db.lock().unwrap();
@@ -2235,25 +2315,40 @@ fn process_range_worker(
         }
 
         // Checkout commit
+        let checkout_start = std::time::Instant::now();
         worktree.checkout(&commit.hash)?;
+        let checkout_ms = checkout_start.elapsed().as_millis();
+        tracing::trace!(
+            range = %range.label,
+            commit = %&commit.hash[..8],
+            checkout_ms = checkout_ms,
+            "git checkout"
+        );
 
         // Get changed files for this commit
         let changed_paths = repo.get_commit_changed_paths(&commit.hash)?;
 
         // Check if we need to rebuild the file-to-attribute map
         let need_refresh = file_attr_map.is_empty() || should_refresh_file_map(&changed_paths);
-        if need_refresh
-            && mapping_commit != commit.hash
-            && let Ok(new_map) = build_file_attr_map(worktree_path, systems, worker_pool.as_ref())
-        {
-            file_attr_map = new_map;
-            mapping_commit = commit.hash.clone();
+        if need_refresh && mapping_commit != commit.hash {
+            let map_start = std::time::Instant::now();
+            if let Ok(new_map) = build_file_attr_map(worktree_path, systems, worker_pool.as_ref()) {
+                let map_ms = map_start.elapsed().as_millis();
+                tracing::trace!(
+                    range = %range.label,
+                    commit = %&commit.hash[..8],
+                    map_entries = new_map.len(),
+                    map_ms = map_ms,
+                    "rebuilt file-attr map"
+                );
+                file_attr_map = new_map;
+                mapping_commit = commit.hash.clone();
+            }
         }
 
         // Determine target attributes
         let mut target_attr_paths: HashSet<String> = HashSet::new();
-        let all_attrs: Option<&Vec<String>> =
-            file_attr_map.get("pkgs/top-level/all-packages.nix");
+        let all_attrs: Option<&Vec<String>> = file_attr_map.get("pkgs/top-level/all-packages.nix");
 
         // Check for infrastructure files and parse their diffs
         let mut needs_full_extraction = commit_idx == 0; // First commit needs full extraction
@@ -2278,9 +2373,7 @@ fn process_range_worker(
         }
 
         // Full extraction for first commit or large infrastructure diff
-        if needs_full_extraction
-            && let Some(all_attrs_list) = all_attrs
-        {
+        if needs_full_extraction && let Some(all_attrs_list) = all_attrs {
             for attr in all_attrs_list {
                 target_attr_paths.insert(attr.clone());
             }
@@ -2307,23 +2400,32 @@ fn process_range_worker(
         }
 
         // Extract packages for all systems
-        let extraction_results: Vec<(String, std::result::Result<Vec<extractor::PackageInfo>, NxvError>)> =
-            if let Some(ref pool) = worker_pool {
-                let results = pool.extract_parallel(worktree_path, systems, &target_attrs);
-                systems.iter().cloned().zip(results).collect()
-            } else {
-                systems
-                    .iter()
-                    .map(|system| {
-                        let result = extractor::extract_packages_for_attrs(
-                            worktree_path,
-                            system,
-                            &target_attrs,
-                        );
-                        (system.clone(), result)
-                    })
-                    .collect()
-            };
+        let extract_start = std::time::Instant::now();
+        let extraction_results: Vec<(
+            String,
+            std::result::Result<Vec<extractor::PackageInfo>, NxvError>,
+        )> = if let Some(ref pool) = worker_pool {
+            let results = pool.extract_parallel(worktree_path, systems, &target_attrs);
+            systems.iter().cloned().zip(results).collect()
+        } else {
+            systems
+                .iter()
+                .map(|system| {
+                    let result =
+                        extractor::extract_packages_for_attrs(worktree_path, system, &target_attrs);
+                    (system.clone(), result)
+                })
+                .collect()
+        };
+        let extract_ms = extract_start.elapsed().as_millis();
+        tracing::trace!(
+            range = %range.label,
+            commit = %&commit.hash[..8],
+            target_attrs = target_attrs.len(),
+            systems = systems.len(),
+            extract_ms = extract_ms,
+            "nix extraction"
+        );
 
         // Aggregate results across systems
         let mut aggregates: HashMap<String, PackageAggregate> = HashMap::new();
@@ -2363,11 +2465,34 @@ fn process_range_worker(
 
         // Checkpoint periodically
         if (commit_idx + 1) % config.checkpoint_interval == 0 {
+            let upsert_start = std::time::Instant::now();
             let mut db_guard = db.lock().unwrap();
-            result.packages_upserted += db_guard.upsert_packages_batch(&pending_upserts)? as u64;
+            let upsert_count = db_guard.upsert_packages_batch(&pending_upserts)?;
+            result.packages_upserted += upsert_count as u64;
             db_guard.set_range_checkpoint(&range.label, &commit.hash)?;
             db_guard.checkpoint()?;
+            let upsert_ms = upsert_start.elapsed().as_millis();
+            drop(db_guard);
+            tracing::debug!(
+                range = %range.label,
+                commit = %&commit.hash[..8],
+                packages = upsert_count,
+                upsert_ms = upsert_ms,
+                "checkpoint upsert"
+            );
             pending_upserts.clear();
+        }
+
+        // Log overall commit timing for slow commits
+        let commit_ms = commit_start.elapsed().as_millis();
+        if commit_ms > 5000 {
+            tracing::debug!(
+                range = %range.label,
+                commit = %&commit.hash[..8],
+                total_ms = commit_ms,
+                packages = aggregates.len(),
+                "slow commit"
+            );
         }
     }
 
@@ -3285,6 +3410,68 @@ index abc123..def456 100644
     fn test_year_range_parse_invalid_format() {
         let result = YearRange::parse_ranges("abc", 2017, 2025);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_year_range_parse_half_year() {
+        let ranges = YearRange::parse_ranges("2018-H1,2018-H2", 2017, 2025).unwrap();
+        assert_eq!(ranges.len(), 2);
+
+        // H1 = Jan-Jun
+        assert_eq!(ranges[0].label, "2018-H1");
+        assert_eq!(ranges[0].since, "2018-01-01");
+        assert_eq!(ranges[0].until, "2018-07-01");
+
+        // H2 = Jul-Dec
+        assert_eq!(ranges[1].label, "2018-H2");
+        assert_eq!(ranges[1].since, "2018-07-01");
+        assert_eq!(ranges[1].until, "2019-01-01");
+    }
+
+    #[test]
+    fn test_year_range_parse_quarter() {
+        let ranges =
+            YearRange::parse_ranges("2019-Q1,2019-Q2,2019-Q3,2019-Q4", 2017, 2025).unwrap();
+        assert_eq!(ranges.len(), 4);
+
+        // Q1 = Jan-Mar
+        assert_eq!(ranges[0].label, "2019-Q1");
+        assert_eq!(ranges[0].since, "2019-01-01");
+        assert_eq!(ranges[0].until, "2019-04-01");
+
+        // Q2 = Apr-Jun
+        assert_eq!(ranges[1].label, "2019-Q2");
+        assert_eq!(ranges[1].since, "2019-04-01");
+        assert_eq!(ranges[1].until, "2019-07-01");
+
+        // Q3 = Jul-Sep
+        assert_eq!(ranges[2].label, "2019-Q3");
+        assert_eq!(ranges[2].since, "2019-07-01");
+        assert_eq!(ranges[2].until, "2019-10-01");
+
+        // Q4 = Oct-Dec
+        assert_eq!(ranges[3].label, "2019-Q4");
+        assert_eq!(ranges[3].since, "2019-10-01");
+        assert_eq!(ranges[3].until, "2020-01-01");
+    }
+
+    #[test]
+    fn test_year_range_parse_mixed() {
+        // Mix of years, halves, and quarters
+        let ranges = YearRange::parse_ranges("2017,2018-H1,2019-Q1", 2017, 2025).unwrap();
+        assert_eq!(ranges.len(), 3);
+        assert_eq!(ranges[0].label, "2017");
+        assert_eq!(ranges[1].label, "2018-H1");
+        assert_eq!(ranges[2].label, "2019-Q1");
+    }
+
+    #[test]
+    fn test_year_range_parse_lowercase_suffix() {
+        // Should accept lowercase h1/q1
+        let ranges = YearRange::parse_ranges("2018-h1,2019-q2", 2017, 2025).unwrap();
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(ranges[0].label, "2018-H1");
+        assert_eq!(ranges[1].label, "2019-Q2");
     }
 
     // =============================================

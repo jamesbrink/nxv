@@ -498,10 +498,7 @@ impl Database {
     #[cfg(feature = "indexer")]
     #[instrument(skip(self))]
     pub fn set_range_checkpoint(&self, range_label: &str, commit_hash: &str) -> Result<()> {
-        self.set_meta(
-            &format!("last_indexed_commit_{}", range_label),
-            commit_hash,
-        )?;
+        self.set_meta(&format!("last_indexed_commit_{}", range_label), commit_hash)?;
         self.set_meta(
             &format!("last_indexed_date_{}", range_label),
             &chrono::Utc::now().to_rfc3339(),

@@ -174,8 +174,12 @@ impl NixEvaluator {
             // - Allows evaluation to work (store backend is functional)
             // - Writes derivations to temp store instead of real /nix/store
             // - Doesn't inherit daemon's auto-optimise-store setting (fresh store)
-            let store_uri =
-                CString::new(format!("local?root={}", super::gc::TEMP_EVAL_STORE_PATH)).unwrap();
+            //
+            // For parallel range indexing, each range can specify its own store path via
+            // NXV_EVAL_STORE_PATH to avoid SQLite contention between workers.
+            let eval_store_path = std::env::var("NXV_EVAL_STORE_PATH")
+                .unwrap_or_else(|_| super::gc::TEMP_EVAL_STORE_PATH.to_string());
+            let store_uri = CString::new(format!("local?root={}", eval_store_path)).unwrap();
             let store = nix_store_open(ctx, store_uri.as_ptr(), ptr::null_mut());
             if store.is_null() {
                 let msg = get_error_message(ctx).unwrap_or_else(|| "Failed to open store".into());

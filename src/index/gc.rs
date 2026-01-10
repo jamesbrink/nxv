@@ -227,6 +227,63 @@ pub const TEMP_EVAL_STORE_PATH: &str = "/private/tmp/nxv-eval-store";
 #[cfg(not(target_os = "macos"))]
 pub const TEMP_EVAL_STORE_PATH: &str = "/tmp/nxv-eval-store";
 
+/// Clean up a single eval store directory.
+///
+/// Returns the number of bytes freed if cleanup succeeded, None if failed.
+fn cleanup_single_eval_store(store_path: &std::path::Path) -> Option<u64> {
+    if !store_path.exists() {
+        return Some(0);
+    }
+
+    // Get size before cleanup for reporting
+    let size_before = get_dir_size(store_path).unwrap_or(0);
+
+    // Nix store paths are read-only, so we need to make them writable first
+    // Use chmod -R u+w to make all files writable before deletion
+    let chmod_result = Command::new("chmod")
+        .args(["-R", "u+w"])
+        .arg(store_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    if let Err(e) = chmod_result {
+        warn!(error = %e, path = ?store_path, "Failed to chmod eval store");
+    }
+
+    match std::fs::remove_dir_all(store_path) {
+        Ok(()) => Some(size_before),
+        Err(e) => {
+            warn!(
+                error = %e,
+                path = ?store_path,
+                "Failed to clean up eval store"
+            );
+            None
+        }
+    }
+}
+
+/// Get the size of a directory in bytes.
+fn get_dir_size(path: &std::path::Path) -> Option<u64> {
+    if !path.exists() {
+        return Some(0);
+    }
+
+    let path_str = path.to_str()?;
+
+    // Use du to get directory size
+    let output = Command::new("du").args(["-sb", path_str]).output().ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout.split_whitespace().next()?.parse().ok()
+}
+
 /// Clean up the temporary eval store directory.
 ///
 /// This removes all files in the temp store to free disk space.
@@ -236,42 +293,57 @@ pub const TEMP_EVAL_STORE_PATH: &str = "/tmp/nxv-eval-store";
 /// or use chmod -R to fix permissions before deletion.
 ///
 /// Returns the number of bytes freed if cleanup succeeded, None if failed or nothing to clean.
+#[allow(dead_code)]
 pub fn cleanup_temp_eval_store() -> Option<u64> {
     use std::path::Path;
 
     let store_path = Path::new(TEMP_EVAL_STORE_PATH);
+    cleanup_single_eval_store(store_path)
+}
 
-    if !store_path.exists() {
-        return Some(0);
-    }
+/// Clean up all temporary eval stores (including per-worker stores from parallel indexing).
+///
+/// This cleans both the default store and any worker-specific stores matching
+/// the pattern `nxv-eval-store-*` in the temp directory.
+///
+/// Returns the total number of bytes freed across all stores.
+pub fn cleanup_all_eval_stores() -> u64 {
+    use std::path::Path;
 
-    // Get size before cleanup for reporting
-    let size_before = get_temp_eval_store_size().unwrap_or(0);
+    // Determine the temp directory based on platform
+    #[cfg(target_os = "macos")]
+    let temp_dir = Path::new("/private/tmp");
 
-    // Nix store paths are read-only, so we need to make them writable first
-    // Use chmod -R u+w to make all files writable before deletion
-    let chmod_result = Command::new("chmod")
-        .args(["-R", "u+w", TEMP_EVAL_STORE_PATH])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    #[cfg(not(target_os = "macos"))]
+    let temp_dir = Path::new("/tmp");
 
-    if let Err(e) = chmod_result {
-        warn!(error = %e, "Failed to chmod temp eval store");
-    }
+    let mut total_freed = 0u64;
+    let mut stores_cleaned = 0u32;
 
-    match std::fs::remove_dir_all(store_path) {
-        Ok(()) => Some(size_before),
-        Err(e) => {
-            warn!(
-                error = %e,
-                path = TEMP_EVAL_STORE_PATH,
-                "Failed to clean up temp eval store"
-            );
-            None
+    // Find all directories matching the pattern nxv-eval-store*
+    if let Ok(entries) = std::fs::read_dir(temp_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                && name.starts_with("nxv-eval-store")
+                && path.is_dir()
+                && let Some(freed) = cleanup_single_eval_store(&path)
+            {
+                total_freed += freed;
+                stores_cleaned += 1;
+            }
         }
     }
+
+    if stores_cleaned > 0 {
+        info!(
+            stores_cleaned,
+            bytes_freed = total_freed,
+            "Cleaned up eval stores"
+        );
+    }
+
+    total_freed
 }
 
 /// Get the size of the temp eval store in bytes.
@@ -280,25 +352,7 @@ pub fn cleanup_temp_eval_store() -> Option<u64> {
 #[allow(dead_code)]
 pub fn get_temp_eval_store_size() -> Option<u64> {
     use std::path::Path;
-
-    let store_path = Path::new(TEMP_EVAL_STORE_PATH);
-
-    if !store_path.exists() {
-        return Some(0);
-    }
-
-    // Use du to get directory size
-    let output = Command::new("du")
-        .args(["-sb", TEMP_EVAL_STORE_PATH])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout.split_whitespace().next()?.parse().ok()
+    get_dir_size(Path::new(TEMP_EVAL_STORE_PATH))
 }
 
 #[cfg(test)]
@@ -360,5 +414,31 @@ mod tests {
 
         #[cfg(not(target_os = "macos"))]
         assert_eq!(TEMP_EVAL_STORE_PATH, "/tmp/nxv-eval-store");
+    }
+
+    #[test]
+    fn test_cleanup_all_eval_stores() {
+        // This test just verifies the function doesn't panic
+        // It will clean up any existing eval stores from previous runs
+        let freed = cleanup_all_eval_stores();
+        // Returns 0 if no stores exist, or bytes freed if they did
+        // (u64 is always >= 0, so we just verify the function completes)
+        let _ = freed;
+    }
+
+    #[test]
+    fn test_get_dir_size_nonexistent() {
+        use std::path::Path;
+        // Non-existent directory should return Some(0)
+        let result = get_dir_size(Path::new("/nonexistent/path/12345"));
+        assert_eq!(result, Some(0));
+    }
+
+    #[test]
+    fn test_cleanup_single_eval_store_nonexistent() {
+        use std::path::Path;
+        // Cleaning non-existent directory should return Some(0)
+        let result = cleanup_single_eval_store(Path::new("/nonexistent/path/12345"));
+        assert_eq!(result, Some(0));
     }
 }

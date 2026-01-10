@@ -1188,11 +1188,19 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
             args.max_range_workers.min(ranges.len())
         );
         for range in &ranges {
-            eprintln!("  Range: {} ({} to {})", range.label, range.since, range.until);
+            eprintln!(
+                "  Range: {} ({} to {})",
+                range.label, range.since, range.until
+            );
         }
         eprintln!();
 
-        indexer.index_parallel_ranges(&nixpkgs_path, &cli.db_path, ranges, args.max_range_workers)?
+        indexer.index_parallel_ranges(
+            &nixpkgs_path,
+            &cli.db_path,
+            ranges,
+            args.max_range_workers,
+        )?
     } else if args.full {
         indexer.index_full(&nixpkgs_path, &cli.db_path)?
     } else {

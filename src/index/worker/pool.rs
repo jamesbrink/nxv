@@ -25,6 +25,8 @@ pub struct WorkerPoolConfig {
     pub max_memory_mib: usize,
     /// Timeout for worker operations.
     pub timeout: Duration,
+    /// Custom eval store path (for parallel range isolation).
+    pub eval_store_path: Option<String>,
 }
 
 impl Default for WorkerPoolConfig {
@@ -33,6 +35,7 @@ impl Default for WorkerPoolConfig {
             worker_count: 4,
             max_memory_mib: 6 * 1024,          // 6 GiB
             timeout: Duration::from_secs(300), // 5 minutes
+            eval_store_path: None,
         }
     }
 }
@@ -413,13 +416,18 @@ pub struct WorkerPool {
 impl WorkerPool {
     /// Create a new worker pool and spawn worker processes.
     pub fn new(config: WorkerPoolConfig) -> Result<Self> {
-        let worker_config = WorkerConfig {
-            max_memory_mib: config.max_memory_mib,
-        };
-
         let mut workers = Vec::with_capacity(config.worker_count);
         for id in 0..config.worker_count {
-            let worker = Worker::new(id, worker_config.clone())?;
+            // Each worker gets its own eval store to avoid SQLite contention
+            let worker_store_path = config
+                .eval_store_path
+                .as_ref()
+                .map(|base| format!("{}-w{}", base, id));
+            let worker_config = WorkerConfig {
+                max_memory_mib: config.max_memory_mib,
+                eval_store_path: worker_store_path,
+            };
+            let worker = Worker::new(id, worker_config)?;
             workers.push(Mutex::new(worker));
         }
 
@@ -611,6 +619,69 @@ mod tests {
         let config = WorkerPoolConfig::default();
         assert_eq!(config.worker_count, 4);
         assert_eq!(config.max_memory_mib, 6 * 1024);
+        assert!(config.eval_store_path.is_none());
+    }
+
+    #[test]
+    fn test_worker_pool_config_with_eval_store() {
+        let config = WorkerPoolConfig {
+            worker_count: 4,
+            eval_store_path: Some("/tmp/nxv-eval-store-2018-H1".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            config.eval_store_path,
+            Some("/tmp/nxv-eval-store-2018-H1".to_string())
+        );
+    }
+
+    #[test]
+    fn test_per_worker_store_path_generation() {
+        // Verify that each worker gets a unique store path
+        let base_path = "/tmp/nxv-eval-store-2018-H1";
+        let config = WorkerPoolConfig {
+            worker_count: 4,
+            eval_store_path: Some(base_path.to_string()),
+            ..Default::default()
+        };
+
+        // Simulate the path generation logic from WorkerPool::new
+        let mut paths = Vec::new();
+        for id in 0..config.worker_count {
+            let worker_store_path = config
+                .eval_store_path
+                .as_ref()
+                .map(|base| format!("{}-w{}", base, id));
+            paths.push(worker_store_path);
+        }
+
+        // Each worker should have a unique path
+        assert_eq!(paths[0], Some("/tmp/nxv-eval-store-2018-H1-w0".to_string()));
+        assert_eq!(paths[1], Some("/tmp/nxv-eval-store-2018-H1-w1".to_string()));
+        assert_eq!(paths[2], Some("/tmp/nxv-eval-store-2018-H1-w2".to_string()));
+        assert_eq!(paths[3], Some("/tmp/nxv-eval-store-2018-H1-w3".to_string()));
+
+        // All paths should be unique
+        let unique_paths: std::collections::HashSet<_> = paths.iter().collect();
+        assert_eq!(unique_paths.len(), 4);
+    }
+
+    #[test]
+    fn test_per_worker_store_path_none_when_no_base() {
+        // When no eval_store_path is set, workers should get None
+        let config = WorkerPoolConfig {
+            worker_count: 2,
+            eval_store_path: None,
+            ..Default::default()
+        };
+
+        for id in 0..config.worker_count {
+            let worker_store_path = config
+                .eval_store_path
+                .as_ref()
+                .map(|base| format!("{}-w{}", base, id));
+            assert!(worker_store_path.is_none());
+        }
     }
 
     // Note: Full pool tests require the binary to support --internal-worker.

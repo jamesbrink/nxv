@@ -447,9 +447,8 @@ impl NixpkgsRepo {
         })?;
 
         // Try with --first-parent first (faster, avoids duplicate processing)
-        let mut commits = self.get_commits_since_touching_paths_inner(
-            since_hash, paths, since, until, true,
-        )?;
+        let mut commits =
+            self.get_commits_since_touching_paths_inner(since_hash, paths, since, until, true)?;
 
         // If no commits found with --first-parent and date filters are present,
         // fall back to all commits (handles gaps like September 2020)
@@ -459,9 +458,8 @@ impl NixpkgsRepo {
                 "No commits found with --first-parent for range {:?} to {:?}, falling back to all commits",
                 since, until
             );
-            commits = self.get_commits_since_touching_paths_inner(
-                since_hash, paths, since, until, false,
-            )?;
+            commits = self
+                .get_commits_since_touching_paths_inner(since_hash, paths, since, until, false)?;
         }
 
         // Detect and fill monthly gaps within the result
@@ -486,7 +484,11 @@ impl NixpkgsRepo {
                     };
 
                     match self.get_commits_since_touching_paths_inner(
-                        since_hash, paths, Some(&gap_since), Some(&gap_until), false,
+                        since_hash,
+                        paths,
+                        Some(&gap_since),
+                        Some(&gap_until),
+                        false,
                     ) {
                         Ok(month_commits) => {
                             tracing::info!(
@@ -513,7 +515,8 @@ impl NixpkgsRepo {
                 // Merge gap commits into the main list
                 if !gap_commits.is_empty() {
                     let original_count = commits.len();
-                    let mut seen: HashSet<String> = commits.iter().map(|c| c.hash.clone()).collect();
+                    let mut seen: HashSet<String> =
+                        commits.iter().map(|c| c.hash.clone()).collect();
                     for commit in gap_commits {
                         if seen.insert(commit.hash.clone()) {
                             commits.push(commit);

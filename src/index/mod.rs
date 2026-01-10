@@ -1764,7 +1764,10 @@ fn extract_attr_from_path(path: &str) -> Option<String> {
     }
 
     // Skip infrastructure directories
-    if NON_PACKAGE_PREFIXES.iter().any(|prefix| path.starts_with(prefix)) {
+    if NON_PACKAGE_PREFIXES
+        .iter()
+        .any(|prefix| path.starts_with(prefix))
+    {
         return None;
     }
 
@@ -1788,7 +1791,10 @@ fn extract_attr_from_path(path: &str) -> Option<String> {
         parts[parts.len() - 2]
     } else {
         // pkgs/.../something.nix → something
-        parts.last().map(|f| f.trim_end_matches(".nix")).unwrap_or("")
+        parts
+            .last()
+            .map(|f| f.trim_end_matches(".nix"))
+            .unwrap_or("")
     };
 
     if potential_name.is_empty() {
@@ -2768,14 +2774,8 @@ mod tests {
             extract_attr_from_path("pkgs/top-level/all-packages.nix"),
             None
         );
-        assert_eq!(
-            extract_attr_from_path("pkgs/test/simple/default.nix"),
-            None
-        );
-        assert_eq!(
-            extract_attr_from_path("pkgs/pkgs-lib/formats.nix"),
-            None
-        );
+        assert_eq!(extract_attr_from_path("pkgs/test/simple/default.nix"), None);
+        assert_eq!(extract_attr_from_path("pkgs/pkgs-lib/formats.nix"), None);
     }
 
     #[test]
@@ -2784,7 +2784,10 @@ mod tests {
         assert_eq!(extract_attr_from_path("lib/something.nix"), None);
         assert_eq!(extract_attr_from_path("nixos/modules/foo.nix"), None);
         // Non-.nix files
-        assert_eq!(extract_attr_from_path("pkgs/tools/misc/hello/README.md"), None);
+        assert_eq!(
+            extract_attr_from_path("pkgs/tools/misc/hello/README.md"),
+            None
+        );
         // Empty/malformed
         assert_eq!(extract_attr_from_path(""), None);
         assert_eq!(extract_attr_from_path("pkgs/"), None);

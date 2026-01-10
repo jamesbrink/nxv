@@ -573,12 +573,7 @@ fn test_verbose_info_level() {
 
     // Default (no flags) should show progress messages like "Searching for..."
     nxv()
-        .args([
-            "--db-path",
-            db_path.to_str().unwrap(),
-            "search",
-            "python",
-        ])
+        .args(["--db-path", db_path.to_str().unwrap(), "search", "python"])
         .assert()
         .success()
         .stderr(predicate::str::contains("Searching for"));

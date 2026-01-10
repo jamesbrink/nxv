@@ -1289,8 +1289,10 @@ mod tests {
         let db = Database::open(&db_path).unwrap();
 
         // Set only regular checkpoint
-        db.set_meta("last_indexed_commit", "regular_commit_abc").unwrap();
-        db.set_meta("last_indexed_date", "2020-06-15T12:00:00Z").unwrap();
+        db.set_meta("last_indexed_commit", "regular_commit_abc")
+            .unwrap();
+        db.set_meta("last_indexed_date", "2020-06-15T12:00:00Z")
+            .unwrap();
 
         let latest = db.get_latest_checkpoint().unwrap().unwrap();
         assert_eq!(latest, "regular_commit_abc");
@@ -1306,7 +1308,8 @@ mod tests {
         // Set only range checkpoints (no regular)
         db.set_range_checkpoint("2017", "commit_2017").unwrap();
         // Manually set older date for 2017
-        db.set_meta("last_indexed_date_2017", "2020-01-01T00:00:00Z").unwrap();
+        db.set_meta("last_indexed_date_2017", "2020-01-01T00:00:00Z")
+            .unwrap();
 
         db.set_range_checkpoint("2018", "commit_2018").unwrap();
         // 2018 is set by set_range_checkpoint to current time (newer)
@@ -1324,11 +1327,14 @@ mod tests {
         let db = Database::open(&db_path).unwrap();
 
         // Set regular checkpoint with older date
-        db.set_meta("last_indexed_commit", "old_regular_commit").unwrap();
-        db.set_meta("last_indexed_date", "2020-01-01T00:00:00Z").unwrap();
+        db.set_meta("last_indexed_commit", "old_regular_commit")
+            .unwrap();
+        db.set_meta("last_indexed_date", "2020-01-01T00:00:00Z")
+            .unwrap();
 
         // Set range checkpoint (newer - set_range_checkpoint uses current time)
-        db.set_range_checkpoint("2020-H2", "newer_range_commit").unwrap();
+        db.set_range_checkpoint("2020-H2", "newer_range_commit")
+            .unwrap();
 
         // Should return the range commit (newer)
         let latest = db.get_latest_checkpoint().unwrap().unwrap();
@@ -1344,11 +1350,14 @@ mod tests {
 
         // Set range checkpoint with older date
         db.set_range_checkpoint("2017", "old_range_commit").unwrap();
-        db.set_meta("last_indexed_date_2017", "2020-01-01T00:00:00Z").unwrap();
+        db.set_meta("last_indexed_date_2017", "2020-01-01T00:00:00Z")
+            .unwrap();
 
         // Set regular checkpoint with newer date
-        db.set_meta("last_indexed_commit", "newer_regular_commit").unwrap();
-        db.set_meta("last_indexed_date", "2025-12-31T23:59:59Z").unwrap();
+        db.set_meta("last_indexed_commit", "newer_regular_commit")
+            .unwrap();
+        db.set_meta("last_indexed_date", "2025-12-31T23:59:59Z")
+            .unwrap();
 
         // Should return the regular commit (newer)
         let latest = db.get_latest_checkpoint().unwrap().unwrap();
@@ -1363,17 +1372,25 @@ mod tests {
         let db = Database::open(&db_path).unwrap();
 
         // Set multiple range checkpoints with explicit dates
-        db.set_meta("last_indexed_commit_2017", "commit_2017").unwrap();
-        db.set_meta("last_indexed_date_2017", "2020-01-01T00:00:00Z").unwrap();
+        db.set_meta("last_indexed_commit_2017", "commit_2017")
+            .unwrap();
+        db.set_meta("last_indexed_date_2017", "2020-01-01T00:00:00Z")
+            .unwrap();
 
-        db.set_meta("last_indexed_commit_2018", "commit_2018").unwrap();
-        db.set_meta("last_indexed_date_2018", "2020-03-01T00:00:00Z").unwrap();
+        db.set_meta("last_indexed_commit_2018", "commit_2018")
+            .unwrap();
+        db.set_meta("last_indexed_date_2018", "2020-03-01T00:00:00Z")
+            .unwrap();
 
-        db.set_meta("last_indexed_commit_2019", "commit_2019").unwrap();
-        db.set_meta("last_indexed_date_2019", "2020-02-01T00:00:00Z").unwrap();
+        db.set_meta("last_indexed_commit_2019", "commit_2019")
+            .unwrap();
+        db.set_meta("last_indexed_date_2019", "2020-02-01T00:00:00Z")
+            .unwrap();
 
-        db.set_meta("last_indexed_commit_2020", "commit_2020").unwrap();
-        db.set_meta("last_indexed_date_2020", "2020-04-01T00:00:00Z").unwrap();
+        db.set_meta("last_indexed_commit_2020", "commit_2020")
+            .unwrap();
+        db.set_meta("last_indexed_date_2020", "2020-04-01T00:00:00Z")
+            .unwrap();
 
         // 2020 has the latest date
         let latest = db.get_latest_checkpoint().unwrap().unwrap();
@@ -1408,20 +1425,28 @@ mod tests {
         let db = Database::open(&db_path).unwrap();
 
         // 2017 completed
-        db.set_meta("last_indexed_commit_2017", "2017_final").unwrap();
-        db.set_meta("last_indexed_date_2017", "2025-01-10T10:00:00Z").unwrap();
+        db.set_meta("last_indexed_commit_2017", "2017_final")
+            .unwrap();
+        db.set_meta("last_indexed_date_2017", "2025-01-10T10:00:00Z")
+            .unwrap();
 
         // 2018 crashed partway (checkpoint exists but earlier)
-        db.set_meta("last_indexed_commit_2018", "2018_partial").unwrap();
-        db.set_meta("last_indexed_date_2018", "2025-01-10T09:00:00Z").unwrap();
+        db.set_meta("last_indexed_commit_2018", "2018_partial")
+            .unwrap();
+        db.set_meta("last_indexed_date_2018", "2025-01-10T09:00:00Z")
+            .unwrap();
 
         // 2019 completed
-        db.set_meta("last_indexed_commit_2019", "2019_final").unwrap();
-        db.set_meta("last_indexed_date_2019", "2025-01-10T11:00:00Z").unwrap();
+        db.set_meta("last_indexed_commit_2019", "2019_final")
+            .unwrap();
+        db.set_meta("last_indexed_date_2019", "2025-01-10T11:00:00Z")
+            .unwrap();
 
         // 2020 completed last (newest)
-        db.set_meta("last_indexed_commit_2020", "2020_final").unwrap();
-        db.set_meta("last_indexed_date_2020", "2025-01-10T12:00:00Z").unwrap();
+        db.set_meta("last_indexed_commit_2020", "2020_final")
+            .unwrap();
+        db.set_meta("last_indexed_date_2020", "2025-01-10T12:00:00Z")
+            .unwrap();
 
         // get_latest_checkpoint returns the most recent by date
         // This is correct behavior - it's NOT responsible for gap detection

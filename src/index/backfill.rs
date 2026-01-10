@@ -13,9 +13,9 @@
 
 use crate::db::Database;
 use crate::error::Result;
+use crate::index::ProgressTracker;
 use crate::index::extractor;
 use crate::index::git::NixpkgsRepo;
-use crate::index::ProgressTracker;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;

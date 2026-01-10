@@ -7,6 +7,7 @@ This script validates:
 2. Commit hash accuracy: Do our commit hashes match NixHub's?
 3. Store path accuracy: Do our store paths match NixHub's?
 4. Binary cache availability: Are the store paths available in cache.nixos.org?
+5. Index gaps: Are there any months with missing or low record counts?
 
 Usage:
     python scripts/validate_against_nixhub.py [options]
@@ -16,6 +17,7 @@ Options:
     --packages LIST     Comma-separated package names to validate (default: sample set)
     --sample N          Validate N random packages from database (default: 0)
     --check-cache       Also check if store paths exist in cache.nixos.org
+    --check-gaps        Check for gaps in indexed data by month
     --output FILE       Output JSON report to file
     --verbose           Show detailed output
     --before DATE       Only consider versions before this date (YYYY-MM-DD)
@@ -29,6 +31,9 @@ Options:
 Examples:
     # Validate specific packages
     python scripts/validate_against_nixhub.py --packages thunderbird,firefox,chromium
+
+    # Check for gaps in indexed data
+    python scripts/validate_against_nixhub.py --check-gaps
 
     # Validate 50 random packages
     python scripts/validate_against_nixhub.py --sample 50
@@ -166,6 +171,33 @@ PACKAGE_CATEGORIES = {
     "editors": ["vim", "neovim", "emacs", "vscode"],
     "devops": ["docker", "podman", "kubernetes", "nginx"],
 }
+
+
+@dataclass
+class MonthlyCount:
+    """Record count for a specific month."""
+
+    month: str  # YYYY-MM format
+    record_count: int
+    unique_packages: int
+
+
+@dataclass
+class GapAnalysis:
+    """Analysis of gaps in indexed data."""
+
+    total_months: int = 0
+    months_with_data: int = 0
+    months_with_gaps: int = 0  # 0 records
+    months_with_low_data: int = 0  # < threshold records
+    gap_months: list[str] = field(default_factory=list)  # YYYY-MM
+    low_data_months: list[tuple[str, int]] = field(
+        default_factory=list
+    )  # (YYYY-MM, count)
+    monthly_counts: list[MonthlyCount] = field(default_factory=list)
+    first_month: str = ""
+    last_month: str = ""
+    avg_records_per_month: float = 0.0
 
 
 @dataclass
@@ -361,6 +393,183 @@ def verify_version_at_commit(
         return None
     except Exception:
         return None
+
+
+def detect_index_gaps(
+    db_path: Path,
+    low_threshold: int = 100,
+    verbose: bool = False,
+) -> GapAnalysis:
+    """Detect gaps in indexed data by analyzing monthly record counts.
+
+    A gap is defined as a month with 0 records when surrounded by months with data.
+    Low data months have fewer than `low_threshold` records.
+
+    This helps identify issues like the July-October 2020 gap caused by
+    the --first-parent bug in git log.
+
+    Args:
+        db_path: Path to the nxv SQLite database
+        low_threshold: Minimum records to not be flagged as "low data"
+        verbose: Print detailed output
+
+    Returns:
+        GapAnalysis with detected gaps and monthly statistics
+    """
+    analysis = GapAnalysis()
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    # Get monthly record counts
+    cursor.execute("""
+        SELECT
+            strftime('%Y-%m', datetime(first_commit_date, 'unixepoch')) as month,
+            COUNT(*) as record_count,
+            COUNT(DISTINCT attribute_path) as unique_packages
+        FROM package_versions
+        WHERE first_commit_date IS NOT NULL
+        GROUP BY month
+        ORDER BY month
+    """)
+
+    monthly_data = {}
+    for row in cursor.fetchall():
+        month, count, unique = row
+        if month:
+            monthly_data[month] = MonthlyCount(
+                month=month,
+                record_count=count,
+                unique_packages=unique,
+            )
+
+    conn.close()
+
+    if not monthly_data:
+        return analysis
+
+    # Find date range
+    all_months = sorted(monthly_data.keys())
+    analysis.first_month = all_months[0]
+    analysis.last_month = all_months[-1]
+
+    # Generate all months in range to find gaps
+    from datetime import datetime
+
+    def add_months(dt: datetime, months: int) -> datetime:
+        """Add months to a datetime without dateutil dependency."""
+        month = dt.month - 1 + months
+        year = dt.year + month // 12
+        month = month % 12 + 1
+        return dt.replace(year=year, month=month)
+
+    start_date = datetime.strptime(analysis.first_month, "%Y-%m")
+    end_date = datetime.strptime(analysis.last_month, "%Y-%m")
+
+    current = start_date
+    expected_months = []
+    while current <= end_date:
+        expected_months.append(current.strftime("%Y-%m"))
+        current = add_months(current, 1)
+
+    analysis.total_months = len(expected_months)
+    analysis.months_with_data = len(monthly_data)
+
+    # Find gaps and low data months
+    total_records = 0
+    for month in expected_months:
+        if month in monthly_data:
+            mc = monthly_data[month]
+            analysis.monthly_counts.append(mc)
+            total_records += mc.record_count
+
+            if mc.record_count < low_threshold:
+                analysis.months_with_low_data += 1
+                analysis.low_data_months.append((month, mc.record_count))
+        else:
+            # Complete gap - no data for this month
+            analysis.months_with_gaps += 1
+            analysis.gap_months.append(month)
+            analysis.monthly_counts.append(
+                MonthlyCount(
+                    month=month,
+                    record_count=0,
+                    unique_packages=0,
+                )
+            )
+
+    if analysis.months_with_data > 0:
+        analysis.avg_records_per_month = total_records / analysis.months_with_data
+
+    if verbose:
+        print("\nGap Analysis:")
+        print(f"  Date range: {analysis.first_month} to {analysis.last_month}")
+        print(f"  Total months: {analysis.total_months}")
+        print(f"  Months with data: {analysis.months_with_data}")
+        print(f"  Avg records/month: {analysis.avg_records_per_month:.0f}")
+        if analysis.gap_months:
+            print(f"  GAPS (0 records): {analysis.gap_months}")
+        if analysis.low_data_months:
+            print(f"  Low data months (<{low_threshold}): {analysis.low_data_months}")
+
+    return analysis
+
+
+def print_gap_report(analysis: GapAnalysis):
+    """Print a detailed gap analysis report."""
+    print("\n" + "=" * 70)
+    print("INDEX GAP ANALYSIS")
+    print("=" * 70)
+
+    print(f"\nDate range: {analysis.first_month} to {analysis.last_month}")
+    print(f"Total months in range: {analysis.total_months}")
+    print(f"Months with data: {analysis.months_with_data}")
+    print(f"Average records per month: {analysis.avg_records_per_month:.0f}")
+
+    if analysis.gap_months:
+        print(f"\n[CRITICAL] Found {len(analysis.gap_months)} month(s) with NO DATA:")
+        for month in analysis.gap_months:
+            print(f"  - {month}")
+        print(
+            "\n  This indicates missing index data. Re-run indexing for these periods."
+        )
+        print(
+            "  Example fix: Clear checkpoint and re-index the affected half-year range"
+        )
+    else:
+        print("\n[OK] No complete gaps found")
+
+    if analysis.low_data_months:
+        print(
+            f"\n[WARNING] Found {len(analysis.low_data_months)} month(s) with low record counts:"
+        )
+        for month, count in sorted(analysis.low_data_months):
+            print(f"  - {month}: {count} records")
+    else:
+        print("\n[OK] No low-data months found")
+
+    # Show monthly distribution for context
+    print("\n" + "-" * 70)
+    print("MONTHLY RECORD DISTRIBUTION:")
+    print("-" * 70)
+
+    # Group by year
+    years: dict[str, list[MonthlyCount]] = {}
+    for mc in analysis.monthly_counts:
+        year = mc.month[:4]
+        if year not in years:
+            years[year] = []
+        years[year].append(mc)
+
+    for year in sorted(years.keys()):
+        total = sum(mc.record_count for mc in years[year])
+        print(f"\n{year} ({total:,} total):")
+        for mc in years[year]:
+            bar_len = min(50, mc.record_count // 100)
+            bar = "█" * bar_len
+            flag = " *** GAP ***" if mc.record_count == 0 else ""
+            flag = " (low)" if mc.record_count > 0 and mc.record_count < 100 else flag
+            print(f"  {mc.month}: {mc.record_count:>6,} {bar}{flag}")
 
 
 def get_nxv_versions(
@@ -793,6 +1002,11 @@ def main():
         help="Check if store paths exist in cache.nixos.org",
     )
     parser.add_argument(
+        "--check-gaps",
+        action="store_true",
+        help="Check for gaps in indexed data by month",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=None,
@@ -883,6 +1097,25 @@ def main():
         packages = DEFAULT_PACKAGES
 
     print(f"Database: {args.db}")
+
+    # Run gap check if requested (can be standalone or combined with package validation)
+    if args.check_gaps:
+        print("\nRunning gap analysis...")
+        gap_analysis = detect_index_gaps(args.db, verbose=args.verbose)
+        print_gap_report(gap_analysis)
+
+        # If only doing gap check, exit here
+        if (
+            not args.packages
+            and args.sample == 0
+            and not args.edge_cases
+            and not args.comprehensive
+        ):
+            # Exit with error code if gaps found
+            if gap_analysis.gap_months:
+                sys.exit(1)
+            sys.exit(0)
+
     print(f"Packages to validate: {len(packages)}")
     if args.before:
         print(f"Date filter: before {args.before}")

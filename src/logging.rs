@@ -167,12 +167,10 @@ impl LogConfig {
 
     /// Preset for indexer mode.
     ///
-    /// Like server but enables span timing (FmtSpan::CLOSE).
+    /// Same as default - span timing is disabled to keep logs clean.
+    /// Use DEBUG level or `--span-events` to see span timing.
     pub fn for_indexer() -> Self {
-        Self {
-            span_events: true,
-            ..Default::default()
-        }
+        Self::default()
     }
 
     /// Set the log level.
@@ -509,7 +507,8 @@ mod tests {
     #[test]
     fn test_log_config_for_indexer() {
         let config = LogConfig::for_indexer();
-        assert!(config.span_events);
+        // Span events disabled by default to keep logs clean
+        assert!(!config.span_events);
     }
 
     #[test]

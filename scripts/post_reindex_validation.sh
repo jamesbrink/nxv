@@ -186,9 +186,32 @@ if [[ $POST_2023_COUNT -lt 100000 ]]; then
 fi
 echo ""
 
-# Test 5: NixHub validation
+# Test 5: Index Gap Detection
 echo "=========================================="
-echo "5. NixHub Comparison"
+echo "5. Index Gap Detection"
+echo "=========================================="
+echo ""
+
+echo -e "${BLUE}Checking for gaps in monthly record counts...${NC}"
+echo ""
+
+# Run gap detection and capture exit code
+set +e
+python3 "${SCRIPT_DIR}/validate_against_nixhub.py" --db "$DB_PATH" --check-gaps
+GAP_EXIT=$?
+set -e
+
+if [[ $GAP_EXIT -ne 0 ]]; then
+    echo -e "${RED}CRITICAL: Gap detection found missing months!${NC}"
+    echo "  This may indicate commits were skipped during indexing."
+    echo "  Review the output above and consider re-indexing affected periods."
+    FAILED=1
+fi
+echo ""
+
+# Test 6: NixHub validation
+echo "=========================================="
+echo "6. NixHub Comparison"
 echo "=========================================="
 echo ""
 
@@ -211,9 +234,9 @@ fi
 
 run_validation "NixHub comparison" "$VALIDATION_ARGS" "nixhub_validation.json"
 
-# Test 6: Critical packages spot check
+# Test 7: Critical packages spot check
 echo "=========================================="
-echo "6. Critical Packages Spot Check"
+echo "7. Critical Packages Spot Check"
 echo "=========================================="
 echo ""
 
@@ -234,9 +257,9 @@ for pkg in ${CRITICAL_PACKAGES//,/ }; do
 done
 echo ""
 
-# Test 7: Pre vs Post July 2023 comparison
+# Test 8: Pre vs Post July 2023 comparison
 echo "=========================================="
-echo "7. Pre vs Post July 2023 Comparison"
+echo "8. Pre vs Post July 2023 Comparison"
 echo "=========================================="
 echo ""
 

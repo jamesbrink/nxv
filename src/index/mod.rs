@@ -701,8 +701,17 @@ impl Indexer {
         // Clean up orphaned worktrees from previous crashed runs
         repo.prune_worktrees()?;
 
-        // Clean up all eval stores from previous runs (save result to report later)
+        // Clean up all eval stores from previous runs
+        info!(target: "nxv::index", "Cleaning up temporary eval stores from previous runs...");
         let temp_store_freed = gc::cleanup_all_eval_stores();
+        if temp_store_freed > 0 {
+            let freed_mb = temp_store_freed as f64 / 1024.0 / 1024.0;
+            info!(
+                target: "nxv::index",
+                freed_mb = format!("{:.1}", freed_mb),
+                "Freed space from temporary eval stores"
+            );
+        }
 
         // Check store health before starting
         if !gc::verify_store() {
@@ -798,8 +807,17 @@ impl Indexer {
         // Clean up orphaned worktrees from previous crashed runs
         repo.prune_worktrees()?;
 
-        // Clean up all eval stores from previous runs (save result to report later)
+        // Clean up all eval stores from previous runs
+        info!(target: "nxv::index", "Cleaning up temporary eval stores from previous runs...");
         let temp_store_freed = gc::cleanup_all_eval_stores();
+        if temp_store_freed > 0 {
+            let freed_mb = temp_store_freed as f64 / 1024.0 / 1024.0;
+            info!(
+                target: "nxv::index",
+                freed_mb = format!("{:.1}", freed_mb),
+                "Freed space from temporary eval stores"
+            );
+        }
 
         // Check store health before starting
         if !gc::verify_store() {
@@ -977,12 +995,14 @@ impl Indexer {
         repo.prune_worktrees()?;
 
         // Clean up all eval stores from previous runs
+        info!(target: "nxv::index", "Cleaning up temporary eval stores from previous runs...");
         let temp_store_freed = gc::cleanup_all_eval_stores();
         if temp_store_freed > 0 {
+            let freed_mb = temp_store_freed as f64 / 1024.0 / 1024.0;
             info!(
                 target: "nxv::index",
-                "Cleaned up temp eval store ({:.1} MB freed)",
-                temp_store_freed as f64 / 1_000_000.0
+                freed_mb = format!("{:.1}", freed_mb),
+                "Freed space from temporary eval stores"
             );
         }
 
@@ -1263,6 +1283,14 @@ impl Indexer {
                 }
             };
 
+        // Log start of indexing
+        info!(
+            target: "nxv::index",
+            total_commits = total_commits,
+            first_commit = %first_commit.short_hash,
+            "Starting commit processing"
+        );
+
         // Process commits sequentially
         for (commit_idx, commit) in commits.iter().enumerate() {
             // Check for shutdown
@@ -1451,10 +1479,28 @@ impl Indexer {
             let mut target_list: Vec<String> = target_attr_paths.into_iter().collect();
             target_list.sort();
 
+            // Log progress at INFO level periodically (every 50 commits or at milestones)
+            let progress_pct = ((commit_idx + 1) as f64 / total_commits as f64 * 100.0) as u32;
+            if commit_idx == 0
+                || (commit_idx + 1) % 50 == 0
+                || commit_idx + 1 == total_commits
+                || progress_pct.is_multiple_of(10)
+                    && progress_pct != ((commit_idx) as f64 / total_commits as f64 * 100.0) as u32
+            {
+                info!(
+                    target: "nxv::index",
+                    commit = %commit.short_hash,
+                    progress = %format!("{}/{}", commit_idx + 1, total_commits),
+                    percent = progress_pct,
+                    targets = target_list.len(),
+                    "Processing commit"
+                );
+            }
+
             debug!(
                 commit = %commit.short_hash,
                 target_count = target_list.len(),
-                "Processing commit"
+                "Processing commit details"
             );
 
             // Trace: show which files triggered extraction and target attrs
@@ -2035,7 +2081,8 @@ fn process_range_worker(
     }
 
     // Log progress for this range
-    let mut progress = ProgressTracker::new(total_commits as u64, &format!("Range {}", range.label));
+    let mut progress =
+        ProgressTracker::new(total_commits as u64, &format!("Range {}", range.label));
     if resume_from.is_some() {
         info!(target: "nxv::index", "Range {}: resuming ({} commits)", range.label, total_commits);
     } else {
@@ -2179,6 +2226,25 @@ fn process_range_worker(
         }
 
         let target_attrs: Vec<String> = target_attr_paths.into_iter().collect();
+
+        // Log progress at INFO level periodically (every 50 commits or at milestones)
+        let progress_pct = ((commit_idx + 1) as f64 / total_commits as f64 * 100.0) as u32;
+        if commit_idx == 0
+            || (commit_idx + 1) % 50 == 0
+            || commit_idx + 1 == total_commits
+            || progress_pct.is_multiple_of(10)
+                && progress_pct != ((commit_idx) as f64 / total_commits as f64 * 100.0) as u32
+        {
+            info!(
+                target: "nxv::index",
+                range = %range.label,
+                commit = %commit.short_hash,
+                progress = %format!("{}/{}", commit_idx + 1, total_commits),
+                percent = progress_pct,
+                targets = target_attrs.len(),
+                "Processing commit"
+            );
+        }
 
         if target_attrs.is_empty() {
             // No packages to extract for this commit

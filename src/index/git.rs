@@ -1,8 +1,9 @@
 //! Git repository traversal for nixpkgs.
 
 use crate::error::{NxvError, Result};
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, TimeZone, Utc};
 use git2::{Oid, Repository, Sort};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
@@ -265,12 +266,15 @@ impl NixpkgsRepo {
         self.walk_commits_from(head_commit.id(), None, Some(min_datetime))
     }
 
-    /// Get indexable commits that touched specific paths (newest first, then reversed).
+    /// Get indexable commits touching the specified paths within a date range.
     ///
     /// First tries with `--first-parent` to avoid processing duplicate commits from
-    /// merge branches. If no commits are found (which can happen due to history
-    /// restructuring in nixpkgs, e.g., the July-October 2020 gap), falls back to
-    /// fetching all commits without `--first-parent`.
+    /// merge branches. Then detects any monthly gaps in the results (which can happen
+    /// due to history restructuring in nixpkgs, e.g., the August-September 2020 gap)
+    /// and fills them by fetching those specific months without `--first-parent`.
+    ///
+    /// This hybrid approach gives us the efficiency of `--first-parent` while ensuring
+    /// we don't miss commits during periods where the first-parent chain was broken.
     pub fn get_indexable_commits_touching_paths(
         &self,
         paths: &[&str],
@@ -278,11 +282,9 @@ impl NixpkgsRepo {
         until: Option<&str>,
     ) -> Result<Vec<CommitInfo>> {
         // Try with --first-parent first for efficiency
-        let commits = self.get_commits_touching_paths_inner(paths, since, until, true)?;
+        let mut commits = self.get_commits_touching_paths_inner(paths, since, until, true)?;
 
-        // If no commits found with --first-parent, fall back to all commits.
-        // This handles nixpkgs history gaps where the first-parent chain was broken
-        // (e.g., July-October 2020 where --first-parent returns 0 commits).
+        // If no commits found with --first-parent, fall back to all commits
         if commits.is_empty() {
             tracing::warn!(
                 target: "nxv::index::git",
@@ -290,6 +292,68 @@ impl NixpkgsRepo {
                 since, until
             );
             return self.get_commits_touching_paths_inner(paths, since, until, false);
+        }
+
+        // Detect monthly gaps and fill them
+        let gaps = detect_monthly_gaps(&commits, since, until);
+        if !gaps.is_empty() {
+            tracing::warn!(
+                target: "nxv::index::git",
+                gap_count = gaps.len(),
+                gaps = ?gaps.iter().map(|(y, m)| format!("{}-{:02}", y, m)).collect::<Vec<_>>(),
+                "Detected monthly gaps in --first-parent results, fetching missing months"
+            );
+
+            // Fetch commits for each gap month without --first-parent
+            let mut gap_commits = Vec::new();
+            for (year, month) in gaps {
+                let gap_since = format!("{}-{:02}-01", year, month);
+                let gap_until = if month == 12 {
+                    format!("{}-01-01", year + 1)
+                } else {
+                    format!("{}-{:02}-01", year, month + 1)
+                };
+
+                match self.get_commits_touching_paths_inner(
+                    paths,
+                    Some(&gap_since),
+                    Some(&gap_until),
+                    false,
+                ) {
+                    Ok(month_commits) => {
+                        tracing::info!(
+                            target: "nxv::index::git",
+                            year = year,
+                            month = month,
+                            commits_found = month_commits.len(),
+                            "Filled gap month"
+                        );
+                        gap_commits.extend(month_commits);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "nxv::index::git",
+                            year = year,
+                            month = month,
+                            error = %e,
+                            "Failed to fetch commits for gap month"
+                        );
+                    }
+                }
+            }
+
+            // Merge gap commits into the main list
+            if !gap_commits.is_empty() {
+                // Use a HashSet to deduplicate by commit hash
+                let mut seen: HashSet<String> = commits.iter().map(|c| c.hash.clone()).collect();
+                for commit in gap_commits {
+                    if seen.insert(commit.hash.clone()) {
+                        commits.push(commit);
+                    }
+                }
+                // Sort by date (oldest first)
+                commits.sort_by_key(|c| c.date);
+            }
         }
 
         Ok(commits)
@@ -1192,6 +1256,90 @@ impl NixpkgsRepo {
     }
 }
 
+/// Detect monthly gaps in a list of commits within a date range.
+///
+/// Returns a list of (year, month) tuples for months that have no commits
+/// but are within the expected date range. Only checks months that fall
+/// strictly between the first and last commit dates (doesn't flag edge months).
+///
+/// This is used to detect when `--first-parent` skips certain months due to
+/// nixpkgs history restructuring (e.g., August-September 2020).
+fn detect_monthly_gaps(
+    commits: &[CommitInfo],
+    since: Option<&str>,
+    until: Option<&str>,
+) -> Vec<(i32, u32)> {
+    if commits.is_empty() {
+        return vec![];
+    }
+
+    // Build set of months that have commits
+    let mut months_with_commits: HashSet<(i32, u32)> = HashSet::new();
+    for commit in commits {
+        months_with_commits.insert((commit.date.year(), commit.date.month()));
+    }
+
+    // Determine the date range to check
+    // Use since/until if provided, otherwise use the commit range
+    let start_date = if let Some(since_str) = since {
+        NaiveDate::parse_from_str(since_str, "%Y-%m-%d")
+            .ok()
+            .map(|d| (d.year(), d.month()))
+    } else {
+        commits.first().map(|c| (c.date.year(), c.date.month()))
+    };
+
+    let end_date = if let Some(until_str) = until {
+        NaiveDate::parse_from_str(until_str, "%Y-%m-%d")
+            .ok()
+            .map(|d| {
+                // until is exclusive, so go back one day to get the last included month
+                if d.day() == 1 {
+                    // If it's the first of a month, the previous month is the last included
+                    if d.month() == 1 {
+                        (d.year() - 1, 12)
+                    } else {
+                        (d.year(), d.month() - 1)
+                    }
+                } else {
+                    (d.year(), d.month())
+                }
+            })
+    } else {
+        commits.last().map(|c| (c.date.year(), c.date.month()))
+    };
+
+    let (start_year, start_month) = match start_date {
+        Some(d) => d,
+        None => return vec![],
+    };
+    let (end_year, end_month) = match end_date {
+        Some(d) => d,
+        None => return vec![],
+    };
+
+    // Generate all months in the range and find gaps
+    let mut gaps = Vec::new();
+    let mut year = start_year;
+    let mut month = start_month;
+
+    while (year, month) <= (end_year, end_month) {
+        if !months_with_commits.contains(&(year, month)) {
+            gaps.push((year, month));
+        }
+
+        // Advance to next month
+        if month == 12 {
+            year += 1;
+            month = 1;
+        } else {
+            month += 1;
+        }
+    }
+
+    gaps
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1495,11 +1643,7 @@ mod tests {
         // July-October 2020 is known to have 0 commits with --first-parent
         // but thousands of commits without it. Test that we get commits.
         let commits = repo
-            .get_indexable_commits_touching_paths(
-                &["pkgs"],
-                Some("2020-07-01"),
-                Some("2020-10-01"),
-            )
+            .get_indexable_commits_touching_paths(&["pkgs"], Some("2020-07-01"), Some("2020-10-01"))
             .unwrap();
 
         // Should have commits thanks to the fallback
@@ -1514,5 +1658,179 @@ mod tests {
             "Expected >1000 commits in gap period, got {}",
             commits.len()
         );
+    }
+
+    #[test]
+    fn test_get_indexable_commits_gap_filling() {
+        // This test verifies that we detect and fill monthly gaps in commit results.
+        //
+        // The 2020-H2 period is interesting because --first-parent returns commits
+        // for July and October-December, but returns 0 commits for August-September.
+        // Our gap detection should find these missing months and fill them.
+
+        let nixpkgs_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("nixpkgs");
+
+        // Skip if nixpkgs submodule isn't properly initialized
+        if !nixpkgs_path.join(".git").exists() || !nixpkgs_path.join("pkgs").exists() {
+            eprintln!("Skipping: nixpkgs submodule not initialized");
+            return;
+        }
+
+        let repo = NixpkgsRepo::open(&nixpkgs_path).unwrap();
+
+        // 2020-H2: July 1 to January 1
+        let commits = repo
+            .get_indexable_commits_touching_paths(&["pkgs"], Some("2020-07-01"), Some("2021-01-01"))
+            .unwrap();
+
+        // Should have commits for ALL months July-December
+        let mut months_with_commits: std::collections::HashSet<(i32, u32)> =
+            std::collections::HashSet::new();
+        for commit in &commits {
+            months_with_commits.insert((commit.date.year(), commit.date.month()));
+        }
+
+        // Verify we have commits for each month in the range
+        for month in 7..=12 {
+            assert!(
+                months_with_commits.contains(&(2020, month)),
+                "Expected commits for 2020-{:02}, but none found. Gap filling may have failed.",
+                month
+            );
+        }
+
+        // Should have a significant number of commits (October alone has ~6k with --first-parent)
+        assert!(
+            commits.len() > 5000,
+            "Expected >5000 commits in 2020-H2, got {}",
+            commits.len()
+        );
+    }
+
+    #[test]
+    fn test_detect_monthly_gaps_no_gaps() {
+        // Test that no gaps are detected when all months have commits
+        let commits = vec![
+            CommitInfo {
+                hash: "a".to_string(),
+                short_hash: "a".to_string(),
+                date: Utc.with_ymd_and_hms(2020, 7, 15, 0, 0, 0).unwrap(),
+            },
+            CommitInfo {
+                hash: "b".to_string(),
+                short_hash: "b".to_string(),
+                date: Utc.with_ymd_and_hms(2020, 8, 15, 0, 0, 0).unwrap(),
+            },
+            CommitInfo {
+                hash: "c".to_string(),
+                short_hash: "c".to_string(),
+                date: Utc.with_ymd_and_hms(2020, 9, 15, 0, 0, 0).unwrap(),
+            },
+        ];
+
+        let gaps = detect_monthly_gaps(&commits, Some("2020-07-01"), Some("2020-10-01"));
+        assert!(gaps.is_empty(), "Expected no gaps, got {:?}", gaps);
+    }
+
+    #[test]
+    fn test_detect_monthly_gaps_with_gaps() {
+        // Test that gaps are detected when some months are missing
+        let commits = vec![
+            CommitInfo {
+                hash: "a".to_string(),
+                short_hash: "a".to_string(),
+                date: Utc.with_ymd_and_hms(2020, 7, 15, 0, 0, 0).unwrap(),
+            },
+            // Missing August and September
+            CommitInfo {
+                hash: "b".to_string(),
+                short_hash: "b".to_string(),
+                date: Utc.with_ymd_and_hms(2020, 10, 15, 0, 0, 0).unwrap(),
+            },
+        ];
+
+        let gaps = detect_monthly_gaps(&commits, Some("2020-07-01"), Some("2020-11-01"));
+        assert_eq!(gaps.len(), 2, "Expected 2 gaps (Aug, Sep), got {:?}", gaps);
+        assert!(gaps.contains(&(2020, 8)), "Expected gap for 2020-08");
+        assert!(gaps.contains(&(2020, 9)), "Expected gap for 2020-09");
+    }
+
+    #[test]
+    fn test_detect_monthly_gaps_cross_year() {
+        // Test gap detection across year boundary
+        let commits = vec![
+            CommitInfo {
+                hash: "a".to_string(),
+                short_hash: "a".to_string(),
+                date: Utc.with_ymd_and_hms(2020, 11, 15, 0, 0, 0).unwrap(),
+            },
+            // Missing December 2020 and January 2021
+            CommitInfo {
+                hash: "b".to_string(),
+                short_hash: "b".to_string(),
+                date: Utc.with_ymd_and_hms(2021, 2, 15, 0, 0, 0).unwrap(),
+            },
+        ];
+
+        let gaps = detect_monthly_gaps(&commits, Some("2020-11-01"), Some("2021-03-01"));
+        assert_eq!(
+            gaps.len(),
+            2,
+            "Expected 2 gaps (Dec 2020, Jan 2021), got {:?}",
+            gaps
+        );
+        assert!(gaps.contains(&(2020, 12)), "Expected gap for 2020-12");
+        assert!(gaps.contains(&(2021, 1)), "Expected gap for 2021-01");
+    }
+
+    #[test]
+    fn test_detect_monthly_gaps_empty_commits() {
+        // Test that empty commit list returns no gaps
+        let commits: Vec<CommitInfo> = vec![];
+        let gaps = detect_monthly_gaps(&commits, Some("2020-07-01"), Some("2020-10-01"));
+        assert!(
+            gaps.is_empty(),
+            "Expected no gaps for empty commits, got {:?}",
+            gaps
+        );
+    }
+
+    #[test]
+    fn test_detect_monthly_gaps_single_month() {
+        // Test with a single month range - no gaps possible
+        let commits = vec![CommitInfo {
+            hash: "a".to_string(),
+            short_hash: "a".to_string(),
+            date: Utc.with_ymd_and_hms(2020, 8, 15, 0, 0, 0).unwrap(),
+        }];
+
+        let gaps = detect_monthly_gaps(&commits, Some("2020-08-01"), Some("2020-09-01"));
+        assert!(
+            gaps.is_empty(),
+            "Expected no gaps for single month, got {:?}",
+            gaps
+        );
+    }
+
+    #[test]
+    fn test_detect_monthly_gaps_uses_commit_range_when_no_dates() {
+        // Test that commit dates are used when since/until not provided
+        let commits = vec![
+            CommitInfo {
+                hash: "a".to_string(),
+                short_hash: "a".to_string(),
+                date: Utc.with_ymd_and_hms(2020, 7, 15, 0, 0, 0).unwrap(),
+            },
+            // Missing August
+            CommitInfo {
+                hash: "b".to_string(),
+                short_hash: "b".to_string(),
+                date: Utc.with_ymd_and_hms(2020, 9, 15, 0, 0, 0).unwrap(),
+            },
+        ];
+
+        let gaps = detect_monthly_gaps(&commits, None, None);
+        assert_eq!(gaps.len(), 1, "Expected 1 gap (Aug), got {:?}", gaps);
+        assert!(gaps.contains(&(2020, 8)), "Expected gap for 2020-08");
     }
 }

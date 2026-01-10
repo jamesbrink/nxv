@@ -1,6 +1,8 @@
 //! Command-line interface definitions using clap.
 
 use crate::logging::{LogConfig, LogFormat, LogRotation};
+#[cfg(feature = "indexer")]
+use crate::memory::MemorySize;
 use crate::output::OutputFormat;
 use crate::paths;
 use crate::search::SortOrder;
@@ -374,9 +376,11 @@ pub struct IndexArgs {
     #[arg(long)]
     pub workers: Option<usize>,
 
-    /// Memory threshold (MiB) before worker restart (default: 6144).
-    #[arg(long, default_value_t = 6144)]
-    pub max_memory: usize,
+    /// Total memory budget for all workers (e.g., "32G", "24GiB", "16384M").
+    /// Plain numbers are MiB for backwards compatibility.
+    /// Divided automatically among workers.
+    #[arg(long, default_value = "24G", value_parser = parse_memory_size)]
+    pub max_memory: MemorySize,
 
     /// Show verbose output including extraction warnings.
     #[arg(long, short = 'v')]
@@ -411,6 +415,13 @@ pub struct IndexArgs {
     /// Default: min(num_cpus / 4, number of ranges)
     #[arg(long, default_value_t = 4)]
     pub max_range_workers: usize,
+}
+
+/// Parse memory size from CLI argument.
+#[cfg(feature = "indexer")]
+fn parse_memory_size(s: &str) -> Result<MemorySize, String> {
+    s.parse()
+        .map_err(|e: crate::memory::MemoryError| e.to_string())
 }
 
 /// Fields that can be backfilled from nixpkgs.

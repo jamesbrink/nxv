@@ -8,6 +8,7 @@ mod completions;
 mod db;
 mod error;
 pub mod logging;
+mod memory;
 mod output;
 mod paths;
 mod remote;
@@ -1133,8 +1134,8 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
 
     // Check for internal worker mode first
     if args.internal_worker {
-        // Set memory threshold from CLI args
-        crate::index::worker::worker_main::set_max_memory(args.max_memory);
+        // Set memory threshold from CLI args (convert MemorySize to MiB)
+        crate::index::worker::worker_main::set_max_memory(args.max_memory.as_mib() as usize);
         // Run worker subprocess loop (never returns)
         crate::index::worker::run_worker_main();
     }
@@ -1159,7 +1160,7 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
         until: args.until.clone(),
         max_commits: args.max_commits,
         worker_count: args.workers,
-        max_memory_mib: args.max_memory,
+        memory_budget: args.max_memory,
         verbose: args.verbose,
         gc_interval: args.gc_interval,
         gc_min_free_bytes: args.gc_min_free_gb * 1024 * 1024 * 1024,

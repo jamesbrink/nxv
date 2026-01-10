@@ -7,6 +7,7 @@
 
 use super::proc::Proc;
 use crate::error::{NxvError, Result};
+use crate::memory::DEFAULT_PER_WORKER_MEMORY;
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::sync::Once;
@@ -19,7 +20,7 @@ static WORKER_STDERR_COUNTER: AtomicUsize = AtomicUsize::new(0);
 #[derive(Debug, Clone)]
 pub struct WorkerConfig {
     /// Memory threshold (MiB) before worker requests restart.
-    pub max_memory_mib: usize,
+    pub per_worker_memory_mib: usize,
     /// Custom eval store path (for parallel range isolation).
     /// If None, uses the default TEMP_EVAL_STORE_PATH.
     pub eval_store_path: Option<String>,
@@ -28,7 +29,7 @@ pub struct WorkerConfig {
 impl Default for WorkerConfig {
     fn default() -> Self {
         Self {
-            max_memory_mib: 6 * 1024, // 6 GiB
+            per_worker_memory_mib: DEFAULT_PER_WORKER_MEMORY.as_mib() as usize,
             eval_store_path: None,
         }
     }
@@ -85,7 +86,7 @@ pub fn spawn_worker(config: &WorkerConfig) -> Result<Proc> {
     cmd.arg("index");
     cmd.arg("--internal-worker");
     cmd.arg("--max-memory");
-    cmd.arg(config.max_memory_mib.to_string());
+    cmd.arg(config.per_worker_memory_mib.to_string());
 
     // We need a dummy nixpkgs-path argument since it's required by the CLI
     // The actual path is passed via the work request
@@ -201,7 +202,10 @@ mod tests {
     #[test]
     fn test_worker_config_default() {
         let config = WorkerConfig::default();
-        assert_eq!(config.max_memory_mib, 6 * 1024);
+        assert_eq!(
+            config.per_worker_memory_mib,
+            DEFAULT_PER_WORKER_MEMORY.as_mib() as usize
+        );
     }
 
     // Note: spawn_worker requires the binary to support --internal-worker,

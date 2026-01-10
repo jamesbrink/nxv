@@ -18,6 +18,7 @@ use crate::bloom::PackageBloomFilter;
 use crate::db::Database;
 use crate::db::queries::PackageVersion;
 use crate::error::{NxvError, Result};
+use crate::memory::{DEFAULT_MEMORY_BUDGET, MIN_WORKER_MEMORY, MemorySize};
 use chrono::{DateTime, TimeZone, Utc};
 use git::{NixpkgsRepo, WorktreeSession};
 
@@ -58,6 +59,22 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use tracing::{debug, debug_span, info, instrument, trace, warn};
+
+/// Calculate per-worker memory from total budget.
+///
+/// Divides the total memory budget among all workers (system_count × range_count),
+/// ensuring each worker gets at least MIN_WORKER_MEMORY.
+fn calculate_per_worker_memory(
+    budget: MemorySize,
+    system_count: usize,
+    range_count: usize,
+) -> Result<usize> {
+    let total_workers = system_count * range_count;
+    let per_worker = budget
+        .divide_among(total_workers, MIN_WORKER_MEMORY)
+        .map_err(|e| NxvError::Config(e.to_string()))?;
+    Ok(per_worker.as_mib() as usize)
+}
 
 /// A year range for parallel indexing.
 ///
@@ -317,8 +334,9 @@ pub struct IndexerConfig {
     /// If None, uses the number of systems for parallel evaluation.
     /// If Some(1), disables parallel evaluation (sequential mode).
     pub worker_count: Option<usize>,
-    /// Memory threshold (MiB) before worker restart.
-    pub max_memory_mib: usize,
+    /// Total memory budget for all workers combined.
+    /// Automatically divided among workers (systems × range_workers).
+    pub memory_budget: MemorySize,
     /// Show verbose output including extraction warnings.
     pub verbose: bool,
     /// Number of checkpoints between garbage collection runs.
@@ -346,7 +364,7 @@ impl Default for IndexerConfig {
             until: None,
             max_commits: None,
             worker_count: None, // Default: use parallel evaluation with one worker per system
-            max_memory_mib: 6 * 1024, // 6 GiB
+            memory_budget: DEFAULT_MEMORY_BUDGET,
             verbose: false,
             gc_interval: 20, // GC every 20 checkpoints (2000 commits by default)
             gc_min_free_bytes: 10 * 1024 * 1024 * 1024, // 10 GB
@@ -1052,10 +1070,26 @@ impl Indexer {
 
         // Limit the number of concurrent range workers
         let effective_max_workers = max_range_workers.max(1).min(ranges.len());
+
+        // Calculate per-worker memory: total budget / (ranges × systems)
+        let worker_count = self
+            .config
+            .worker_count
+            .unwrap_or(self.config.systems.len());
+        let per_worker_memory_mib = calculate_per_worker_memory(
+            self.config.memory_budget,
+            worker_count,
+            effective_max_workers,
+        )?;
+
         info!(
             target: "nxv::index",
-            "Using {} concurrent range workers",
-            effective_max_workers
+            range_workers = effective_max_workers,
+            system_workers = worker_count,
+            total_workers = effective_max_workers * worker_count,
+            per_worker_mib = per_worker_memory_mib,
+            total_budget = %self.config.memory_budget,
+            "Memory allocation for parallel indexing"
         );
 
         // Process ranges in batches to limit concurrency
@@ -1085,6 +1119,7 @@ impl Indexer {
                                 db,
                                 range.clone(),
                                 &config,
+                                per_worker_memory_mib,
                                 shutdown,
                             ) {
                                 Ok(result) => {
@@ -1224,9 +1259,15 @@ impl Indexer {
 
         // Create worker pool for parallel evaluation (if enabled)
         let worker_pool = if use_parallel && worker_count > 1 {
+            // Calculate per-worker memory from total budget
+            let per_worker_mib = calculate_per_worker_memory(
+                self.config.memory_budget,
+                worker_count,
+                1, // single range mode
+            )?;
             let pool_config = worker::WorkerPoolConfig {
                 worker_count,
-                max_memory_mib: self.config.max_memory_mib,
+                per_worker_memory_mib: per_worker_mib,
                 ..Default::default()
             };
             match worker::WorkerPool::new(pool_config) {
@@ -2087,6 +2128,7 @@ fn process_range_worker(
     db: Arc<std::sync::Mutex<Database>>,
     range: YearRange,
     config: &IndexerConfig,
+    per_worker_memory_mib: usize,
     shutdown: Arc<AtomicBool>,
 ) -> Result<RangeIndexResult> {
     use crate::db::queries::PackageVersion;
@@ -2165,7 +2207,7 @@ fn process_range_worker(
         let eval_store_path = format!("{}-{}", gc::TEMP_EVAL_STORE_PATH, range.label);
         let pool_config = worker::WorkerPoolConfig {
             worker_count,
-            max_memory_mib: config.max_memory_mib,
+            per_worker_memory_mib,
             eval_store_path: Some(eval_store_path),
             ..Default::default()
         };
@@ -2813,7 +2855,7 @@ mod tests {
             until: None,
             max_commits: None,
             worker_count: Some(1), // Sequential for tests
-            max_memory_mib: 6 * 1024,
+            memory_budget: DEFAULT_MEMORY_BUDGET,
             verbose: false,
             gc_interval: 0, // Disable GC for tests
             gc_min_free_bytes: 0,
@@ -2848,7 +2890,7 @@ mod tests {
             until: None,
             max_commits: None,
             worker_count: Some(1), // Sequential for tests
-            max_memory_mib: 6 * 1024,
+            memory_budget: DEFAULT_MEMORY_BUDGET,
             verbose: false,
             gc_interval: 0, // Disable GC for tests
             gc_min_free_bytes: 0,

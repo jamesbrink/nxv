@@ -10,6 +10,7 @@ use super::signals::{TerminationReason, WorkerFailure, analyze_wait_status};
 use super::spawn::{WorkerConfig, spawn_worker};
 use crate::error::{NxvError, Result};
 use crate::index::extractor::{AttrPosition, PackageInfo};
+use crate::memory::DEFAULT_PER_WORKER_MEMORY;
 use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -21,8 +22,9 @@ use tracing::{instrument, trace};
 pub struct WorkerPoolConfig {
     /// Number of worker processes to spawn.
     pub worker_count: usize,
-    /// Memory threshold (MiB) before worker restart.
-    pub max_memory_mib: usize,
+    /// Per-worker memory threshold (MiB) before worker restart.
+    /// This is the already-calculated per-worker allocation from the total budget.
+    pub per_worker_memory_mib: usize,
     /// Timeout for worker operations.
     pub timeout: Duration,
     /// Custom eval store path (for parallel range isolation).
@@ -33,7 +35,7 @@ impl Default for WorkerPoolConfig {
     fn default() -> Self {
         Self {
             worker_count: 4,
-            max_memory_mib: 6 * 1024,          // 6 GiB
+            per_worker_memory_mib: DEFAULT_PER_WORKER_MEMORY.as_mib() as usize,
             timeout: Duration::from_secs(300), // 5 minutes
             eval_store_path: None,
         }
@@ -458,8 +460,8 @@ impl WorkerPool {
     pub fn new(config: WorkerPoolConfig) -> Result<Self> {
         tracing::info!(
             workers = config.worker_count,
-            memory_limit_mib = config.max_memory_mib,
-            total_memory_budget_gib = (config.worker_count * config.max_memory_mib) / 1024,
+            memory_limit_mib = config.per_worker_memory_mib,
+            total_memory_budget_gib = (config.worker_count * config.per_worker_memory_mib) / 1024,
             "Initializing worker pool"
         );
 
@@ -471,7 +473,7 @@ impl WorkerPool {
                 .as_ref()
                 .map(|base| format!("{}-w{}", base, id));
             let worker_config = WorkerConfig {
-                max_memory_mib: config.max_memory_mib,
+                per_worker_memory_mib: config.per_worker_memory_mib,
                 eval_store_path: worker_store_path,
             };
             let worker = Worker::new(id, worker_config)?;
@@ -667,7 +669,10 @@ mod tests {
     fn test_worker_pool_config_default() {
         let config = WorkerPoolConfig::default();
         assert_eq!(config.worker_count, 4);
-        assert_eq!(config.max_memory_mib, 6 * 1024);
+        assert_eq!(
+            config.per_worker_memory_mib,
+            DEFAULT_PER_WORKER_MEMORY.as_mib() as usize
+        );
         assert!(config.eval_store_path.is_none());
     }
 

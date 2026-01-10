@@ -31,6 +31,7 @@
 
 pub mod error;
 pub mod handlers;
+pub mod middleware;
 pub mod openapi;
 pub mod types;
 
@@ -41,6 +42,7 @@ use std::time::Duration;
 use axum::{
     Router,
     http::{HeaderValue, header},
+    middleware as axum_middleware,
     response::{Html, IntoResponse},
     routing::get,
 };
@@ -71,57 +73,8 @@ const DEFAULT_MAX_DB_CONNECTIONS: usize = 32;
 /// Can be overridden via NXV_DB_TIMEOUT_SECS environment variable.
 const DEFAULT_DB_TIMEOUT_SECS: u64 = 30;
 
-use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
-
 use crate::db::Database;
 use crate::error::{NxvError, Result};
-
-/// Initialize the tracing subscriber for structured logging.
-///
-/// Configures logging based on the `RUST_LOG` environment variable. If not set,
-/// defaults to `info` level for all crates. Supports both human-readable (default)
-/// and JSON output formats.
-///
-/// # Examples
-///
-/// ```bash
-/// # Default info-level logging
-/// nxv serve
-///
-/// # Debug logging for nxv, info for everything else
-/// RUST_LOG=nxv=debug,info nxv serve
-///
-/// # JSON output for log aggregation
-/// RUST_LOG=info NXV_LOG_FORMAT=json nxv serve
-/// ```
-pub fn init_tracing() {
-    // Check if JSON format is requested
-    let use_json = std::env::var("NXV_LOG_FORMAT")
-        .map(|v| v.eq_ignore_ascii_case("json"))
-        .unwrap_or(false);
-
-    // Build the env filter with sensible defaults
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-
-    // Use try_init() to avoid panicking if a subscriber is already set
-    // (e.g., in tests or if run_server is called multiple times)
-    let result = if use_json {
-        // JSON format for log aggregation systems
-        tracing_subscriber::registry()
-            .with(filter)
-            .with(fmt::layer().json())
-            .try_init()
-    } else {
-        // Human-readable format for development
-        tracing_subscriber::registry()
-            .with(filter)
-            .with(fmt::layer().with_target(true).with_thread_ids(false))
-            .try_init()
-    };
-
-    // Silently ignore if already initialized (defensive for library usage)
-    let _ = result;
-}
 
 /// Shared application state.
 pub struct AppState {
@@ -355,6 +308,7 @@ pub(crate) fn build_router(
         .merge(static_routes)
         .nest("/api/v1", api_routes)
         .layer(trace_layer)
+        .layer(axum_middleware::from_fn(middleware::request_id_middleware))
         .with_state(state);
 
     if let Some(cors_layer) = cors {
@@ -418,9 +372,6 @@ pub(crate) fn build_router(
 /// `Ok(())` on clean shutdown; an `NxvError` if the database path is missing, socket
 /// binding fails, or the server runtime encounters an I/O error.
 pub async fn run_server(config: ServerConfig) -> Result<()> {
-    // Initialize tracing for structured logging
-    init_tracing();
-
     // Verify database exists before starting
     if !config.db_path.exists() {
         return Err(NxvError::NoIndex);

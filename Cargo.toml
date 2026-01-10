@@ -77,6 +77,10 @@ utoipa-scalar = { version = "0.3", features = ["axum"] }
 # Logging/tracing
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
+
+# Correlation IDs
+uuid = { version = "1.0", features = ["v4"] }
 
 # Error handling
 anyhow = "1.0"

@@ -66,6 +66,7 @@ The `nxv serve` command runs an HTTP API server with:
 - OpenAPI documentation at `/docs`
 - Configurable CORS support
 - Rate limiting and concurrency control via semaphore
+- Request correlation IDs (`X-Request-ID` header) for distributed tracing
 
 ### Indexer (feature-gated)
 
@@ -141,6 +142,12 @@ Schema migrations:
 | `NXV_SKIP_VERIFY`  | Skip manifest signature verification             |
 | `NXV_API_TIMEOUT`  | API request timeout in seconds (default: 30)     |
 | `NO_COLOR`         | Disable colored output                           |
+| `NXV_LOG`          | Log filter (overrides RUST_LOG)                  |
+| `NXV_LOG_LEVEL`    | Log level: error, warn, info, debug, trace       |
+| `NXV_LOG_FORMAT`   | Log format: pretty, compact, json                |
+| `NXV_LOG_FILE`     | Path to log file (in addition to stderr)         |
+| `NXV_LOG_ROTATION` | Log file rotation: hourly, daily, never          |
+| `RUST_LOG`         | Standard Rust log filter (fallback for NXV_LOG)  |
 
 ## Dependency Management
 

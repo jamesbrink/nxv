@@ -7,6 +7,7 @@ mod client;
 mod completions;
 mod db;
 mod error;
+pub mod logging;
 mod output;
 mod paths;
 mod remote;
@@ -75,9 +76,11 @@ fn main() {
 
     let cli = Cli::parse();
 
-    // Initialize tracing subscriber for indexer commands (reads RUST_LOG env var)
-    // FmtSpan::CLOSE logs span duration when it completes
-    // Note: serve command has its own tracing setup with JSON support
+    // Initialize unified logging based on command type
+    #[allow(unused_mut)] // mut only needed with indexer feature
+    let mut log_config = cli.log_config();
+
+    // Enable span timing for indexer commands (useful for performance analysis)
     #[cfg(feature = "indexer")]
     {
         use cli::Commands::*;
@@ -85,12 +88,15 @@ fn main() {
             cli.command,
             Index(_) | Backfill(_) | Reset(_) | Publish(_) | Keygen(_)
         ) {
-            tracing_subscriber::fmt()
-                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-                .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
-                .with_writer(std::io::stderr)
-                .init();
+            log_config.span_events = true;
         }
+    }
+
+    // Initialize logging (with file support if configured)
+    if log_config.file_path.is_some() {
+        logging::init_with_file(log_config);
+    } else {
+        logging::init(log_config);
     }
 
     // Handle no-color flag - affects both owo_colors and comfy_table

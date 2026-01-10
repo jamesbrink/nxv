@@ -164,7 +164,20 @@ Run nxv as an HTTP API server with a built-in web interface:
 ```bash
 nxv serve                                    # localhost:8080
 nxv serve --host 0.0.0.0 --port 3000 --cors  # Public with CORS
+nxv serve --log-format json --log-file /var/log/nxv.log  # Production logging
 ```
+
+**Logging options:**
+
+```bash
+# CLI arguments (global, work with any command)
+--log-level <level>     # error, warn, info, debug, trace
+--log-format <format>   # pretty (default), compact, json
+--log-file <path>       # Log to file in addition to stderr
+--log-rotation <when>   # hourly, daily (default), never
+```
+
+The API server includes request correlation IDs via the `X-Request-ID` header. Send your own ID or let the server generate one — it's echoed back in the response and included in all log entries for that request.
 
 **Endpoints:**
 
@@ -594,6 +607,12 @@ The `manifest.json` format:
 | `NO_COLOR` | Disable colored output |
 | `NXV_INSTALL_DIR` | Custom install directory for curl installer (default: `~/.local/bin`) |
 | `NXV_VERSION` | Specific version for curl installer (default: latest) |
+| `NXV_LOG` | Log filter directive (overrides `RUST_LOG`) |
+| `NXV_LOG_LEVEL` | Log level: `error`, `warn`, `info`, `debug`, `trace` |
+| `NXV_LOG_FORMAT` | Output format: `pretty` (default), `compact`, `json` |
+| `NXV_LOG_FILE` | Path to log file (logs to both stderr and file) |
+| `NXV_LOG_ROTATION` | Log file rotation: `hourly`, `daily` (default), `never` |
+| `RUST_LOG` | Standard Rust log filter (fallback if `NXV_LOG` not set) |
 
 ## Development
 

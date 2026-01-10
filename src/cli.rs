@@ -1,5 +1,6 @@
 //! Command-line interface definitions using clap.
 
+use crate::logging::{LogConfig, LogFormat, LogRotation};
 use crate::output::OutputFormat;
 use crate::paths;
 use crate::search::SortOrder;
@@ -7,6 +8,7 @@ use crate::version;
 use clap::{Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use std::path::PathBuf;
+use tracing::Level;
 
 /// nxv - Nix Version Index
 #[derive(Parser, Debug)]
@@ -32,6 +34,22 @@ pub struct Cli {
     /// API request timeout in seconds (when using remote backend).
     #[arg(long, env = "NXV_API_TIMEOUT", default_value_t = 30)]
     pub api_timeout: u64,
+
+    /// Log level: error, warn, info, debug, trace.
+    #[arg(long, env = "NXV_LOG_LEVEL", global = true)]
+    pub log_level: Option<String>,
+
+    /// Log format: pretty, compact, json.
+    #[arg(long, env = "NXV_LOG_FORMAT", global = true)]
+    pub log_format: Option<String>,
+
+    /// Log to file (in addition to stderr).
+    #[arg(long, env = "NXV_LOG_FILE", global = true)]
+    pub log_file: Option<PathBuf>,
+
+    /// Log rotation: hourly, daily, never.
+    #[arg(long, env = "NXV_LOG_ROTATION", default_value = "daily", global = true)]
+    pub log_rotation: String,
 
     #[command(subcommand)]
     pub command: Commands,
@@ -619,6 +637,54 @@ impl Cli {
     pub fn verbosity(&self) -> Verbosity {
         Verbosity::from(self.verbose)
     }
+
+    /// Build a LogConfig from CLI arguments.
+    ///
+    /// Applies CLI args first, then environment variable overrides.
+    pub fn log_config(&self) -> LogConfig {
+        let mut config = LogConfig::default();
+
+        // Apply log level from CLI or verbose flags
+        if let Some(ref level_str) = self.log_level {
+            config.level = parse_log_level(level_str).unwrap_or(Level::INFO);
+        } else {
+            // Fall back to verbose flags if no explicit log level
+            config.level = match self.verbose {
+                0 => Level::WARN, // Default: warnings only for CLI
+                1 => Level::INFO,
+                2 => Level::DEBUG,
+                _ => Level::TRACE,
+            };
+        }
+
+        // Apply log format from CLI
+        if let Some(ref format_str) = self.log_format {
+            config.format = format_str.parse().unwrap_or(LogFormat::Pretty);
+        }
+
+        // Apply log file from CLI
+        if let Some(ref path) = self.log_file {
+            config.file_path = Some(path.clone());
+        }
+
+        // Apply log rotation from CLI
+        config.rotation = self.log_rotation.parse().unwrap_or(LogRotation::Daily);
+
+        // Apply environment variable overrides (NXV_LOG, RUST_LOG, etc.)
+        config.with_env_overrides()
+    }
+}
+
+/// Parse a log level string to tracing Level.
+fn parse_log_level(s: &str) -> Option<Level> {
+    match s.to_lowercase().as_str() {
+        "error" => Some(Level::ERROR),
+        "warn" | "warning" => Some(Level::WARN),
+        "info" => Some(Level::INFO),
+        "debug" => Some(Level::DEBUG),
+        "trace" => Some(Level::TRACE),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -868,5 +934,133 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("secret-key"));
+    }
+
+    #[test]
+    fn test_log_level_argument() {
+        let args = Cli::try_parse_from(["nxv", "--log-level", "debug", "stats"]).unwrap();
+        assert_eq!(args.log_level, Some("debug".to_string()));
+    }
+
+    #[test]
+    fn test_log_format_argument() {
+        let args = Cli::try_parse_from(["nxv", "--log-format", "json", "stats"]).unwrap();
+        assert_eq!(args.log_format, Some("json".to_string()));
+    }
+
+    #[test]
+    fn test_log_file_argument() {
+        let args = Cli::try_parse_from(["nxv", "--log-file", "/tmp/nxv.log", "stats"]).unwrap();
+        assert_eq!(
+            args.log_file,
+            Some(std::path::PathBuf::from("/tmp/nxv.log"))
+        );
+    }
+
+    #[test]
+    fn test_log_rotation_argument() {
+        let args = Cli::try_parse_from(["nxv", "--log-rotation", "hourly", "stats"]).unwrap();
+        assert_eq!(args.log_rotation, "hourly");
+    }
+
+    #[test]
+    fn test_log_rotation_default() {
+        let args = Cli::try_parse_from(["nxv", "stats"]).unwrap();
+        assert_eq!(args.log_rotation, "daily");
+    }
+
+    #[test]
+    #[serial(env)]
+    fn test_log_config_from_cli_args() {
+        // Clear any logging env vars that could interfere
+        // SAFETY: Test runs serially via #[serial(env)] to avoid env var races
+        unsafe {
+            std::env::remove_var("NXV_LOG");
+            std::env::remove_var("NXV_LOG_LEVEL");
+            std::env::remove_var("NXV_LOG_FORMAT");
+            std::env::remove_var("RUST_LOG");
+        }
+
+        let args = Cli::try_parse_from([
+            "nxv",
+            "--log-level",
+            "debug",
+            "--log-format",
+            "json",
+            "--log-rotation",
+            "hourly",
+            "stats",
+        ])
+        .unwrap();
+
+        let config = args.log_config();
+        assert_eq!(config.level, Level::DEBUG);
+        assert_eq!(config.format, LogFormat::Json);
+        assert_eq!(config.rotation, LogRotation::Hourly);
+    }
+
+    #[test]
+    #[serial(env)]
+    fn test_log_config_verbose_flags() {
+        // Clear any logging env vars that could interfere
+        // SAFETY: Test runs serially via #[serial(env)] to avoid env var races
+        unsafe {
+            std::env::remove_var("NXV_LOG");
+            std::env::remove_var("NXV_LOG_LEVEL");
+            std::env::remove_var("RUST_LOG");
+        }
+
+        // No verbose flags = WARN level
+        let args = Cli::try_parse_from(["nxv", "stats"]).unwrap();
+        let config = args.log_config();
+        assert_eq!(config.level, Level::WARN);
+
+        // -v = INFO level
+        let args = Cli::try_parse_from(["nxv", "-v", "stats"]).unwrap();
+        let config = args.log_config();
+        assert_eq!(config.level, Level::INFO);
+
+        // -vv = DEBUG level
+        let args = Cli::try_parse_from(["nxv", "-vv", "stats"]).unwrap();
+        let config = args.log_config();
+        assert_eq!(config.level, Level::DEBUG);
+
+        // -vvv = TRACE level
+        let args = Cli::try_parse_from(["nxv", "-vvv", "stats"]).unwrap();
+        let config = args.log_config();
+        assert_eq!(config.level, Level::TRACE);
+    }
+
+    #[test]
+    #[serial(env)]
+    fn test_log_level_overrides_verbose() {
+        // Clear any logging env vars that could interfere
+        // SAFETY: Test runs serially via #[serial(env)] to avoid env var races
+        unsafe {
+            std::env::remove_var("NXV_LOG");
+            std::env::remove_var("NXV_LOG_LEVEL");
+            std::env::remove_var("RUST_LOG");
+        }
+
+        // Explicit --log-level should override -v flags
+        let args = Cli::try_parse_from(["nxv", "-vvv", "--log-level", "warn", "stats"]).unwrap();
+        let config = args.log_config();
+        assert_eq!(config.level, Level::WARN);
+    }
+
+    #[test]
+    #[serial(env)]
+    fn test_log_config_env_override() {
+        // SAFETY: Test runs serially via #[serial(env)] to avoid env var races
+        unsafe {
+            std::env::set_var("NXV_LOG_LEVEL", "trace");
+        }
+        let args = Cli::try_parse_from(["nxv", "stats"]).unwrap();
+        let config = args.log_config();
+        assert_eq!(config.level, Level::TRACE);
+        // SAFETY: Test runs serially via #[serial(env)] to avoid env var races
+        unsafe {
+            std::env::remove_var("NXV_LOG_LEVEL");
+        }
     }
 }

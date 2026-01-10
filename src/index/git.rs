@@ -142,7 +142,7 @@ impl WorktreeSession {
     /// This is fast because it doesn't create a new worktree, just
     /// updates the existing one. Uses `git checkout -f` which forces
     /// the checkout and discards any local changes.
-    #[instrument(skip(self))]
+    #[instrument(level = "debug", skip(self))]
     pub fn checkout(&self, commit_hash: &str) -> Result<()> {
         let checkout_start = Instant::now();
 
@@ -344,6 +344,7 @@ impl NixpkgsRepo {
 
             // Merge gap commits into the main list
             if !gap_commits.is_empty() {
+                let original_count = commits.len();
                 // Use a HashSet to deduplicate by commit hash
                 let mut seen: HashSet<String> = commits.iter().map(|c| c.hash.clone()).collect();
                 for commit in gap_commits {
@@ -353,6 +354,14 @@ impl NixpkgsRepo {
                 }
                 // Sort by date (oldest first)
                 commits.sort_by_key(|c| c.date);
+
+                tracing::info!(
+                    target: "nxv::index::git",
+                    original = original_count,
+                    added = commits.len() - original_count,
+                    total = commits.len(),
+                    "Gap filling complete"
+                );
             }
         }
 
@@ -480,7 +489,7 @@ impl NixpkgsRepo {
 
     /// Get changed paths for a commit (including rename sources and destinations).
     /// For merge commits, compares against first parent only to get actual PR changes.
-    #[instrument(skip(self))]
+    #[instrument(level = "debug", skip(self))]
     pub fn get_commit_changed_paths(&self, commit_hash: &str) -> Result<Vec<String>> {
         let diff_start = Instant::now();
 
@@ -1217,7 +1226,7 @@ impl NixpkgsRepo {
     ///
     /// # Returns
     /// The diff content as a string, or an error if the operation fails.
-    #[instrument(skip(self))]
+    #[instrument(level = "debug", skip(self))]
     pub fn get_file_diff(&self, commit_hash: &str, file_path: &str) -> Result<String> {
         // Compare against first parent for merge commits
         let output = Command::new("git")

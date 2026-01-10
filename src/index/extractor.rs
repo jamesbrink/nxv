@@ -100,7 +100,7 @@ pub fn extract_packages<P: AsRef<Path>>(repo_path: P) -> Result<Vec<PackageInfo>
 }
 
 /// Extract packages for a specific list of attribute names and system.
-#[instrument(skip(repo_path, attr_names), fields(attr_count = attr_names.len()))]
+#[instrument(level = "debug", skip(repo_path, attr_names), fields(attr_count = attr_names.len()))]
 pub fn extract_packages_for_attrs<P: AsRef<Path>>(
     repo_path: P,
     system: &str,
@@ -175,7 +175,7 @@ pub fn extract_packages_for_attrs<P: AsRef<Path>>(
 }
 
 /// Extract attribute positions for a nixpkgs checkout and system.
-#[instrument(skip(repo_path))]
+#[instrument(level = "debug", skip(repo_path))]
 pub fn extract_attr_positions<P: AsRef<Path>>(
     repo_path: P,
     system: &str,

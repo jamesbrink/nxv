@@ -57,7 +57,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
-use tracing::{debug, info, info_span, instrument, trace, warn};
+use tracing::{debug, debug_span, info, instrument, trace, warn};
 
 /// A year range for parallel indexing.
 ///
@@ -1188,7 +1188,7 @@ impl Indexer {
     /// let result = indexer.process_commits(&mut db, "/path/to/nixpkgs", &repo, commits, None).unwrap();
     /// println!("Indexed {} commits", result.commits_processed);
     /// ```
-    #[instrument(skip(self, db, nixpkgs_path, repo, commits, resume_from), fields(total_commits = commits.len()))]
+    #[instrument(level = "debug", skip(self, db, nixpkgs_path, repo, commits, resume_from), fields(total_commits = commits.len()))]
     fn process_commits<P: AsRef<Path>>(
         &self,
         db: &mut Database,
@@ -1516,7 +1516,7 @@ impl Indexer {
 
             // Use parallel evaluation if worker pool is available, otherwise sequential
             let extraction_results: Vec<(String, Result<Vec<extractor::PackageInfo>>)> = {
-                let _extract_span = info_span!(
+                let _extract_span = debug_span!(
                     "extract_packages",
                     targets = target_list.len(),
                     systems = systems.len()
@@ -1627,8 +1627,6 @@ impl Indexer {
             if (commit_idx + 1).is_multiple_of(self.config.checkpoint_interval)
                 || commit_idx + 1 == commits.len()
             {
-                let checkpoint_start = Instant::now();
-
                 if !pending_upserts.is_empty() {
                     let upsert_start = Instant::now();
                     let upsert_count = pending_upserts.len();
@@ -1682,10 +1680,12 @@ impl Indexer {
                     checkpoints_since_gc = 0;
                 }
 
-                trace!(
-                    commit_idx = commit_idx + 1,
-                    checkpoint_time_ms = checkpoint_start.elapsed().as_millis(),
-                    "Checkpoint completed"
+                info!(
+                    target: "nxv::index",
+                    commit = %commit.short_hash,
+                    progress = %format!("{}/{}", commit_idx + 1, total_commits),
+                    upserted = result.packages_upserted,
+                    "Checkpoint saved"
                 );
             }
         }

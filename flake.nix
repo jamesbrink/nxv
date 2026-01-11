@@ -9,9 +9,13 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     crane.url = "github:ipetkov/crane";
+    bun2nix = {
+      url = "github:baileyluTCD/bun2nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
-  outputs = { self, nixpkgs, flake-utils, rust-overlay, crane }:
+  outputs = { self, nixpkgs, flake-utils, rust-overlay, crane, bun2nix }:
     {
       # Overlay for use in NixOS/home-manager configs
       overlays.default = final: prev: {
@@ -403,6 +407,25 @@
           NIX_CFLAGS_COMPILE = "-I${pkgs.nix.dev}/include";
           PKG_CONFIG_PATH = "${pkgs.nix.dev}/lib/pkgconfig";
           LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+        };
+
+        # Website development shell (VitePress + Tailwind + Bun)
+        devShells.website = pkgs.mkShell {
+          packages = [
+            pkgs.bun
+            bun2nix.packages.${system}.default
+          ];
+
+          shellHook = ''
+            echo ""
+            echo "  nxv docs development shell"
+            echo ""
+            echo "Commands:"
+            echo "  cd website && bun install"
+            echo "  bun run dev      # Start dev server"
+            echo "  bun run build    # Production build"
+            echo ""
+          '';
         };
 
         # Checks (run with `nix flake check`)

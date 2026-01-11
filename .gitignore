@@ -39,6 +39,13 @@ __pycache__/
 *.key
 keys/nxv.key
 
+# Website
+website/node_modules/
+website/.vitepress/dist/
+website/.vitepress/cache/
+website/bun.nix
+website/bun.lock
+
 # Added by cargo
 
 /target

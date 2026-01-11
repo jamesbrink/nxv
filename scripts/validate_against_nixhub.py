@@ -160,6 +160,75 @@ EDGE_CASE_PACKAGES = [
     "elasticsearch",
 ]
 
+# Wrapper packages that define versions in separate files (packages.nix, common.nix, etc.)
+# These are prone to being missed by incremental detection
+# Format: package_name: minimum_expected_versions
+WRAPPER_PACKAGES = {
+    "firefox": 20,
+    "firefox-esr": 15,
+    "firefox-unwrapped": 15,
+    "chromium": 20,
+    "chromium-unwrapped": 15,
+    "thunderbird": 15,
+    "thunderbird-unwrapped": 10,
+    "vscode": 15,
+    "signal-desktop": 10,
+    "slack": 10,
+    "discord": 10,
+    "spotify": 5,
+    "zoom-us": 5,
+    "google-chrome": 5,
+    "libreoffice-fresh": 10,
+    "libreoffice-still": 5,
+}
+
+# High-frequency update packages that should have many versions
+HIGH_FREQUENCY_PACKAGES = {
+    "linux": 50,
+    "nodejs": 30,
+    "python3": 15,
+    "rustc": 20,
+    "go": 15,
+    "ruby": 15,
+    "php": 15,
+    "gcc": 10,
+    "llvm": 15,
+    "clang": 15,
+    "postgresql": 10,
+    "mysql": 10,
+    "redis": 10,
+    "nginx": 15,
+    "docker": 10,
+    "git": 20,
+    "curl": 15,
+    "wget": 10,
+    "vim": 15,
+    "neovim": 10,
+    "emacs": 10,
+}
+
+# Packages with special naming patterns (numeric suffixes, underscores, etc.)
+SPECIAL_NAMING_PACKAGES = [
+    "python2",
+    "python3",
+    "python311",
+    "python312",
+    "nodejs_18",
+    "nodejs_20",
+    "nodejs_22",
+    "go_1_21",
+    "go_1_22",
+    "rust",
+    "cargo",
+    "openjdk",
+    "openjdk11",
+    "openjdk17",
+    "openjdk21",
+    "postgresql_15",
+    "postgresql_16",
+    "mysql80",
+]
+
 # Categories for reporting
 PACKAGE_CATEGORIES = {
     "stable": ["hello", "coreutils", "bash", "gzip", "tar"],
@@ -235,6 +304,11 @@ class PackageValidation:
     version_verification_failed: list[VersionComparison] = field(default_factory=list)
     completeness_ratio: float = 0.0
     error: Optional[str] = None
+    # Flags for specific issues
+    suspiciously_low: bool = False  # Version count below expected minimum
+    expected_min_versions: int = 0  # What we expected
+    is_wrapper_package: bool = False  # Package known to have wrapper pattern
+    is_high_frequency: bool = False  # Package that updates frequently
 
 
 @dataclass
@@ -253,6 +327,10 @@ class ValidationReport:
     total_version_verification_failed: int = 0
     avg_completeness: float = 0.0
     package_validations: list[PackageValidation] = field(default_factory=list)
+    # Suspiciously low detection
+    suspiciously_low_packages: list[PackageValidation] = field(default_factory=list)
+    wrapper_packages_low: list[PackageValidation] = field(default_factory=list)
+    high_freq_packages_low: list[PackageValidation] = field(default_factory=list)
 
 
 def fetch_json(url: str, retries: int = 3, delay: float = 1.0) -> dict:
@@ -807,8 +885,28 @@ def validate_package(
     if nixhub_set:
         validation.completeness_ratio = len(nxv_set & nixhub_set) / len(nixhub_set)
 
+    # Check if this is a known wrapper package with suspiciously low versions
+    if package_name in WRAPPER_PACKAGES:
+        validation.is_wrapper_package = True
+        validation.expected_min_versions = WRAPPER_PACKAGES[package_name]
+        if validation.nxv_version_count < validation.expected_min_versions:
+            validation.suspiciously_low = True
+
+    # Check if this is a high-frequency package with suspiciously low versions
+    if package_name in HIGH_FREQUENCY_PACKAGES:
+        validation.is_high_frequency = True
+        expected = HIGH_FREQUENCY_PACKAGES[package_name]
+        if validation.expected_min_versions == 0:
+            validation.expected_min_versions = expected
+        else:
+            validation.expected_min_versions = max(validation.expected_min_versions, expected)
+        if validation.nxv_version_count < validation.expected_min_versions:
+            validation.suspiciously_low = True
+
     if verbose:
         print(f"  Completeness: {validation.completeness_ratio:.1%}")
+        if validation.suspiciously_low:
+            print(f"  [SUSPICIOUS] Only {validation.nxv_version_count} versions (expected {validation.expected_min_versions}+)")
         if validation.commit_mismatches:
             print(f"  Commit mismatches: {len(validation.commit_mismatches)}")
         if validation.store_path_mismatches:
@@ -868,6 +966,14 @@ def generate_report(validations: list[PackageValidation]) -> ValidationReport:
         report.total_commits_not_in_git += len(v.commits_not_in_git)
         report.total_version_verification_failed += len(v.version_verification_failed)
         total_completeness += v.completeness_ratio
+
+        # Track suspiciously low packages
+        if v.suspiciously_low:
+            report.suspiciously_low_packages.append(v)
+            if v.is_wrapper_package:
+                report.wrapper_packages_low.append(v)
+            if v.is_high_frequency:
+                report.high_freq_packages_low.append(v)
 
     valid_count = report.packages_validated - report.packages_with_errors
     if valid_count > 0:
@@ -930,10 +1036,39 @@ def print_report(report: ValidationReport):
             if v.versions_only_in_nixhub:
                 print(f"  Latest missing: {', '.join(v.versions_only_in_nixhub[:5])}")
 
+    # Suspiciously low version counts (CRITICAL for detecting wrapper package gaps)
+    if report.suspiciously_low_packages:
+        print("\n" + "-" * 70)
+        print("SUSPICIOUSLY LOW VERSION COUNTS:")
+        print("-" * 70)
+        print(f"\n[CRITICAL] Found {len(report.suspiciously_low_packages)} package(s) with fewer versions than expected!")
+        print("  This may indicate missing version updates (e.g., Firefox gap issue).")
+        print()
+
+        if report.wrapper_packages_low:
+            print("  WRAPPER PACKAGES (versions in separate files like packages.nix):")
+            for v in report.wrapper_packages_low:
+                print(f"    - {v.package_name}: {v.nxv_version_count} versions (expected {v.expected_min_versions}+)")
+            print()
+
+        if report.high_freq_packages_low:
+            print("  HIGH-FREQUENCY PACKAGES (update often, should have many versions):")
+            for v in report.high_freq_packages_low:
+                if not v.is_wrapper_package:  # Don't duplicate
+                    print(f"    - {v.package_name}: {v.nxv_version_count} versions (expected {v.expected_min_versions}+)")
+            print()
+
+        print("  SUGGESTED FIX: Re-index with --full-extraction-interval 50 or --full")
+        print("  Example: nxv index --nixpkgs-path ./nixpkgs --full")
+
     # Assessment
     print("\n" + "=" * 70)
     print("ASSESSMENT")
     print("=" * 70)
+
+    if report.suspiciously_low_packages:
+        print(f"\n[CRITICAL] {len(report.suspiciously_low_packages)} package(s) have suspiciously low version counts")
+        print("  This indicates potential gaps in indexing. See details above.")
 
     if report.avg_completeness >= 0.95:
         print("\n[EXCELLENT] Average completeness >= 95%")

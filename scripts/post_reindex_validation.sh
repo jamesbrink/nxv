@@ -267,24 +267,39 @@ echo "(These are prone to being missed by incremental detection)"
 echo ""
 
 # Wrapper packages should have many versions across years
-WRAPPER_PACKAGES="firefox,firefox-esr,chromium,thunderbird"
-WRAPPER_MIN_VERSIONS=10  # Expect at least 10 versions for these popular packages
+# Format: package:min_expected_versions
+# These packages define versions in packages.nix, common.nix, browser.nix, etc.
+WRAPPER_PACKAGES=(
+    "firefox:20"
+    "firefox-esr:15"
+    "chromium:20"
+    "thunderbird:15"
+    "vscode:15"
+    "signal-desktop:10"
+    "slack:10"
+    "discord:10"
+    "spotify:5"
+    "zoom-us:5"
+)
 
 WRAPPER_FAILED=0
-for pkg in ${WRAPPER_PACKAGES//,/ }; do
+for entry in "${WRAPPER_PACKAGES[@]}"; do
+    pkg="${entry%%:*}"
+    min_versions="${entry##*:}"
+
     VERSION_COUNT=$(sqlite3 "$DB_PATH" "SELECT COUNT(DISTINCT version) FROM package_versions WHERE attribute_path = '$pkg' AND version != 'unknown' AND version != '';")
     EARLIEST=$(sqlite3 "$DB_PATH" "SELECT datetime(MIN(first_commit_date), 'unixepoch') FROM package_versions WHERE attribute_path = '$pkg';")
     LATEST=$(sqlite3 "$DB_PATH" "SELECT datetime(MAX(last_commit_date), 'unixepoch') FROM package_versions WHERE attribute_path = '$pkg';")
 
-    if [[ $VERSION_COUNT -ge $WRAPPER_MIN_VERSIONS ]]; then
-        echo -e "  $pkg: ${GREEN}$VERSION_COUNT versions${NC} ($EARLIEST to $LATEST)"
+    if [[ $VERSION_COUNT -ge $min_versions ]]; then
+        echo -e "  $pkg: ${GREEN}$VERSION_COUNT versions${NC} (expected $min_versions+) [$EARLIEST to $LATEST]"
     elif [[ $VERSION_COUNT -gt 0 ]]; then
-        echo -e "  $pkg: ${YELLOW}$VERSION_COUNT versions${NC} (expected $WRAPPER_MIN_VERSIONS+)"
+        echo -e "  $pkg: ${YELLOW}$VERSION_COUNT versions${NC} (expected $min_versions+)"
         echo "    Range: $EARLIEST to $LATEST"
         echo "    This may indicate missing version updates."
         WRAPPER_FAILED=1
     else
-        echo -e "  $pkg: ${RED}NO VERSIONS${NC}"
+        echo -e "  $pkg: ${RED}NO VERSIONS${NC} (expected $min_versions+)"
         WRAPPER_FAILED=1
     fi
 done
@@ -296,6 +311,177 @@ if [[ $WRAPPER_FAILED -eq 1 ]]; then
     echo "  and may have been missed by incremental detection."
     echo "  Consider re-indexing with --full or --full-extraction-interval 50"
 fi
+echo ""
+
+# Test 8b: High-frequency update packages
+echo "=========================================="
+echo "8b. High-Frequency Update Packages"
+echo "=========================================="
+echo ""
+echo "Checking packages that update frequently (should have many versions)..."
+echo ""
+
+# These packages update very frequently - low counts indicate gaps
+HIGH_FREQ_PACKAGES=(
+    "linux:50"           # Kernel updates frequently
+    "nodejs:30"          # New versions every few months
+    "python3:15"         # 3.x versions
+    "rustc:20"           # Frequent releases
+    "go:15"              # Go versions
+    "ruby:15"            # Ruby versions
+    "php:15"             # PHP versions
+    "gcc:10"             # GCC versions
+    "llvm:15"            # LLVM versions
+    "clang:15"           # Clang versions
+    "postgresql:10"      # Multiple major versions
+    "mysql:10"           # MySQL versions
+    "redis:10"           # Redis versions
+    "nginx:15"           # Nginx versions
+    "docker:10"          # Docker versions
+)
+
+HIGH_FREQ_FAILED=0
+for entry in "${HIGH_FREQ_PACKAGES[@]}"; do
+    pkg="${entry%%:*}"
+    min_versions="${entry##*:}"
+
+    VERSION_COUNT=$(sqlite3 "$DB_PATH" "SELECT COUNT(DISTINCT version) FROM package_versions WHERE attribute_path = '$pkg' AND version != 'unknown' AND version != '';")
+
+    if [[ $VERSION_COUNT -ge $min_versions ]]; then
+        echo -e "  $pkg: ${GREEN}$VERSION_COUNT versions${NC} (expected $min_versions+)"
+    elif [[ $VERSION_COUNT -gt 0 ]]; then
+        echo -e "  $pkg: ${YELLOW}$VERSION_COUNT versions${NC} (expected $min_versions+)"
+        HIGH_FREQ_FAILED=1
+    else
+        echo -e "  $pkg: ${RED}NO VERSIONS${NC} (expected $min_versions+)"
+        HIGH_FREQ_FAILED=1
+    fi
+done
+
+if [[ $HIGH_FREQ_FAILED -eq 1 ]]; then
+    echo ""
+    echo -e "${YELLOW}WARNING: Some high-frequency packages have fewer versions than expected.${NC}"
+fi
+echo ""
+
+# Test 8c: Yearly version distribution check
+echo "=========================================="
+echo "8c. Yearly Version Distribution"
+echo "=========================================="
+echo ""
+echo "Checking that popular packages have versions across all indexed years..."
+echo ""
+
+# Get the year range from the database
+FIRST_YEAR=$(sqlite3 "$DB_PATH" "SELECT strftime('%Y', datetime(MIN(first_commit_date), 'unixepoch')) FROM package_versions WHERE first_commit_date IS NOT NULL;")
+LAST_YEAR=$(sqlite3 "$DB_PATH" "SELECT strftime('%Y', datetime(MAX(last_commit_date), 'unixepoch')) FROM package_versions WHERE last_commit_date IS NOT NULL;")
+
+echo "Index year range: $FIRST_YEAR to $LAST_YEAR"
+echo ""
+
+# Packages that should have versions in every year
+YEARLY_CHECK_PACKAGES="firefox,chromium,python3,nodejs,git"
+YEARLY_FAILED=0
+
+for pkg in ${YEARLY_CHECK_PACKAGES//,/ }; do
+    echo "  $pkg:"
+    YEARS_WITH_DATA=$(sqlite3 "$DB_PATH" "
+        SELECT GROUP_CONCAT(DISTINCT strftime('%Y', datetime(first_commit_date, 'unixepoch')))
+        FROM package_versions
+        WHERE attribute_path = '$pkg'
+        AND version != 'unknown'
+        AND version != ''
+        AND first_commit_date IS NOT NULL;
+    ")
+
+    if [[ -z "$YEARS_WITH_DATA" ]]; then
+        echo -e "    ${RED}NO DATA${NC}"
+        YEARLY_FAILED=1
+        continue
+    fi
+
+    # Check each year
+    MISSING_YEARS=""
+    for year in $(seq "$FIRST_YEAR" "$LAST_YEAR"); do
+        if [[ ! "$YEARS_WITH_DATA" =~ $year ]]; then
+            MISSING_YEARS="$MISSING_YEARS $year"
+        fi
+    done
+
+    if [[ -z "$MISSING_YEARS" ]]; then
+        echo -e "    ${GREEN}Data in all years ($FIRST_YEAR-$LAST_YEAR)${NC}"
+    else
+        echo -e "    ${YELLOW}Missing years:$MISSING_YEARS${NC}"
+        YEARLY_FAILED=1
+    fi
+done
+
+if [[ $YEARLY_FAILED -eq 1 ]]; then
+    echo ""
+    echo -e "${YELLOW}WARNING: Some packages are missing data for certain years.${NC}"
+    echo "  This may indicate gaps in indexing for those periods."
+fi
+echo ""
+
+# Test 8d: Edge case packages (special naming patterns)
+echo "=========================================="
+echo "8d. Edge Case Packages"
+echo "=========================================="
+echo ""
+echo "Checking packages with special naming patterns..."
+echo ""
+
+# These packages have unusual patterns that might be missed
+EDGE_CASES=(
+    # Packages with numeric suffixes
+    "python2:5"
+    "python3:15"
+    "python311:3"
+    "python312:3"
+    "nodejs_18:5"
+    "nodejs_20:5"
+    "nodejs_22:3"
+    # Packages with hyphens
+    "google-chrome:5"
+    "libreoffice-fresh:10"
+    "libreoffice-still:5"
+    # Packages ending in -unwrapped (wrappers)
+    "firefox-unwrapped:15"
+    "chromium-unwrapped:15"
+    # Go packages
+    "go_1_21:3"
+    "go_1_22:3"
+    # Rust packages
+    "rust:15"
+    "cargo:15"
+    # JDK variants
+    "openjdk:10"
+    "openjdk11:5"
+    "openjdk17:5"
+    "openjdk21:3"
+    # Database variants
+    "postgresql_15:3"
+    "postgresql_16:3"
+    "mysql80:3"
+)
+
+EDGE_FAILED=0
+for entry in "${EDGE_CASES[@]}"; do
+    pkg="${entry%%:*}"
+    min_versions="${entry##*:}"
+
+    VERSION_COUNT=$(sqlite3 "$DB_PATH" "SELECT COUNT(DISTINCT version) FROM package_versions WHERE attribute_path = '$pkg' AND version != 'unknown' AND version != '';")
+
+    if [[ $VERSION_COUNT -ge $min_versions ]]; then
+        echo -e "  $pkg: ${GREEN}$VERSION_COUNT versions${NC}"
+    elif [[ $VERSION_COUNT -gt 0 ]]; then
+        echo -e "  $pkg: ${YELLOW}$VERSION_COUNT versions${NC} (expected $min_versions+)"
+        # Don't fail for edge cases, just warn
+    else
+        # Only warn, don't fail - some edge cases may legitimately not exist in all indexes
+        echo -e "  $pkg: ${YELLOW}not found or no versions${NC}"
+    fi
+done
 echo ""
 
 # Test 9: Pre vs Post July 2023 comparison

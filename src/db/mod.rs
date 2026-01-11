@@ -482,6 +482,7 @@ impl Database {
     }
 
     /// Get the total number of package version records.
+    #[allow(dead_code)]
     pub fn get_package_count(&self) -> Result<i64> {
         self.conn
             .query_row("SELECT COUNT(*) FROM package_versions", [], |row| {

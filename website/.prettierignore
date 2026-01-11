@@ -1,0 +1,5 @@
+.vitepress/cache
+.vitepress/dist
+node_modules
+bun.lock
+bun.nix

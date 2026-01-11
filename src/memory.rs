@@ -18,6 +18,7 @@ impl MemorySize {
     }
 
     /// Create from mebibytes (MiB).
+    #[allow(dead_code)]
     pub const fn from_mib(mib: u64) -> Self {
         Self(mib * 1024 * 1024)
     }
@@ -46,6 +47,7 @@ impl MemorySize {
     /// Divide memory among workers, enforcing a minimum per-worker threshold.
     ///
     /// Returns the per-worker allocation if it meets the minimum, otherwise an error.
+    #[allow(dead_code)]
     pub fn divide_among(&self, workers: usize, min_per_worker: Self) -> Result<Self, MemoryError> {
         if workers == 0 {
             return Err(MemoryError::InvalidWorkerCount);
@@ -74,6 +76,7 @@ impl Default for MemorySize {
 
 /// Errors that can occur when parsing or allocating memory.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum MemoryError {
     /// Invalid format in memory size string.
     InvalidFormat(String),
@@ -193,6 +196,7 @@ impl fmt::Display for MemorySize {
 /// Minimum per-worker memory threshold (512 MiB).
 ///
 /// Workers below this threshold may OOM during Nix evaluation.
+#[allow(dead_code)]
 pub const MIN_WORKER_MEMORY: MemorySize = MemorySize::from_mib(512);
 
 /// Default total memory budget (8 GiB).

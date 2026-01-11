@@ -1208,6 +1208,7 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
             &cli.db_path,
             ranges,
             args.max_range_workers,
+            args.full,
         )?
     } else if args.full {
         indexer.index_full(&nixpkgs_path, &cli.db_path)?

@@ -1016,6 +1016,7 @@ impl Indexer {
         db_path: Q,
         ranges: Vec<YearRange>,
         max_range_workers: usize,
+        full: bool,
     ) -> Result<IndexResult> {
         use std::sync::Mutex;
         use std::thread;
@@ -1069,6 +1070,14 @@ impl Indexer {
 
         // Open database with mutex for thread-safe access
         let db = Arc::new(Mutex::new(Database::open(db_path)?));
+
+        // If --full flag is set, clear all range checkpoints to force reprocessing
+        if full {
+            let db_guard = db.lock().unwrap();
+            db_guard.clear_range_checkpoints()?;
+            info!(target: "nxv::index", "Cleared range checkpoints for full reindex");
+            drop(db_guard);
+        }
 
         info!(
             target: "nxv::index",
@@ -3702,5 +3711,66 @@ index abc123..def456 100644
         total.merge(range2);
         assert_eq!(total.commits_processed, 150);
         assert!(total.was_interrupted); // Interrupt flag propagates
+    }
+
+    #[test]
+    fn test_clear_range_checkpoints_removes_all_range_keys() {
+        // Test that clear_range_checkpoints removes all range-specific checkpoint keys
+        // but preserves the main checkpoint
+        let db_dir = tempdir().unwrap();
+        let db_path = db_dir.path().join("test.db");
+
+        // Create database with main and range checkpoints
+        {
+            let db = Database::open(&db_path).unwrap();
+
+            // Main checkpoint (should be preserved)
+            db.set_meta("last_indexed_commit", "main123").unwrap();
+            db.set_meta("last_indexed_date", "2024-01-15T10:00:00Z")
+                .unwrap();
+
+            // Range checkpoints (should be cleared)
+            db.set_meta("last_indexed_commit_2018-Q1", "range_q1_123")
+                .unwrap();
+            db.set_meta("last_indexed_date_2018-Q1", "2024-01-15T11:00:00Z")
+                .unwrap();
+            db.set_meta("last_indexed_commit_2018-Q2", "range_q2_456")
+                .unwrap();
+            db.set_meta("last_indexed_date_2018-Q2", "2024-01-15T12:00:00Z")
+                .unwrap();
+            db.set_meta("last_indexed_commit_2019", "range_2019_789")
+                .unwrap();
+            db.set_meta("last_indexed_date_2019", "2024-01-15T13:00:00Z")
+                .unwrap();
+        }
+
+        // Clear range checkpoints
+        {
+            let db = Database::open(&db_path).unwrap();
+            db.clear_range_checkpoints().unwrap();
+        }
+
+        // Verify main checkpoint preserved, range checkpoints cleared
+        {
+            let db = Database::open(&db_path).unwrap();
+
+            // Main checkpoint should still exist
+            assert_eq!(
+                db.get_meta("last_indexed_commit").unwrap(),
+                Some("main123".to_string())
+            );
+            assert_eq!(
+                db.get_meta("last_indexed_date").unwrap(),
+                Some("2024-01-15T10:00:00Z".to_string())
+            );
+
+            // Range checkpoints should be gone
+            assert_eq!(db.get_meta("last_indexed_commit_2018-Q1").unwrap(), None);
+            assert_eq!(db.get_meta("last_indexed_date_2018-Q1").unwrap(), None);
+            assert_eq!(db.get_meta("last_indexed_commit_2018-Q2").unwrap(), None);
+            assert_eq!(db.get_meta("last_indexed_date_2018-Q2").unwrap(), None);
+            assert_eq!(db.get_meta("last_indexed_commit_2019").unwrap(), None);
+            assert_eq!(db.get_meta("last_indexed_date_2019").unwrap(), None);
+        }
     }
 }

@@ -420,7 +420,8 @@ let
   isDottedPath = name: builtins.match ".*\\..*" name != null;
 
   # Get list of attribute names and process them
-  names = if attrNames != null then attrNames else builtins.attrNames pkgs;
+  # Empty list or null triggers full discovery via builtins.attrNames
+  names = if attrNames != null && builtins.length attrNames > 0 then attrNames else builtins.attrNames pkgs;
 
   # Separate top-level names from dotted paths
   topLevelNames = builtins.filter (n: !isDottedPath n) names;
@@ -463,7 +464,8 @@ let
   ) dottedNames;
 
   # Process nested package sets (only when not filtering by specific attrs)
-  nestedResults = if attrNames != null then [] else
+  # Empty list or null triggers full discovery including nested sets
+  nestedResults = if attrNames != null && builtins.length attrNames > 0 then [] else
     builtins.concatMap (setName:
       let
         exists = builtins.hasAttr setName pkgs;

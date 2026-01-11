@@ -71,11 +71,9 @@ Ranges processed:
 - 2020-Q3 (2020-07-01 to 2020-10-01)
 - 2020-Q4 (2020-10-01 to 2021-01-01)
 
----
-
-## Open Issues
-
 ### Full Extraction Fallback Gap (Fixed: 2025-01-11)
+
+**Commit:** `163b34f` fix(index): handle empty file_attr_map in full extraction fallback
 
 **Problem:** The periodic full extraction fix (f3bfa0d) had a gap. When `build_file_attr_map`
 fails on old commits (common with 2018 nixpkgs + modern Nix), `all_attrs` is `None`, and
@@ -97,13 +95,58 @@ With an empty map, `all_attrs` is `None`, making periodic full extraction ineffe
 but `all_attrs` is `None`. When this flag is set, an empty target list is passed to the
 extraction, which triggers `builtins.attrNames pkgs` in the Nix code to get all packages.
 
-**Verification:** After rebuilding, re-index a small range and check Firefox versions:
+---
 
-```bash
-nxv index --nixpkgs-path nixpkgs --since 2018-01-01 --until 2018-04-01 --full
-sqlite3 ~/.local/share/nxv/index.db \
-  "SELECT COUNT(*) FROM package_versions WHERE attribute_path = 'firefox';"
+### Empty attrNames List in extract.nix (Fixed: 2025-01-11)
+
+**Commit:** `41b6c89` fix(index): handle empty attrNames list in extract.nix
+
+**Problem:** Even after the `extract_all_packages` fix above, Firefox versions were still
+not being indexed. The Rust code passed an empty list `[]` to Nix, but `extract.nix` didn't
+handle empty lists correctly.
+
+**Root Cause:** In `extract.nix` line 423:
+
+```nix
+names = if attrNames != null then attrNames else builtins.attrNames pkgs;
 ```
+
+When `attrNames = []` (empty list), the condition `attrNames != null` is **true** (because
+`[]` is not `null`), so Nix used the empty list directly instead of falling back to
+`builtins.attrNames pkgs` to discover all packages.
+
+**Fix:** Changed to check both null AND empty list:
+
+```nix
+names = if attrNames != null && builtins.length attrNames > 0 then attrNames else builtins.attrNames pkgs;
+```
+
+**Test:** Added `test_extract_nix_handles_empty_list_directly` regression test that
+verifies packages are discovered when `attrNames = []` is passed directly to Nix.
+
+---
+
+### Parallel Range Checkpoints with --full Flag (Fixed: 2025-01-11)
+
+**Commit:** `33d7957` fix(index): clear range checkpoints when --full flag used with parallel ranges
+
+**Problem:** When using `--full` with `--parallel-ranges`, the indexer was resuming from
+existing range checkpoints instead of starting fresh.
+
+**Root Cause:** The `--full` flag only cleared the main checkpoint (`last_indexed_commit`),
+not the range-specific checkpoints (e.g., `last_indexed_commit_2018-Q1`).
+
+**Fix:** Added `full: bool` parameter to `index_parallel_ranges()` that calls
+`db.clear_range_checkpoints()` when true, removing all range-specific checkpoint keys.
+
+**Test:** Added `test_clear_range_checkpoints_removes_all_range_keys` to verify checkpoint
+clearing behavior.
+
+---
+
+## Open Issues
+
+(No open issues currently)
 
 ---
 

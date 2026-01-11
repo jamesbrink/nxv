@@ -1088,4 +1088,104 @@ mod tests {
         // Actual validation is done via nix-instantiate in development
         assert!(!expected_extractions.is_empty());
     }
+
+    /// Test that extract.nix handles an explicit empty list for attrNames.
+    ///
+    /// This is a regression test for a bug where passing `attrNames = []` to extract.nix
+    /// would result in no packages being extracted, because the condition
+    /// `attrNames != null` was true for `[]`, so it used the empty list instead of
+    /// falling back to `builtins.attrNames pkgs`.
+    ///
+    /// The fix changed the condition to check both null AND empty:
+    /// `attrNames != null && builtins.length attrNames > 0`
+    #[test]
+    fn test_extract_nix_handles_empty_list_directly() {
+        let nix_check = Command::new("nix").arg("--version").output();
+        if nix_check.is_err() || !nix_check.unwrap().status.success() {
+            eprintln!("Skipping: nix not available");
+            return;
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path();
+        std::fs::create_dir_all(path.join("pkgs")).unwrap();
+
+        // Create a simple nixpkgs mock
+        let default_nix = r#"
+{ system, config }:
+{
+  hello = {
+    pname = "hello";
+    version = "1.0.0";
+    type = "derivation";
+    meta = { description = "A test package"; };
+  };
+  world = {
+    pname = "world";
+    version = "2.0.0";
+    type = "derivation";
+    meta = { description = "Another test package"; };
+  };
+}
+"#;
+        std::fs::write(path.join("default.nix"), default_nix).unwrap();
+
+        // Write extract.nix to a temp file
+        let nix_file = temp_dir.path().join("extract.nix");
+        std::fs::write(&nix_file, EXTRACT_NIX).unwrap();
+
+        // Build expression that passes an EMPTY LIST (not null) for attrNames
+        // This is the exact case that was buggy before the fix
+        let canonical_path = std::fs::canonicalize(path).unwrap();
+        let expr = format!(
+            "import {} {{ nixpkgsPath = \"{}\"; system = \"x86_64-linux\"; attrNames = []; }}",
+            nix_file.display(),
+            canonical_path.display()
+        );
+
+        // Run nix-instantiate directly with the empty list
+        let output = Command::new("nix-instantiate")
+            .arg("--eval")
+            .arg("--json")
+            .arg("--strict")
+            .arg("-E")
+            .arg(&expr)
+            .output()
+            .expect("Failed to run nix-instantiate");
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            panic!(
+                "nix-instantiate failed with empty attrNames list: {}",
+                stderr
+            );
+        }
+
+        // Parse the result and verify packages were discovered
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let packages: Vec<serde_json::Value> =
+            serde_json::from_str(&stdout).expect("Failed to parse JSON output");
+
+        // With the fix, packages should be discovered even with attrNames = []
+        assert!(
+            !packages.is_empty(),
+            "extract.nix should discover packages when attrNames = [], but got empty result"
+        );
+
+        // Verify both packages were found
+        let names: Vec<&str> = packages
+            .iter()
+            .filter_map(|p| p.get("name").and_then(|v| v.as_str()))
+            .collect();
+        assert!(
+            names.contains(&"hello"),
+            "Should find 'hello' package, got: {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"world"),
+            "Should find 'world' package, got: {:?}",
+            names
+        );
+    }
 }

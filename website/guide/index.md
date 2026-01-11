@@ -4,6 +4,10 @@ nxv helps you find specific versions of Nix packages across nixpkgs history.
 Whether you need to pin a dependency to an older version or find when a package
 was introduced, nxv makes it fast and easy.
 
+::: tip Try Without Installing Want to try nxv first? Use the public web
+interface at [nxv.urandom.io](https://nxv.urandom.io/) - no installation
+required. :::
+
 ## Quick Start
 
 ```bash

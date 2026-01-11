@@ -9,6 +9,9 @@ hero:
     alt: nxv demo
   actions:
     - theme: brand
+      text: Try Demo
+      link: https://nxv.urandom.io/
+    - theme: alt
       text: Get Started
       link: /guide/
     - theme: alt

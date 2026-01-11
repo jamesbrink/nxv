@@ -1,9 +1,29 @@
 # HTTP API
 
-nxv includes a REST API server for programmatic access. Start it with
-`nxv serve`.
+nxv includes a REST API server for programmatic access.
 
-## Base URL
+## Public Instance
+
+A public instance is available for testing and light usage:
+
+- **Web UI:** [nxv.urandom.io](https://nxv.urandom.io/)
+- **API Docs:** [nxv.urandom.io/docs](https://nxv.urandom.io/docs)
+- **API Base:** `https://nxv.urandom.io/api/v1`
+
+::: tip Try it now You can use the public API directly without setting up your
+own server:
+
+```bash
+curl "https://nxv.urandom.io/api/v1/search?q=python&limit=5"
+```
+
+:::
+
+## Self-Hosted
+
+To run your own instance, start the server with `nxv serve`.
+
+### Base URL
 
 ```
 http://localhost:8080/api/v1

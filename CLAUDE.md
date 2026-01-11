@@ -31,6 +31,26 @@ cargo fmt                        # Format code
 nix flake check                  # Run all Nix checks (build, clippy, fmt, tests)
 ```
 
+## Website Development
+
+The documentation website uses VitePress + Tailwind CSS 4.1 + Bun:
+
+```bash
+nix develop .#website            # Enter website devshell (Bun + bun2nix)
+cd website && bun install        # Install dependencies
+bun run dev                      # Start dev server (http://localhost:5173/nxv/)
+bun run build                    # Production build
+bun run preview                  # Preview production build
+bun run fmt                      # Format with Prettier
+bun run fmt:check                # Check formatting (CI)
+```
+
+Website structure:
+- `website/.vitepress/config.ts` - VitePress configuration
+- `website/.vitepress/theme/` - Custom theme with Tailwind
+- `website/*.md` - Content pages (guide, API, advanced)
+- `website/public/` - Static assets (favicon, demo.gif)
+
 ## Nix Flake Outputs
 
 ```bash
@@ -229,6 +249,7 @@ A NixOS module is provided for running nxv as a systemd service:
 - `ci.yml`: Runs on PRs and main - tests (cargo + nix), clippy, fmt, builds Docker latest on main
 - `release.yml`: Triggered by `v*` tags - builds static binaries, publishes to crates.io, pushes versioned Docker images
 - `publish-index.yml`: Weekly scheduled or manual - builds the package index and uploads to `index-latest` release
+- `pages.yml`: Deploys documentation website to GitHub Pages on changes to `website/`
 
 ### Publishing the Index
 

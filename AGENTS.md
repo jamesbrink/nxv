@@ -9,14 +9,17 @@
 - `benches/` contains performance benchmarks (search, bloom filter, FFI).
 - `frontend/` contains the static HTML/CSS/JS for the web UI served by
   `nxv serve`.
+- `website/` contains the VitePress documentation site (Tailwind CSS 4.1 + Bun).
+  Use `nix develop .#website` for the website devshell.
 - `nix/` contains the NixOS module (`module.nix`) for running as a systemd
   service.
-- `docs/` hosts implementation specs and design notes.
+- `docs-legacy/` hosts legacy implementation specs and design notes.
 - `scripts/` includes operational scripts (e.g., cache publishing).
 
 ## Build, Test, and Development Commands
 
 - `nix develop` enters the Nix dev shell with the Rust toolchain.
+- `nix develop .#website` enters the website devshell (Bun + bun2nix).
 - `cargo build` builds the debug CLI; `cargo build --features indexer` enables
   indexer support.
 - `cargo test` runs the default test suite; `cargo test --features indexer`
@@ -24,6 +27,7 @@
 - `cargo clippy -- -D warnings` runs linting with warnings treated as errors.
 - `cargo fmt` formats Rust code.
 - `nix flake check` runs the full Nix CI checks.
+- Website: `cd website && bun install && bun run dev` starts the docs dev server.
 
 ## Coding Style & Naming Conventions
 

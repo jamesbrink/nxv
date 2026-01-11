@@ -347,6 +347,12 @@ pub struct IndexerConfig {
     /// If available space falls below this, GC runs at next checkpoint.
     /// Default: 10 GB
     pub gc_min_free_bytes: u64,
+    /// Interval for full package extraction (every N commits).
+    /// This catches packages missed by incremental detection (e.g., firefox
+    /// versions defined in packages.nix but assigned in all-packages.nix).
+    /// Set to 0 to disable periodic full extraction.
+    /// Default: 50
+    pub full_extraction_interval: u32,
 }
 
 impl Default for IndexerConfig {
@@ -368,6 +374,7 @@ impl Default for IndexerConfig {
             verbose: false,
             gc_interval: 20, // GC every 20 checkpoints (2000 commits by default)
             gc_min_free_bytes: 10 * 1024 * 1024 * 1024, // 10 GB
+            full_extraction_interval: 50, // Full extraction every 50 commits
         }
     }
 }
@@ -1426,7 +1433,11 @@ impl Indexer {
 
             // Check for infrastructure files and parse their diffs to extract affected attrs
             // For the first commit, always do full extraction to capture baseline state
-            let mut needs_full_extraction = commit_idx == 0;
+            // Also trigger periodic full extraction every N commits to catch packages
+            // that can't be detected from file paths (e.g., firefox versions in packages.nix)
+            let periodic_full = self.config.full_extraction_interval > 0
+                && (commit_idx + 1) % self.config.full_extraction_interval as usize == 0;
+            let mut needs_full_extraction = commit_idx == 0 || periodic_full;
             for infra_file in INFRASTRUCTURE_FILES {
                 if changed_paths.contains(&infra_file.to_string()) {
                     // Get the diff for this infrastructure file
@@ -1473,7 +1484,7 @@ impl Indexer {
                 }
             }
 
-            // If full extraction is needed (first commit or large infrastructure diff),
+            // If full extraction is needed (first commit, periodic, or large infrastructure diff),
             // extract all packages from all-packages.nix
             if needs_full_extraction && let Some(all_attrs_list) = all_attrs {
                 for attr in all_attrs_list {
@@ -1484,6 +1495,13 @@ impl Indexer {
                         commit = %commit.short_hash,
                         total_attrs = target_attr_paths.len(),
                         "Full extraction for first commit to capture baseline state"
+                    );
+                } else if periodic_full {
+                    debug!(
+                        commit = %commit.short_hash,
+                        total_attrs = target_attr_paths.len(),
+                        interval = self.config.full_extraction_interval,
+                        "Periodic full extraction to catch missed packages"
                     );
                 } else {
                     debug!(
@@ -1505,6 +1523,24 @@ impl Indexer {
                     // No validation against all_attrs - this allows detecting changes
                     // to packages that have moved (e.g., to pkgs/by-name/) since HEAD
                     target_attr_paths.insert(attr);
+                } else if path.ends_with(".nix") && path.starts_with("pkgs/") {
+                    // Changed .nix file in pkgs/ but couldn't determine attribute
+                    // This happens for files like firefox/packages.nix where the filename
+                    // doesn't match the package name. Trigger full extraction to be safe.
+                    if !needs_full_extraction {
+                        debug!(
+                            path = path,
+                            commit = %commit.short_hash,
+                            "Unknown package file changed, triggering full extraction"
+                        );
+                        needs_full_extraction = true;
+                        // Add all packages since we now need full extraction
+                        if let Some(all_attrs_list) = all_attrs {
+                            for attr in all_attrs_list {
+                                target_attr_paths.insert(attr.clone());
+                            }
+                        }
+                    }
                 }
             }
 
@@ -1792,6 +1828,26 @@ const NON_PACKAGE_PREFIXES: &[&str] = &[
     "pkgs/pkgs-lib/",
 ];
 
+/// Filenames (without .nix) that are clearly NOT package attribute names.
+/// When these files change, we can't determine the affected package from the path alone,
+/// so we need to trigger a full extraction for that commit.
+/// Examples: firefox/packages.nix defines firefox but "packages" isn't the attr name.
+const AMBIGUOUS_FILENAMES: &[&str] = &[
+    "packages",
+    "common",
+    "wrapper",
+    "update",
+    "generated",
+    "sources",
+    "versions",
+    "metadata",
+    "overrides",
+    "extensions",
+    "browser",
+    "bin",
+    "unwrapped",
+];
+
 /// Extract an attribute name from a nixpkgs file path.
 ///
 /// This function handles both modern `pkgs/by-name/` structure and traditional
@@ -1801,12 +1857,15 @@ const NON_PACKAGE_PREFIXES: &[&str] = &[
 /// - Infrastructure files (build-support, stdenv, etc.)
 /// - Files that don't match expected patterns
 /// - Empty or invalid names
+/// - Ambiguous filenames like `packages.nix`, `common.nix` that don't correspond
+///   to attribute names (triggers full extraction fallback)
 ///
 /// # Examples
 /// - `pkgs/by-name/jh/jhead/package.nix` → `Some("jhead")`
 /// - `pkgs/tools/graphics/jhead/default.nix` → `Some("jhead")`
 /// - `pkgs/development/python-modules/requests/default.nix` → `Some("requests")`
 /// - `pkgs/build-support/fetchurl/default.nix` → `None`
+/// - `pkgs/applications/networking/browsers/firefox/packages.nix` → `None`
 fn extract_attr_from_path(path: &str) -> Option<String> {
     // Must be a .nix file under pkgs/
     if !path.starts_with("pkgs/") || !path.ends_with(".nix") {
@@ -1848,6 +1907,13 @@ fn extract_attr_from_path(path: &str) -> Option<String> {
     };
 
     if potential_name.is_empty() {
+        return None;
+    }
+
+    // Reject ambiguous filenames that are clearly not package attribute names.
+    // When firefox/packages.nix changes, we can't know the affected package is "firefox"
+    // from the path alone. Returning None signals the caller to trigger full extraction.
+    if AMBIGUOUS_FILENAMES.contains(&potential_name) {
         return None;
     }
 
@@ -2301,7 +2367,11 @@ fn process_range_worker(
         let all_attrs: Option<&Vec<String>> = file_attr_map.get("pkgs/top-level/all-packages.nix");
 
         // Check for infrastructure files and parse their diffs
-        let mut needs_full_extraction = commit_idx == 0; // First commit needs full extraction
+        // Also trigger periodic full extraction every N commits to catch packages
+        // that can't be detected from file paths (e.g., firefox versions in packages.nix)
+        let periodic_full = config.full_extraction_interval > 0
+            && (commit_idx + 1) % config.full_extraction_interval as usize == 0;
+        let mut needs_full_extraction = commit_idx == 0 || periodic_full;
         for infra_file in INFRASTRUCTURE_FILES {
             if changed_paths.contains(&infra_file.to_string())
                 && let Ok(diff) = repo.get_file_diff(&commit.hash, infra_file)
@@ -2322,7 +2392,7 @@ fn process_range_worker(
             }
         }
 
-        // Full extraction for first commit or large infrastructure diff
+        // Full extraction for first commit, periodic interval, or large infrastructure diff
         if needs_full_extraction && let Some(all_attrs_list) = all_attrs {
             for attr in all_attrs_list {
                 target_attr_paths.insert(attr.clone());
@@ -2341,6 +2411,25 @@ fn process_range_worker(
                 // No validation against all_attrs - this allows detecting changes
                 // to packages that have moved (e.g., to pkgs/by-name/) since HEAD
                 target_attr_paths.insert(attr);
+            } else if path.ends_with(".nix") && path.starts_with("pkgs/") {
+                // Changed .nix file in pkgs/ but couldn't determine attribute
+                // This happens for files like firefox/packages.nix where the filename
+                // doesn't match the package name. Trigger full extraction to be safe.
+                if !needs_full_extraction {
+                    tracing::debug!(
+                        range = %range.label,
+                        path = path,
+                        commit = %&commit.hash[..8],
+                        "Unknown package file changed, triggering full extraction"
+                    );
+                    needs_full_extraction = true;
+                    // Add all packages since we now need full extraction
+                    if let Some(all_attrs_list) = all_attrs {
+                        for attr in all_attrs_list {
+                            target_attr_paths.insert(attr.clone());
+                        }
+                    }
+                }
             }
         }
 
@@ -2846,6 +2935,43 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_attr_from_path_ambiguous_rejected() {
+        // Ambiguous filenames that don't correspond to package attribute names
+        // should return None to trigger full extraction fallback.
+        // This catches cases like firefox/packages.nix where the version is
+        // defined in packages.nix but the attribute is "firefox" in all-packages.nix.
+        assert_eq!(
+            extract_attr_from_path("pkgs/applications/networking/browsers/firefox/packages.nix"),
+            None
+        );
+        assert_eq!(
+            extract_attr_from_path("pkgs/applications/networking/browsers/firefox/common.nix"),
+            None
+        );
+        assert_eq!(
+            extract_attr_from_path("pkgs/applications/networking/browsers/chromium/browser.nix"),
+            None
+        );
+        assert_eq!(
+            extract_attr_from_path("pkgs/applications/networking/browsers/firefox/wrapper.nix"),
+            None
+        );
+        assert_eq!(
+            extract_attr_from_path("pkgs/applications/networking/browsers/firefox/update.nix"),
+            None
+        );
+        // But specific package files should still work
+        assert_eq!(
+            extract_attr_from_path("pkgs/applications/networking/browsers/firefox/firefox.nix"),
+            Some("firefox".to_string())
+        );
+        assert_eq!(
+            extract_attr_from_path("pkgs/servers/nginx.nix"),
+            Some("nginx".to_string())
+        );
+    }
+
+    #[test]
     fn test_indexer_can_open_test_repo() {
         let (_dir, path) = create_test_nixpkgs_repo();
 
@@ -2874,6 +3000,7 @@ mod tests {
             verbose: false,
             gc_interval: 0, // Disable GC for tests
             gc_min_free_bytes: 0,
+            full_extraction_interval: 0, // Disable periodic full extraction for tests
         };
         let _indexer = Indexer::new(config);
 
@@ -2909,6 +3036,7 @@ mod tests {
             verbose: false,
             gc_interval: 0, // Disable GC for tests
             gc_min_free_bytes: 0,
+            full_extraction_interval: 0, // Disable periodic full extraction for tests
         };
         let _indexer = Indexer::new(config);
 

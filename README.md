@@ -303,12 +303,11 @@ The self-hosting workflow is:
 
 ### Indexing
 
-Requires the `indexer` feature and a local nixpkgs clone:
+Build an index from a local nixpkgs clone:
 
 ```bash
 # Build with indexer support
 nix build .#nxv-indexer
-# or: cargo build --release --features indexer
 
 # Clone nixpkgs (full history needed for complete index)
 git clone https://github.com/NixOS/nixpkgs.git
@@ -318,85 +317,16 @@ nxv index --nixpkgs-path ./nixpkgs --full
 
 # Incremental update (much faster)
 nxv index --nixpkgs-path ./nixpkgs
-```
 
-**Worker parallelism:** The `--workers` flag controls how many worker subprocesses handle Nix evaluations. Workers are assigned per-system (architecture), so with the default 4 systems (x86_64-linux, aarch64-linux, x86_64-darwin, aarch64-darwin), only 4 workers are used concurrently per commit. Setting `--workers` higher than your system count provides no benefit.
-
-### Parallel Year-Range Indexing
-
-For faster initial indexing, you can process multiple time ranges in parallel. Each range gets its own git worktree and worker pool, with results merged via UPSERT into the shared database.
-
-**Range formats:**
-
-| Format | Example | Description |
-|--------|---------|-------------|
-| Year | `2018` | Full year (Jan 1 - Dec 31) |
-| Year range | `2017-2020` | Multiple years (2017 through 2020) |
-| Half-year | `2018-H1` | First half (Jan-Jun) or `2018-H2` (Jul-Dec) |
-| Quarter | `2018-Q1` | Q1 (Jan-Mar), Q2 (Apr-Jun), Q3 (Jul-Sep), Q4 (Oct-Dec) |
-| Auto | `8` | Auto-partition history into N equal ranges |
-
-**Examples:**
-
-```bash
-# Basic: 3 years in parallel (3 commits processed simultaneously)
-nxv index --nixpkgs-path ./nixpkgs --parallel-ranges 2018,2019,2020
-
-# Better: 6 half-year ranges (6 commits processed simultaneously)
+# Parallel indexing for faster initial builds (quarterly ranges)
 nxv index --nixpkgs-path ./nixpkgs \
-  --parallel-ranges "2018-H1,2018-H2,2019-H1,2019-H2,2020-H1,2020-H2" \
-  --max-range-workers 6
-
-# Maximum parallelism: 12 quarterly ranges
-nxv index --nixpkgs-path ./nixpkgs \
-  --parallel-ranges "2018-Q1,2018-Q2,2018-Q3,2018-Q4,2019-Q1,2019-Q2,2019-Q3,2019-Q4,2020-Q1,2020-Q2,2020-Q3,2020-Q4" \
-  --max-range-workers 8
-
-# Auto-partition the full history into 8 ranges
-nxv index --nixpkgs-path ./nixpkgs --parallel-ranges 8 --max-range-workers 8
+  --parallel-ranges "2018-Q1,2018-Q2,2018-Q3,2018-Q4,2019-Q1,2019-Q2,2019-Q3,2019-Q4" \
+  --max-memory 32G --max-range-workers 4
 ```
 
-**How it works:**
-
-```
-Main Process
-├── 2018-H1 Worker (Jan-Jun 2018)
-│   ├── Dedicated git worktree in /tmp
-│   └── 4 Nix workers (one per system/architecture)
-├── 2018-H2 Worker (Jul-Dec 2018)
-│   └── ...
-└── All workers write to shared SQLite DB (WAL mode)
-```
-
-- Each range creates an independent git worktree for parallel checkouts
-- Each range has its own checkpoint (`last_indexed_commit_2018-H1`, etc.) for safe resume
-- Results merge correctly via UPSERT regardless of processing order
-- **Parallelism formula:** `ranges × 4 systems = concurrent Nix evaluations`
-  - 3 yearly ranges = 12 parallel evals, 3 commits at a time
-  - 6 half-year ranges = 24 parallel evals, 6 commits at a time
-  - 12 quarterly ranges = 48 parallel evals, 12 commits at a time
-
-**Tuning for your hardware:**
-
-| CPU Cores | Recommended Config |
-|-----------|-------------------|
-| 8 | `--parallel-ranges 2018,2019,2020 --max-range-workers 2` |
-| 16 | `--parallel-ranges "2018-H1,2018-H2,2019-H1,2019-H2" --max-range-workers 4` |
-| 32+ | `--parallel-ranges "...-Q1,...-Q4" --max-range-workers 8` |
-
-More ranges = more commits processed in parallel. The bottleneck is Nix evaluation, which parallelizes fully across ranges.
-
-### Backfilling Metadata
-
-Update missing fields without full rebuild:
-
-```bash
-# Fast: extract from current nixpkgs HEAD
-nxv backfill --nixpkgs-path ./nixpkgs
-
-# Accurate: traverse git history to original commits
-nxv backfill --nixpkgs-path ./nixpkgs --history
-```
+For comprehensive documentation on all indexer options including parallel ranges,
+memory management, checkpointing, and troubleshooting, see the
+**[Indexer Guide](./docs/guides/indexer.md)**.
 
 ### Publishing Your Index
 

@@ -257,9 +257,50 @@ for pkg in ${CRITICAL_PACKAGES//,/ }; do
 done
 echo ""
 
-# Test 8: Pre vs Post July 2023 comparison
+# Test 8: Wrapper Package Version Coverage
 echo "=========================================="
-echo "8. Pre vs Post July 2023 Comparison"
+echo "8. Wrapper Package Version Coverage"
+echo "=========================================="
+echo ""
+echo "Checking packages known to have versions in separate files..."
+echo "(These are prone to being missed by incremental detection)"
+echo ""
+
+# Wrapper packages should have many versions across years
+WRAPPER_PACKAGES="firefox,firefox-esr,chromium,thunderbird"
+WRAPPER_MIN_VERSIONS=10  # Expect at least 10 versions for these popular packages
+
+WRAPPER_FAILED=0
+for pkg in ${WRAPPER_PACKAGES//,/ }; do
+    VERSION_COUNT=$(sqlite3 "$DB_PATH" "SELECT COUNT(DISTINCT version) FROM package_versions WHERE attribute_path = '$pkg' AND version != 'unknown' AND version != '';")
+    EARLIEST=$(sqlite3 "$DB_PATH" "SELECT datetime(MIN(first_commit_date), 'unixepoch') FROM package_versions WHERE attribute_path = '$pkg';")
+    LATEST=$(sqlite3 "$DB_PATH" "SELECT datetime(MAX(last_commit_date), 'unixepoch') FROM package_versions WHERE attribute_path = '$pkg';")
+
+    if [[ $VERSION_COUNT -ge $WRAPPER_MIN_VERSIONS ]]; then
+        echo -e "  $pkg: ${GREEN}$VERSION_COUNT versions${NC} ($EARLIEST to $LATEST)"
+    elif [[ $VERSION_COUNT -gt 0 ]]; then
+        echo -e "  $pkg: ${YELLOW}$VERSION_COUNT versions${NC} (expected $WRAPPER_MIN_VERSIONS+)"
+        echo "    Range: $EARLIEST to $LATEST"
+        echo "    This may indicate missing version updates."
+        WRAPPER_FAILED=1
+    else
+        echo -e "  $pkg: ${RED}NO VERSIONS${NC}"
+        WRAPPER_FAILED=1
+    fi
+done
+
+if [[ $WRAPPER_FAILED -eq 1 ]]; then
+    echo ""
+    echo -e "${YELLOW}WARNING: Some wrapper packages have fewer versions than expected.${NC}"
+    echo "  These packages define versions in separate files (e.g., packages.nix)"
+    echo "  and may have been missed by incremental detection."
+    echo "  Consider re-indexing with --full or --full-extraction-interval 50"
+fi
+echo ""
+
+# Test 9: Pre vs Post July 2023 comparison
+echo "=========================================="
+echo "9. Pre vs Post July 2023 Comparison"
 echo "=========================================="
 echo ""
 

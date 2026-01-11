@@ -397,6 +397,13 @@ pub struct IndexArgs {
     #[arg(long, default_value_t = 10)]
     pub gc_min_free_gb: u64,
 
+    /// Force full package extraction every N commits (default: 50).
+    /// This catches packages missed by incremental detection (e.g., firefox
+    /// versions defined in packages.nix but assigned in all-packages.nix).
+    /// Set to 0 to disable (faster but may miss some package versions).
+    #[arg(long, default_value_t = 50)]
+    pub full_extraction_interval: u32,
+
     /// Internal flag for worker subprocess mode (hidden from help).
     #[arg(long, hide = true)]
     pub internal_worker: bool,

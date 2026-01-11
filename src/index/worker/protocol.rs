@@ -5,6 +5,11 @@
 use crate::index::extractor::{AttrPosition, PackageInfo};
 use serde::{Deserialize, Serialize};
 
+/// Default value for extract_store_paths (true for backwards compatibility).
+fn default_extract_store_paths() -> bool {
+    true
+}
+
 /// Request from parent to worker.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -18,6 +23,9 @@ pub enum WorkRequest {
         repo_path: String,
         /// Attribute names to extract (empty = all)
         attrs: Vec<String>,
+        /// Whether to extract store paths (skip for old commits to avoid derivationStrict errors)
+        #[serde(default = "default_extract_store_paths")]
+        extract_store_paths: bool,
     },
 
     /// Extract attribute positions for file-to-attribute mapping.
@@ -79,11 +87,13 @@ impl WorkRequest {
         system: impl Into<String>,
         repo_path: impl Into<String>,
         attrs: Vec<String>,
+        extract_store_paths: bool,
     ) -> Self {
         Self::Extract {
             system: system.into(),
             repo_path: repo_path.into(),
             attrs,
+            extract_store_paths,
         }
     }
 
@@ -153,7 +163,8 @@ mod tests {
 
     #[test]
     fn test_work_request_serialization() {
-        let req = WorkRequest::extract("x86_64-linux", "/path/to/nixpkgs", vec!["hello".into()]);
+        let req =
+            WorkRequest::extract("x86_64-linux", "/path/to/nixpkgs", vec!["hello".into()], true);
         let line = req.to_line();
         assert!(line.ends_with('\n'));
         assert!(line.contains("extract"));
@@ -165,10 +176,12 @@ mod tests {
                 system,
                 repo_path,
                 attrs,
+                extract_store_paths,
             } => {
                 assert_eq!(system, "x86_64-linux");
                 assert_eq!(repo_path, "/path/to/nixpkgs");
                 assert_eq!(attrs, vec!["hello"]);
+                assert!(extract_store_paths);
             }
             _ => panic!("Expected Extract variant"),
         }

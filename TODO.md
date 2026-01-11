@@ -144,9 +144,79 @@ clearing behavior.
 
 ---
 
+### Store Path Extraction Causes Darwin SDK Errors (Fixed: 2025-01-11)
+
+**Commit:** (pending)
+
+**Problem:** When extracting all packages with `attrNames = []`, Nix evaluation fails for
+packages that have darwin dependencies (e.g., `emacsMacport`). The error:
+
+```
+error: attribute '__propagatedImpureHostDeps' missing
+at .../darwin/apple-sdk/default.nix:205:36
+```
+
+**Root Cause:** `builtins.tryEval` does NOT catch errors that occur during
+`derivationStrict` (derivation instantiation). When we access `pkg.outPath` or
+`pkg.storePath`, Nix triggers `derivationStrict` which evaluates ALL build inputs,
+including darwin SDK dependencies. On old nixpkgs (2018) + modern Nix, the darwin SDK
+evaluation fails, and this error escapes the `tryEval` wrapper.
+
+The key insight: `derivationStrict` is called **lazily** when you first access:
+- `pkg.outPath`
+- `pkg.drvPath`
+- Any store path reference
+
+This means the error doesn't occur when evaluating `pkg.version` or `pkg.meta`, only
+when accessing store paths.
+
+**Fix:** Added `extractStorePaths` parameter through the entire extraction pipeline:
+
+1. **extract.nix**: Added `extractStorePaths ? true` parameter. When false, sets
+   `storePath = null` without accessing `outPath`.
+
+2. **extractor.rs**: Updated `extract_packages_for_attrs()` signature to accept
+   `extract_store_paths: bool`.
+
+3. **worker/protocol.rs**: Added `extract_store_paths` field to `WorkRequest::Extract`
+   with serde default for backwards compatibility.
+
+4. **worker/worker_main.rs**: Pass `extract_store_paths` to the handler.
+
+5. **worker/pool.rs**: Updated `Worker::extract()`, `WorkerPool::extract()`, and
+   `WorkerPool::extract_parallel()` signatures.
+
+6. **mod.rs**: Use `is_after_store_path_cutoff(commit.date)` to determine whether
+   to extract store paths. For commits before 2020-01-01, pass `false`.
+
+**Rationale:** Store paths for commits before 2020 are unlikely to be in
+cache.nixos.org anyway (the binary cache didn't retain old builds), so skipping
+store path extraction for old commits has no practical downside while fixing the
+darwin SDK evaluation errors.
+
+**Verification:**
+
+```bash
+# Test with December 2018 range (pre-store-path-cutoff)
+NXV_LOG=debug cargo run --features indexer -- index \
+  --nixpkgs-path nixpkgs --since 2018-12-01 --until 2019-01-01 --full
+
+# Verify Firefox versions from 2018 are now captured:
+sqlite3 ~/.local/share/nxv/index.db \
+  "SELECT version, datetime(first_commit_date, 'unixepoch') as first_seen
+   FROM package_versions WHERE attribute_path = 'firefox' ORDER BY first_commit_date DESC;"
+# Should show Firefox 64.0, 63.0.3, etc. from December 2018
+```
+
+**Result:** Firefox versions 64.0 (2018-12-12) and 63.0.3 (2018-12-01) are now
+successfully indexed. The logs show `extract_store_paths=false` being correctly
+passed for all 2018 commits, and x86_64-linux/aarch64-linux extraction succeeds.
+
+---
+
 ## Open Issues
 
-(No open issues currently)
+_No open issues currently._
 
 ---
 
@@ -178,6 +248,154 @@ clearing behavior.
 ---
 
 ## Notes
+
+### Test Run Log (2025-01-11)
+
+**18:23 - Full reindex attempt (interrupted):**
+
+```bash
+nxv index --nixpkgs-path nixpkgs \
+  --parallel-ranges "2018-Q1,2018-Q2,2018-Q3,2018-Q4,2019-Q1,2019-Q2,2019-Q3,2019-Q4,2020-Q1,2020-Q2,2020-Q3,2020-Q4" \
+  --max-memory 32G --max-range-workers 12 --full
+```
+
+- 12 ranges running in parallel, 48 workers total (4 per range)
+- Progress: ranges at 2-9% when interrupted via Ctrl+C
+- Graceful shutdown worked: all ranges reported "interrupted"
+- One benign git checkout error during shutdown (timing issue, not a bug)
+
+**20:00 - Verification test with extractStorePaths fix:**
+
+```bash
+NXV_LOG=debug cargo run --features indexer -- index \
+  --nixpkgs-path nixpkgs --since 2018-12-01 --until 2019-01-01 --full
+```
+
+- 1354 commits processed
+- `extract_store_paths=false` correctly passed for all 2018 commits
+- x86_64-linux and aarch64-linux extraction succeeded
+- Darwin systems (x86_64-darwin, aarch64-darwin) failed as expected
+- Firefox versions from December 2018 successfully indexed:
+  - Firefox 64.0 (2018-12-12)
+  - Firefox 63.0.3 (2018-12-01)
+- **FIX VERIFIED:** Previously only had Firefox versions from 2017
+
+---
+
+### Database State Analysis (2025-01-11)
+
+**Current Index Coverage:**
+
+| Year/Quarter | Status | Checkpoint Date | Commits Done | Total Commits |
+|--------------|--------|-----------------|--------------|---------------|
+| 2017 | COMPLETE | (sequential mode) | ~26,466 | 26,466 |
+| 2018-Q1 | PARTIAL | 2018-01-07 | ~434 | 10,440 |
+| 2018-Q2 | PARTIAL | 2018-04-09 | ~611 | 10,219 |
+| 2018-Q3 | PARTIAL | 2018-07-07 | ~446 | 9,367 |
+| 2018-Q4 | PARTIAL | 2018-10-08 | ~524 | 10,963 |
+| 2019-Q1 | PARTIAL | 2019-01-08 | ~554 | 9,516 |
+| 2019-Q2 | PARTIAL | 2019-04-08 | ~663 | 9,809 |
+| 2019-Q3 | PARTIAL | 2019-07-09 | ~521 | 11,294 |
+| 2019-Q4 | PARTIAL | 2019-10-11 | ~919 | 12,240 |
+| 2020-Q1 | PARTIAL | 2020-02-08 | ~4,049 | 11,759 |
+| 2020-Q2 | PARTIAL | 2020-04-05 | ~475 | 13,292 |
+| 2020-Q3 | PARTIAL | 2020-07-03 | ~90 | 12,664 |
+| 2020-Q4 | PARTIAL | 2020-10-09 | ~846 | 15,343 |
+| 2021+ | NOT INDEXED | - | 0 | ~200,000+ |
+
+**Critical Note:** The partial checkpoints (2018-2020) were created BEFORE the
+`extractStorePaths` fix. This means early data in each quarter may be missing
+wrapper packages (firefox, chromium, etc.). To ensure 100% data quality, a fresh
+`--full` reindex is required.
+
+**Reindexing Strategy:** Process one year at a time with parallel quarters to
+ensure thorough validation between each year.
+
+---
+
+### Reindexing Plan (2025-01-11)
+
+**Phase 1: 2017 (4 parallel quarters)**
+
+```bash
+nxv index --nixpkgs-path nixpkgs \
+  --parallel-ranges "2017-Q1,2017-Q2,2017-Q3,2017-Q4" \
+  --max-memory 48G \
+  --max-range-workers 4 \
+  --full
+```
+
+Commits: ~26,466 | Estimated time: ~1 hour
+
+**Phase 2: 2018 (4 parallel quarters)**
+
+```bash
+nxv index --nixpkgs-path nixpkgs \
+  --parallel-ranges "2018-Q1,2018-Q2,2018-Q3,2018-Q4" \
+  --max-memory 48G \
+  --max-range-workers 4
+```
+
+Commits: ~41,000 | Estimated time: ~2 hours
+
+**Phase 3: 2019 (4 parallel quarters)**
+
+```bash
+nxv index --nixpkgs-path nixpkgs \
+  --parallel-ranges "2019-Q1,2019-Q2,2019-Q3,2019-Q4" \
+  --max-memory 48G \
+  --max-range-workers 4
+```
+
+Commits: ~43,000 | Estimated time: ~2 hours
+
+**Phase 4: 2020 (4 parallel quarters)**
+
+```bash
+nxv index --nixpkgs-path nixpkgs \
+  --parallel-ranges "2020-Q1,2020-Q2,2020-Q3,2020-Q4" \
+  --max-memory 48G \
+  --max-range-workers 4
+```
+
+Commits: ~53,000 | Estimated time: ~2-3 hours
+
+**Alternative: All 2017-2020 in one command (16 parallel quarters)**
+
+```bash
+nxv index --nixpkgs-path nixpkgs \
+  --parallel-ranges "2017-Q1,2017-Q2,2017-Q3,2017-Q4,2018-Q1,2018-Q2,2018-Q3,2018-Q4,2019-Q1,2019-Q2,2019-Q3,2019-Q4,2020-Q1,2020-Q2,2020-Q3,2020-Q4" \
+  --max-memory 48G \
+  --max-range-workers 16 \
+  --full
+```
+
+Commits: ~163,000 | Estimated time: 4-8 hours
+
+**Validation between phases:**
+
+```bash
+# Check database stats
+sqlite3 ~/.local/share/nxv/index.db "
+SELECT strftime('%Y', datetime(first_commit_date, 'unixepoch')) as year,
+       COUNT(*) as rows, COUNT(DISTINCT attribute_path) as packages
+FROM package_versions GROUP BY year ORDER BY year;"
+
+# Check Firefox coverage
+sqlite3 ~/.local/share/nxv/index.db "
+SELECT version, datetime(first_commit_date, 'unixepoch') as first_seen
+FROM package_versions WHERE attribute_path = 'firefox'
+ORDER BY first_commit_date DESC;"
+
+# Check wrapper packages
+for pkg in firefox chromium thunderbird; do
+  count=$(sqlite3 ~/.local/share/nxv/index.db \
+    "SELECT COUNT(DISTINCT version) FROM package_versions WHERE attribute_path = '$pkg'")
+  echo "$pkg: $count versions"
+done
+```
+
+---
 
 ### Useful Debugging Commands
 

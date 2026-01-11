@@ -240,14 +240,19 @@ fn run_backfill_head<P: AsRef<Path>, Q: AsRef<Path>>(
         let batch_vec: Vec<String> = batch.to_vec();
 
         // Extract from x86_64-linux (most common)
-        let packages =
-            match extractor::extract_packages_for_attrs(nixpkgs_path, "x86_64-linux", &batch_vec) {
-                Ok(pkgs) => pkgs,
-                Err(e) => {
-                    warn!(target: "nxv::backfill", "Extraction failed for batch: {}", e);
-                    continue;
-                }
-            };
+        // Use extract_store_paths=true for HEAD mode (modern nixpkgs, store paths available)
+        let packages = match extractor::extract_packages_for_attrs(
+            nixpkgs_path,
+            "x86_64-linux",
+            &batch_vec,
+            true,
+        ) {
+            Ok(pkgs) => pkgs,
+            Err(e) => {
+                warn!(target: "nxv::backfill", "Extraction failed for batch: {}", e);
+                continue;
+            }
+        };
 
         // Build lookup map
         let mut metadata_map: HashMap<String, PackageMetadata> = HashMap::new();
@@ -441,20 +446,25 @@ fn run_backfill_historical<P: AsRef<Path>, Q: AsRef<Path>>(
         }
 
         // Extract metadata for these packages from the worktree
-        let packages =
-            match extractor::extract_packages_for_attrs(session.path(), "x86_64-linux", attr_paths)
-            {
-                Ok(pkgs) => pkgs,
-                Err(e) => {
-                    warn!(
-                        target: "nxv::backfill",
-                        "Extraction failed for {}: {}",
-                        &commit[..12.min(commit.len())], e
-                    );
-                    progress.tick();
-                    continue;
-                }
-            };
+        // Use extract_store_paths=true for historical mode (may fail for some old commits,
+        // but we'll get what we can for metadata like source_path and homepage)
+        let packages = match extractor::extract_packages_for_attrs(
+            session.path(),
+            "x86_64-linux",
+            attr_paths,
+            true,
+        ) {
+            Ok(pkgs) => pkgs,
+            Err(e) => {
+                warn!(
+                    target: "nxv::backfill",
+                    "Extraction failed for {}: {}",
+                    &commit[..12.min(commit.len())], e
+                );
+                progress.tick();
+                continue;
+            }
+        };
 
         // Build lookup map
         let mut metadata_map: HashMap<String, PackageMetadata> = HashMap::new();

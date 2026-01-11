@@ -55,10 +55,15 @@ fn is_over_memory_threshold() -> bool {
 }
 
 /// Process a single extraction request.
-fn handle_extract(system: &str, repo_path: &str, attrs: &[String]) -> WorkResponse {
+fn handle_extract(
+    system: &str,
+    repo_path: &str,
+    attrs: &[String],
+    extract_store_paths: bool,
+) -> WorkResponse {
     let path = Path::new(repo_path);
 
-    match extractor::extract_packages_for_attrs(path, system, attrs) {
+    match extractor::extract_packages_for_attrs(path, system, attrs, extract_store_paths) {
         Ok(packages) => WorkResponse::result(packages),
         Err(e) => WorkResponse::error(format!("{}", e)),
     }
@@ -113,9 +118,10 @@ fn worker_loop(reader: &mut LineReader, writer: &mut LineWriter) -> io::Result<(
                 system,
                 repo_path,
                 attrs,
+                extract_store_paths,
             } => {
                 // Process extraction
-                let response = handle_extract(&system, &repo_path, &attrs);
+                let response = handle_extract(&system, &repo_path, &attrs, extract_store_paths);
                 writer.write_line(&response.to_line())?;
 
                 // Check memory after extraction

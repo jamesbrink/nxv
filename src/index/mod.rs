@@ -1624,9 +1624,13 @@ impl Indexer {
                 )
                 .entered();
 
+                // Skip store path extraction for old commits to avoid derivationStrict errors
+                let extract_store_paths = is_after_store_path_cutoff(commit.date);
+
                 if let Some(ref pool) = worker_pool {
                     // Parallel extraction using worker pool
-                    let results = pool.extract_parallel(worktree_path, systems, &target_list);
+                    let results =
+                        pool.extract_parallel(worktree_path, systems, &target_list, extract_store_paths);
                     systems.iter().cloned().zip(results).collect()
                 } else {
                     // Sequential extraction (fallback)
@@ -1637,6 +1641,7 @@ impl Indexer {
                                 worktree_path,
                                 system,
                                 &target_list,
+                                extract_store_paths,
                             );
                             (system.clone(), result)
                         })
@@ -2506,18 +2511,23 @@ fn process_range_worker(
         // Extract packages for all systems
         // When extract_all_packages is true, empty target_attrs triggers builtins.attrNames in Nix
         let extract_start = std::time::Instant::now();
+
+        // Skip store path extraction for old commits to avoid derivationStrict errors
+        let extract_store_paths = is_after_store_path_cutoff(commit.date);
+
         let extraction_results: Vec<(
             String,
             std::result::Result<Vec<extractor::PackageInfo>, NxvError>,
         )> = if let Some(ref pool) = worker_pool {
-            let results = pool.extract_parallel(worktree_path, systems, &target_attrs);
+            let results =
+                pool.extract_parallel(worktree_path, systems, &target_attrs, extract_store_paths);
             systems.iter().cloned().zip(results).collect()
         } else {
             systems
                 .iter()
                 .map(|system| {
                     let result =
-                        extractor::extract_packages_for_attrs(worktree_path, system, &target_attrs);
+                        extractor::extract_packages_for_attrs(worktree_path, system, &target_attrs, extract_store_paths);
                     (system.clone(), result)
                 })
                 .collect()

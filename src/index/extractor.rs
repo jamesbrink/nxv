@@ -96,15 +96,24 @@ const POSITIONS_NIX: &str = include_str!("nix/positions.nix");
 /// # Returns
 /// A vector of PackageInfo, or an error if extraction fails.
 pub fn extract_packages<P: AsRef<Path>>(repo_path: P) -> Result<Vec<PackageInfo>> {
-    extract_packages_for_attrs(repo_path, "x86_64-linux", &[])
+    extract_packages_for_attrs(repo_path, "x86_64-linux", &[], true)
 }
 
 /// Extract packages for a specific list of attribute names and system.
+///
+/// # Arguments
+/// * `repo_path` - Path to nixpkgs checkout
+/// * `system` - Target system (e.g., "x86_64-linux")
+/// * `attr_names` - List of attribute names to extract (empty = all packages)
+/// * `extract_store_paths` - Whether to extract store paths. Set to `false` for old commits
+///   (before 2020) to avoid triggering derivationStrict which fails on darwin-dependent
+///   packages with old nixpkgs + modern Nix.
 #[instrument(level = "debug", skip(repo_path, attr_names), fields(attr_count = attr_names.len()))]
 pub fn extract_packages_for_attrs<P: AsRef<Path>>(
     repo_path: P,
     system: &str,
     attr_names: &[String],
+    extract_store_paths: bool,
 ) -> Result<Vec<PackageInfo>> {
     let repo_path = repo_path.as_ref();
 
@@ -145,11 +154,12 @@ pub fn extract_packages_for_attrs<P: AsRef<Path>>(
     // Note: Nix import takes a path, not a string, so we don't quote nix_file.
     // But nixpkgsPath is assigned as a string, so we quote it.
     let expr = format!(
-        "import {} {{ nixpkgsPath = \"{}\"; system = \"{}\"; attrNames = {}; }}",
+        "import {} {{ nixpkgsPath = \"{}\"; system = \"{}\"; attrNames = {}; extractStorePaths = {}; }}",
         nix_file.display(),
         repo_path_str,
         system,
-        attr_names_arg
+        attr_names_arg,
+        if extract_store_paths { "true" } else { "false" }
     );
 
     // Use FFI evaluator with large stack thread
@@ -555,7 +565,7 @@ mod tests {
 "#;
         std::fs::write(path.join("default.nix"), default_nix).unwrap();
 
-        let packages = extract_packages_for_attrs(path, "x86_64-linux", &[]).unwrap();
+        let packages = extract_packages_for_attrs(path, "x86_64-linux", &[], true).unwrap();
         assert!(!packages.is_empty());
         assert!(packages.iter().any(|pkg| pkg.name == "hello"));
     }
@@ -643,7 +653,7 @@ mod tests {
         std::fs::write(path.join("default.nix"), default_nix).unwrap();
 
         let names = vec!["hello".to_string()];
-        let packages = extract_packages_for_attrs(path, "x86_64-linux", &names).unwrap();
+        let packages = extract_packages_for_attrs(path, "x86_64-linux", &names, true).unwrap();
         assert!(packages.iter().any(|pkg| pkg.name == "hello"));
         assert!(!packages.iter().any(|pkg| pkg.name == "world"));
     }
@@ -727,7 +737,7 @@ mod tests {
 
         // This should NOT fail with "Argument list too long" because
         // the attr list is written to a file
-        let result = extract_packages_for_attrs(path, "x86_64-linux", &large_attr_list);
+        let result = extract_packages_for_attrs(path, "x86_64-linux", &large_attr_list, true);
 
         match result {
             Ok(packages) => {
@@ -813,7 +823,7 @@ mod tests {
 "#;
         std::fs::write(path.join("default.nix"), default_nix).unwrap();
 
-        let packages = extract_packages_for_attrs(path, "x86_64-linux", &[]).unwrap();
+        let packages = extract_packages_for_attrs(path, "x86_64-linux", &[], true).unwrap();
 
         // Test direct version extraction
         let direct = packages.iter().find(|p| p.name == "direct-pkg");
@@ -880,7 +890,7 @@ mod tests {
         std::fs::write(path.join("default.nix"), default_nix).unwrap();
 
         let packages =
-            extract_packages_for_attrs(path, "x86_64-linux", &["hello".to_string()]).unwrap();
+            extract_packages_for_attrs(path, "x86_64-linux", &["hello".to_string()], true).unwrap();
 
         assert_eq!(packages.len(), 1);
         let hello = &packages[0];
@@ -946,6 +956,7 @@ mod tests {
             std::path::Path::new(&nixpkgs_path),
             "x86_64-linux",
             &attr_paths,
+            true,
         )
         .expect("Failed to extract packages");
 

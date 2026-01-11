@@ -1,6 +1,6 @@
 # Package metadata extraction for nxv indexer
 # This file is included at compile time via include_str!()
-{ nixpkgsPath, system, attrNames ? null }:
+{ nixpkgsPath, system, attrNames ? null, extractStorePaths ? true }:
 let
   # Import nixpkgs with current system and permissive config
   pkgs = import nixpkgsPath {
@@ -181,7 +181,14 @@ let
   #
   # Store path format: /nix/store/<32-char-hash>-<name>
   # We validate the prefix, length, and hyphen separator.
+  #
+  # IMPORTANT: Accessing pkg.outPath triggers derivationStrict which evaluates ALL
+  # build inputs. On old nixpkgs (2018) + modern Nix, darwin SDK packages fail to
+  # evaluate and the error escapes tryEval. Use extractStorePaths=false to skip.
   getStorePath = pkg:
+    # Skip if extractStorePaths is false (avoids derivationStrict for old commits)
+    if !extractStorePaths then null
+    else
     let
       storePrefix = "/nix/store/";
       storePrefixLen = 11;

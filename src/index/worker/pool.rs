@@ -114,6 +114,7 @@ impl Worker {
         system: &str,
         repo_path: &Path,
         attrs: &[String],
+        extract_store_paths: bool,
     ) -> Result<Vec<PackageInfo>> {
         let request_start = Instant::now();
         self.ensure_ready()?;
@@ -128,6 +129,7 @@ impl Worker {
             system,
             repo_path.to_string_lossy().to_string(),
             attrs.to_vec(),
+            extract_store_paths,
         );
         let send_start = Instant::now();
         proc.send(&request)?;
@@ -162,7 +164,7 @@ impl Worker {
             }) => {
                 // Worker requested restart - respawn and retry
                 self.handle_restart_with_memory(Some(memory_mib), Some(threshold_mib))?;
-                return self.extract(system, repo_path, attrs);
+                return self.extract(system, repo_path, attrs, extract_store_paths);
             }
             Some(WorkResponse::Ready) | Some(WorkResponse::PositionsResult { .. }) => {
                 return Err(NxvError::Worker(format!(
@@ -514,18 +516,19 @@ impl WorkerPool {
         system: &str,
         repo_path: &Path,
         attrs: &[String],
+        extract_store_paths: bool,
     ) -> Result<Vec<PackageInfo>> {
         // Find an available worker using try_lock
         for worker in &self.workers {
             if let Ok(mut w) = worker.try_lock() {
-                return w.extract(system, repo_path, attrs);
+                return w.extract(system, repo_path, attrs, extract_store_paths);
             }
         }
 
         // All workers busy - use round-robin to distribute wait fairly
         let idx = self.next_worker.fetch_add(1, Ordering::Relaxed) % self.workers.len();
         let mut w = self.workers[idx].lock().expect("worker mutex poisoned");
-        w.extract(system, repo_path, attrs)
+        w.extract(system, repo_path, attrs, extract_store_paths)
     }
 
     /// Extract packages for multiple systems in parallel.
@@ -538,6 +541,7 @@ impl WorkerPool {
         repo_path: &Path,
         systems: &[String],
         attrs: &[String],
+        extract_store_paths: bool,
     ) -> Vec<Result<Vec<PackageInfo>>> {
         use std::thread;
 
@@ -567,7 +571,7 @@ impl WorkerPool {
 
                     s.spawn(move || {
                         let mut w = worker.lock().expect("worker mutex poisoned");
-                        w.extract(&system, &repo_path, &attrs)
+                        w.extract(&system, &repo_path, &attrs, extract_store_paths)
                     })
                 })
                 .collect();

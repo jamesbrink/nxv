@@ -251,6 +251,14 @@ A NixOS module is provided for running nxv as a systemd service:
 - `publish-index.yml`: Weekly scheduled or manual - builds the package index and uploads to `index-latest` release
 - `pages.yml`: Deploys documentation website to GitHub Pages on changes to `website/`
 
+> **TODO:** After merging `feat/native-nix-indexer` to main, remove the branch from GitHub Pages deployment policy:
+> ```bash
+> gh api repos/jamesbrink/nxv/environments/github-pages/deployment-branch-policies
+> # Find the ID for feat/native-nix-indexer, then delete it:
+> gh api repos/jamesbrink/nxv/environments/github-pages/deployment-branch-policies/<ID> -X DELETE
+> ```
+> Also revert `.github/workflows/pages.yml` to only trigger on `main`.
+
 ### Publishing the Index
 
 The default manifest URL is `https://github.com/jamesbrink/nxv/releases/download/index-latest/manifest.json`.

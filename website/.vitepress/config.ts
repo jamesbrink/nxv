@@ -42,6 +42,7 @@ export default defineConfig({
           text: 'Advanced',
           items: [
             { text: 'Building Indexes', link: '/advanced/indexer' },
+            { text: 'Indexer CLI Reference', link: '/advanced/indexer-cli' },
             { text: 'Troubleshooting', link: '/advanced/troubleshooting' },
           ],
         },

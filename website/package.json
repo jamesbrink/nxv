@@ -8,7 +8,7 @@
     "preview": "vitepress preview",
     "fmt": "prettier --write .",
     "fmt:check": "prettier --check .",
-    "postinstall": "bun2nix -o bun.nix"
+    "postinstall": "command -v bun2nix >/dev/null && bun2nix -o bun.nix || true"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.1.0",

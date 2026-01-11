@@ -11,7 +11,6 @@ use std::path::Path;
 use std::time::Duration;
 #[cfg(feature = "indexer")]
 use std::time::Instant;
-use tracing::instrument;
 #[cfg(feature = "indexer")]
 use tracing::trace;
 
@@ -78,7 +77,6 @@ impl Database {
     /// Checkpoint the WAL to ensure data is flushed to disk.
     /// Call this at regular intervals during long-running operations.
     #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
-    #[instrument(skip(self))]
     pub fn checkpoint(&self) -> Result<()> {
         self.conn
             .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
@@ -475,13 +473,21 @@ impl Database {
 
     /// Set a metadata value.
     #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
-    #[instrument(skip(self, value))]
     pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
             [key, value],
         )?;
         Ok(())
+    }
+
+    /// Get the total number of package version records.
+    pub fn get_package_count(&self) -> Result<i64> {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM package_versions", [], |row| {
+                row.get(0)
+            })
+            .map_err(|e| e.into())
     }
 
     /// Get checkpoint for a specific year range (parallel indexing).
@@ -496,7 +502,6 @@ impl Database {
     ///
     /// Stores the last indexed commit hash and timestamp for the given range.
     #[cfg(feature = "indexer")]
-    #[instrument(skip(self))]
     pub fn set_range_checkpoint(&self, range_label: &str, commit_hash: &str) -> Result<()> {
         self.set_meta(&format!("last_indexed_commit_{}", range_label), commit_hash)?;
         self.set_meta(
@@ -609,7 +614,6 @@ impl Database {
     /// # }
     /// ```
     #[cfg(feature = "indexer")]
-    #[instrument(skip(self, packages), fields(batch_size = packages.len()))]
     pub fn upsert_packages_batch(&mut self, packages: &[PackageVersion]) -> Result<usize> {
         let batch_start = Instant::now();
         let tx = self.conn.transaction()?;

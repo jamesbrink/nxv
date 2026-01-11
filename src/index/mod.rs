@@ -859,6 +859,26 @@ impl Indexer {
 
         let mut db = Database::open(&db_path)?;
 
+        // Log startup configuration
+        let db_size_mb = std::fs::metadata(&db_path)
+            .map(|m| m.len() as f64 / 1024.0 / 1024.0)
+            .unwrap_or(0.0);
+        let schema_version = db.get_meta("schema_version")?.unwrap_or_default();
+        let package_count = db.get_package_count().unwrap_or(0);
+
+        info!(
+            target: "nxv::index",
+            version = env!("CARGO_PKG_VERSION"),
+            db_size_mb = format!("{:.1}", db_size_mb),
+            schema_version = schema_version,
+            packages = package_count,
+            checkpoint_interval = self.config.checkpoint_interval,
+            memory_budget = %self.config.memory_budget,
+            systems = ?self.config.systems,
+            gc_interval = self.config.gc_interval,
+            "Indexer initialized"
+        );
+
         // Check for last indexed commit across all checkpoint types
         // This unifies regular incremental and year-range checkpoints
         let last_commit = db.get_latest_checkpoint()?;
@@ -867,13 +887,8 @@ impl Indexer {
             Some(hash) => {
                 info!(
                     target: "nxv::index",
-                    "Performing incremental index from commit {}...",
-                    &hash[..7]
-                );
-                debug!(
-                    target: "nxv::index",
-                    "Checkpoint interval: {} commits",
-                    self.config.checkpoint_interval
+                    commit = &hash[..7],
+                    "Resuming from checkpoint"
                 );
 
                 // Get current HEAD

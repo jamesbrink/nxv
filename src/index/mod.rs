@@ -1486,28 +1486,42 @@ impl Indexer {
 
             // If full extraction is needed (first commit, periodic, or large infrastructure diff),
             // extract all packages from all-packages.nix
-            if needs_full_extraction && let Some(all_attrs_list) = all_attrs {
-                for attr in all_attrs_list {
-                    target_attr_paths.insert(attr.clone());
-                }
-                if commit_idx == 0 {
-                    debug!(
-                        commit = %commit.short_hash,
-                        total_attrs = target_attr_paths.len(),
-                        "Full extraction for first commit to capture baseline state"
-                    );
-                } else if periodic_full {
-                    debug!(
-                        commit = %commit.short_hash,
-                        total_attrs = target_attr_paths.len(),
-                        interval = self.config.full_extraction_interval,
-                        "Periodic full extraction to catch missed packages"
-                    );
+            // Track whether we should do full extraction with empty target list (triggers builtins.attrNames)
+            let mut extract_all_packages = false;
+
+            if needs_full_extraction {
+                if let Some(all_attrs_list) = all_attrs {
+                    for attr in all_attrs_list {
+                        target_attr_paths.insert(attr.clone());
+                    }
+                    if commit_idx == 0 {
+                        debug!(
+                            commit = %commit.short_hash,
+                            total_attrs = target_attr_paths.len(),
+                            "Full extraction for first commit to capture baseline state"
+                        );
+                    } else if periodic_full {
+                        debug!(
+                            commit = %commit.short_hash,
+                            total_attrs = target_attr_paths.len(),
+                            interval = self.config.full_extraction_interval,
+                            "Periodic full extraction to catch missed packages"
+                        );
+                    } else {
+                        debug!(
+                            commit = %commit.short_hash,
+                            total_attrs = target_attr_paths.len(),
+                            "Full extraction triggered due to large infrastructure diff"
+                        );
+                    }
                 } else {
+                    // all_attrs is None (file_attr_map failed or is empty)
+                    // Pass empty list to extraction which triggers builtins.attrNames in Nix
+                    extract_all_packages = true;
                     debug!(
                         commit = %commit.short_hash,
-                        total_attrs = target_attr_paths.len(),
-                        "Full extraction triggered due to large infrastructure diff"
+                        reason = if commit_idx == 0 { "first_commit" } else if periodic_full { "periodic" } else { "infrastructure_diff" },
+                        "Full extraction with dynamic attr discovery (file_attr_map unavailable)"
                     );
                 }
             }
@@ -1544,13 +1558,15 @@ impl Indexer {
                 }
             }
 
-            if target_attr_paths.is_empty() {
+            // Skip commits with no targets UNLESS we're doing full extraction with dynamic discovery
+            if target_attr_paths.is_empty() && !extract_all_packages {
                 result.commits_processed += 1;
                 last_processed_commit = Some(commit.hash.clone());
                 progress.tick();
                 continue;
             }
 
+            // When extract_all_packages is true, pass empty list to trigger builtins.attrNames in Nix
             let mut target_list: Vec<String> = target_attr_paths.into_iter().collect();
             target_list.sort();
 
@@ -2393,9 +2409,24 @@ fn process_range_worker(
         }
 
         // Full extraction for first commit, periodic interval, or large infrastructure diff
-        if needs_full_extraction && let Some(all_attrs_list) = all_attrs {
-            for attr in all_attrs_list {
-                target_attr_paths.insert(attr.clone());
+        // Track whether we should do full extraction with empty target list (triggers builtins.attrNames)
+        let mut extract_all_packages = false;
+
+        if needs_full_extraction {
+            if let Some(all_attrs_list) = all_attrs {
+                for attr in all_attrs_list {
+                    target_attr_paths.insert(attr.clone());
+                }
+            } else {
+                // all_attrs is None (file_attr_map failed or is empty)
+                // Pass empty list to extraction which triggers builtins.attrNames in Nix
+                extract_all_packages = true;
+                tracing::debug!(
+                    range = %range.label,
+                    commit = %&commit.hash[..8],
+                    reason = if commit_idx == 0 { "first_commit" } else if periodic_full { "periodic" } else { "infrastructure_diff" },
+                    "Full extraction with dynamic attr discovery (file_attr_map unavailable)"
+                );
             }
         }
 
@@ -2455,7 +2486,8 @@ fn process_range_worker(
             );
         }
 
-        if target_attrs.is_empty() {
+        // Skip commits with no targets UNLESS we're doing full extraction with dynamic discovery
+        if target_attrs.is_empty() && !extract_all_packages {
             // No packages to extract for this commit
             result.commits_processed += 1;
             progress.tick();
@@ -2463,6 +2495,7 @@ fn process_range_worker(
         }
 
         // Extract packages for all systems
+        // When extract_all_packages is true, empty target_attrs triggers builtins.attrNames in Nix
         let extract_start = std::time::Instant::now();
         let extraction_results: Vec<(
             String,

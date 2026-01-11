@@ -75,7 +75,35 @@ Ranges processed:
 
 ## Open Issues
 
-### None Currently
+### Full Extraction Fallback Gap (Fixed: 2025-01-11)
+
+**Problem:** The periodic full extraction fix (f3bfa0d) had a gap. When `build_file_attr_map`
+fails on old commits (common with 2018 nixpkgs + modern Nix), `all_attrs` is `None`, and
+the full extraction code does nothing.
+
+**Root Cause:**
+
+```rust
+// This condition NEVER runs when all_attrs is None!
+if needs_full_extraction && let Some(all_attrs_list) = all_attrs {
+    for attr in all_attrs_list { ... }
+}
+```
+
+When `build_file_attr_map` fails (returns Err), the indexer falls back to an empty map.
+With an empty map, `all_attrs` is `None`, making periodic full extraction ineffective.
+
+**Fix:** Added `extract_all_packages` flag that triggers when `needs_full_extraction` is true
+but `all_attrs` is `None`. When this flag is set, an empty target list is passed to the
+extraction, which triggers `builtins.attrNames pkgs` in the Nix code to get all packages.
+
+**Verification:** After rebuilding, re-index a small range and check Firefox versions:
+
+```bash
+nxv index --nixpkgs-path nixpkgs --since 2018-01-01 --until 2018-04-01 --full
+sqlite3 ~/.local/share/nxv/index.db \
+  "SELECT COUNT(*) FROM package_versions WHERE attribute_path = 'firefox';"
+```
 
 ---
 

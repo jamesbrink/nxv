@@ -1,6 +1,8 @@
 # Building Indexes
 
-This guide covers building your own nxv index from a local nixpkgs checkout. This is an advanced topic - most users should use `nxv update` to download the pre-built index.
+This guide covers building your own nxv index from a local nixpkgs checkout.
+This is an advanced topic - most users should use `nxv update` to download the
+pre-built index.
 
 ## Prerequisites
 
@@ -72,7 +74,8 @@ nxv index --nixpkgs-path ./nixpkgs --worker-memory 2G
 
 ## Store Path Extraction
 
-Store paths are only extracted for commits after 2020-01-01 (when cache.nixos.org availability improved):
+Store paths are only extracted for commits after 2020-01-01 (when
+cache.nixos.org availability improved):
 
 ```bash
 # Skip store path extraction (faster, smaller index)
@@ -111,6 +114,7 @@ nxv publish --output-dir ./publish \
 ```
 
 Generated files:
+
 - `index.db.zst` - Compressed database (~28MB)
 - `bloom.bin` - Bloom filter (~96KB)
 - `manifest.json` - Metadata with checksums and signature
@@ -124,6 +128,7 @@ nxv keygen --output-dir ./keys
 ```
 
 This creates:
+
 - `nxv.key` - Secret key (keep private!)
 - `nxv.pub` - Public key (distribute with your index)
 
@@ -165,7 +170,8 @@ The `version_source` field tracks which method was used.
 
 ## Garbage Collection
 
-Long indexing runs accumulate Nix store data. nxv runs garbage collection automatically:
+Long indexing runs accumulate Nix store data. nxv runs garbage collection
+automatically:
 
 ```bash
 # Disable automatic GC

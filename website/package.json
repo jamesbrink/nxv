@@ -6,12 +6,22 @@
     "dev": "vitepress dev",
     "build": "vitepress build",
     "preview": "vitepress preview",
+    "fmt": "prettier --write .",
+    "fmt:check": "prettier --check .",
     "postinstall": "bun2nix -o bun.nix"
   },
   "devDependencies": {
-    "vitepress": "^1.6.0",
-    "vue": "^3.5.0",
+    "@tailwindcss/vite": "^4.1.0",
+    "prettier": "^3.4.0",
     "tailwindcss": "^4.1.0",
-    "@tailwindcss/vite": "^4.1.0"
+    "vitepress": "^1.6.0",
+    "vue": "^3.5.0"
+  },
+  "prettier": {
+    "semi": false,
+    "singleQuote": true,
+    "trailingComma": "es5",
+    "proseWrap": "always",
+    "printWidth": 80
   }
 }

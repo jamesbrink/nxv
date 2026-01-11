@@ -7,12 +7,10 @@ export default defineConfig({
   base: '/nxv/',
 
   vite: {
-    plugins: [tailwindcss()]
+    plugins: [tailwindcss()],
   },
 
-  head: [
-    ['link', { rel: 'icon', href: '/nxv/favicon.svg' }]
-  ],
+  head: [['link', { rel: 'icon', href: '/nxv/favicon.svg' }]],
 
   themeConfig: {
     logo: '/favicon.svg',
@@ -21,7 +19,7 @@ export default defineConfig({
       { text: 'Guide', link: '/guide/' },
       { text: 'API', link: '/api/' },
       { text: 'Advanced', link: '/advanced/indexer' },
-      { text: 'GitHub', link: 'https://github.com/jamesbrink/nxv' }
+      { text: 'GitHub', link: 'https://github.com/jamesbrink/nxv' },
     ],
 
     sidebar: {
@@ -31,51 +29,47 @@ export default defineConfig({
           items: [
             { text: 'Getting Started', link: '/guide/' },
             { text: 'Installation', link: '/guide/installation' },
-            { text: 'Configuration', link: '/guide/configuration' }
-          ]
+            { text: 'Configuration', link: '/guide/configuration' },
+          ],
         },
         {
           text: 'Usage',
-          items: [
-            { text: 'CLI Reference', link: '/guide/cli-reference' }
-          ]
-        }
+          items: [{ text: 'CLI Reference', link: '/guide/cli-reference' }],
+        },
       ],
       '/advanced/': [
         {
           text: 'Advanced',
           items: [
             { text: 'Building Indexes', link: '/advanced/indexer' },
-            { text: 'Troubleshooting', link: '/advanced/troubleshooting' }
-          ]
-        }
+            { text: 'Troubleshooting', link: '/advanced/troubleshooting' },
+          ],
+        },
       ],
       '/api/': [
         {
           text: 'API Reference',
-          items: [
-            { text: 'HTTP API', link: '/api/' }
-          ]
-        }
-      ]
+          items: [{ text: 'HTTP API', link: '/api/' }],
+        },
+      ],
     },
 
     socialLinks: [
-      { icon: 'github', link: 'https://github.com/jamesbrink/nxv' }
+      { icon: 'github', link: 'https://github.com/jamesbrink/nxv' },
     ],
 
     search: {
-      provider: 'local'
+      provider: 'local',
     },
 
     footer: {
       message: 'Released under the MIT License.',
-      copyright: 'Copyright James Brink'
+      copyright: 'Copyright James Brink',
     },
 
     editLink: {
       pattern: 'https://github.com/jamesbrink/nxv/edit/main/website/:path',
-      text: 'Edit this page on GitHub'
-    }
-  }
+      text: 'Edit this page on GitHub',
+    },
+  },
 })

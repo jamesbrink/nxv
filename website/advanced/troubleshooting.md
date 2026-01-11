@@ -7,17 +7,20 @@ Common issues and solutions when using nxv.
 ### No results found
 
 1. **Check spelling**: Package names are case-sensitive
+
    ```bash
    nxv search Python  # Wrong
    nxv search python  # Correct
    ```
 
 2. **Try partial match**: Use prefix search
+
    ```bash
    nxv search pyth
    ```
 
 3. **Search descriptions**: The package might have a different name
+
    ```bash
    nxv search "image editor" --desc
    ```
@@ -29,7 +32,8 @@ Common issues and solutions when using nxv.
 
 ### Search is slow
 
-The first search loads the database and bloom filter into memory. Subsequent searches are fast. If searches remain slow:
+The first search loads the database and bloom filter into memory. Subsequent
+searches are fast. If searches remain slow:
 
 1. Check disk I/O (SSD recommended)
 2. Ensure sufficient RAM (~500MB for index)
@@ -60,6 +64,7 @@ The first search loads the database and bloom filter into memory. Subsequent sea
 ### Disk full
 
 The index requires ~100MB of disk space:
+
 - Linux: `~/.local/share/nxv/`
 - macOS: `~/Library/Application Support/nxv/`
 
@@ -88,6 +93,7 @@ nxv serve --cors-origins "http://localhost:3000"
 ### Connection refused
 
 1. **Check bind address**: Default is localhost only
+
    ```bash
    nxv serve --bind 0.0.0.0  # Listen on all interfaces
    ```
@@ -123,6 +129,7 @@ nix-collect-garbage -d
 ### Indexing stuck
 
 1. **Check logs**:
+
    ```bash
    NXV_LOG_LEVEL=debug nxv index --nixpkgs-path ./nixpkgs
    ```
@@ -165,7 +172,8 @@ NXV_LOG_FILE=/tmp/nxv.log nxv search python
 
 ## Getting Help
 
-1. **Check GitHub Issues**: [github.com/jamesbrink/nxv/issues](https://github.com/jamesbrink/nxv/issues)
+1. **Check GitHub Issues**:
+   [github.com/jamesbrink/nxv/issues](https://github.com/jamesbrink/nxv/issues)
 2. **Open an issue**: Include:
    - nxv version (`nxv --version`)
    - Operating system

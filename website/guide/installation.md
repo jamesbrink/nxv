@@ -75,7 +75,9 @@ nxv update
 ```
 
 This downloads ~28MB of compressed data to your local data directory:
+
 - **Linux**: `~/.local/share/nxv/`
 - **macOS**: `~/Library/Application Support/nxv/`
 
-The index is updated weekly. Run `nxv update` periodically to get the latest packages.
+The index is updated weekly. Run `nxv update` periodically to get the latest
+packages.

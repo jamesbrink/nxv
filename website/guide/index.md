@@ -1,6 +1,8 @@
 # Getting Started
 
-nxv helps you find specific versions of Nix packages across nixpkgs history. Whether you need to pin a dependency to an older version or find when a package was introduced, nxv makes it fast and easy.
+nxv helps you find specific versions of Nix packages across nixpkgs history.
+Whether you need to pin a dependency to an older version or find when a package
+was introduced, nxv makes it fast and easy.
 
 ## Quick Start
 
@@ -31,11 +33,13 @@ For each package version, nxv provides:
 ## How It Works
 
 nxv uses a pre-built SQLite index containing:
+
 - ~2.8 million package version records
 - Package metadata (description, license, homepage)
 - Bloom filter for instant "not found" responses
 
-The index is downloaded once and searched locally, so queries are fast and work offline.
+The index is downloaded once and searched locally, so queries are fast and work
+offline.
 
 ## Next Steps
 

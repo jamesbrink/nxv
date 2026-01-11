@@ -1,6 +1,7 @@
 # HTTP API
 
-nxv includes a REST API server for programmatic access. Start it with `nxv serve`.
+nxv includes a REST API server for programmatic access. Start it with
+`nxv serve`.
 
 ## Base URL
 
@@ -22,18 +23,18 @@ GET /api/v1/search
 
 **Query Parameters:**
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `q` | string | Search query (required) |
-| `version` | string | Version filter (prefix match) |
-| `exact` | boolean | Exact name match |
-| `desc` | boolean | Search descriptions |
-| `license` | string | License filter |
-| `platform` | string | Platform filter |
-| `sort` | string | Sort order: relevance, date, version, name |
-| `reverse` | boolean | Reverse sort |
-| `limit` | integer | Max results (default: 20, max: 100) |
-| `offset` | integer | Pagination offset |
+| Parameter  | Type    | Description                                |
+| ---------- | ------- | ------------------------------------------ |
+| `q`        | string  | Search query (required)                    |
+| `version`  | string  | Version filter (prefix match)              |
+| `exact`    | boolean | Exact name match                           |
+| `desc`     | boolean | Search descriptions                        |
+| `license`  | string  | License filter                             |
+| `platform` | string  | Platform filter                            |
+| `sort`     | string  | Sort order: relevance, date, version, name |
+| `reverse`  | boolean | Reverse sort                               |
+| `limit`    | integer | Max results (default: 20, max: 100)        |
+| `offset`   | integer | Pagination offset                          |
 
 **Example:**
 
@@ -101,9 +102,9 @@ GET /api/v1/history/{attribute_path}
 
 **Query Parameters:**
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `limit` | integer | Max versions (default: 50) |
+| Parameter | Type    | Description                |
+| --------- | ------- | -------------------------- |
+| `limit`   | integer | Max versions (default: 50) |
 
 **Example:**
 
@@ -176,13 +177,13 @@ All errors return a JSON object:
 
 **HTTP Status Codes:**
 
-| Code | Description |
-|------|-------------|
-| 200 | Success |
-| 400 | Bad request (invalid parameters) |
-| 404 | Not found |
-| 429 | Rate limited |
-| 500 | Internal server error |
+| Code | Description                      |
+| ---- | -------------------------------- |
+| 200  | Success                          |
+| 400  | Bad request (invalid parameters) |
+| 404  | Not found                        |
+| 429  | Rate limited                     |
+| 500  | Internal server error            |
 
 ## OpenAPI Documentation
 
@@ -206,8 +207,8 @@ nxv serve --cors-origins "https://example.com,https://app.example.com"
 
 ## Request Headers
 
-| Header | Description |
-|--------|-------------|
+| Header         | Description                                                 |
+| -------------- | ----------------------------------------------------------- |
 | `X-Request-ID` | Correlation ID for tracing (auto-generated if not provided) |
 
 The server echoes back the request ID in responses for distributed tracing.

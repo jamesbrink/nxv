@@ -21,19 +21,19 @@ nxv search <query> [options]
 
 **Options:**
 
-| Flag | Description |
-|------|-------------|
-| `-v, --version <VERSION>` | Filter by version (prefix match) |
-| `-e, --exact` | Exact name match only |
-| `-d, --desc` | Search in descriptions (full-text) |
-| `--license <LICENSE>` | Filter by license |
-| `--platform <PLATFORM>` | Filter by platform |
-| `-s, --sort <ORDER>` | Sort order: relevance, date, version, name |
-| `-r, --reverse` | Reverse sort order |
-| `-l, --limit <N>` | Maximum results (default: 20) |
-| `--offset <N>` | Skip first N results |
-| `-f, --full` | Show all commits (no deduplication) |
-| `-o, --output <FORMAT>` | Output format: table, json, plain |
+| Flag                      | Description                                |
+| ------------------------- | ------------------------------------------ |
+| `-v, --version <VERSION>` | Filter by version (prefix match)           |
+| `-e, --exact`             | Exact name match only                      |
+| `-d, --desc`              | Search in descriptions (full-text)         |
+| `--license <LICENSE>`     | Filter by license                          |
+| `--platform <PLATFORM>`   | Filter by platform                         |
+| `-s, --sort <ORDER>`      | Sort order: relevance, date, version, name |
+| `-r, --reverse`           | Reverse sort order                         |
+| `-l, --limit <N>`         | Maximum results (default: 20)              |
+| `--offset <N>`            | Skip first N results                       |
+| `-f, --full`              | Show all commits (no deduplication)        |
+| `-o, --output <FORMAT>`   | Output format: table, json, plain          |
 
 **Examples:**
 
@@ -64,11 +64,11 @@ nxv info <package> [version] [options]
 
 **Options:**
 
-| Flag | Description |
-|------|-------------|
-| `--first` | Show first occurrence (oldest) |
-| `--last` | Show last occurrence (newest, default) |
-| `-o, --output <FORMAT>` | Output format: table, json, plain |
+| Flag                    | Description                            |
+| ----------------------- | -------------------------------------- |
+| `--first`               | Show first occurrence (oldest)         |
+| `--last`                | Show last occurrence (newest, default) |
+| `-o, --output <FORMAT>` | Output format: table, json, plain      |
 
 **Examples:**
 
@@ -93,9 +93,9 @@ nxv history <package> [options]
 
 **Options:**
 
-| Flag | Description |
-|------|-------------|
-| `-l, --limit <N>` | Maximum versions to show |
+| Flag                    | Description                       |
+| ----------------------- | --------------------------------- |
+| `-l, --limit <N>`       | Maximum versions to show          |
 | `-o, --output <FORMAT>` | Output format: table, json, plain |
 
 **Examples:**
@@ -118,10 +118,10 @@ nxv update [options]
 
 **Options:**
 
-| Flag | Description |
-|------|-------------|
-| `--force` | Force full download (skip delta) |
-| `-q, --quiet` | Suppress progress output |
+| Flag          | Description                      |
+| ------------- | -------------------------------- |
+| `--force`     | Force full download (skip delta) |
+| `-q, --quiet` | Suppress progress output         |
 
 ### serve
 
@@ -133,11 +133,11 @@ nxv serve [options]
 
 **Options:**
 
-| Flag | Description |
-|------|-------------|
-| `-p, --port <PORT>` | Listen port (default: 8080) |
-| `-b, --bind <ADDR>` | Bind address (default: 127.0.0.1) |
-| `--cors` | Enable CORS for all origins |
+| Flag                       | Description                            |
+| -------------------------- | -------------------------------------- |
+| `-p, --port <PORT>`        | Listen port (default: 8080)            |
+| `-b, --bind <ADDR>`        | Bind address (default: 127.0.0.1)      |
+| `--cors`                   | Enable CORS for all origins            |
 | `--cors-origins <ORIGINS>` | Allowed CORS origins (comma-separated) |
 
 **Examples:**
@@ -160,8 +160,8 @@ nxv stats [options]
 
 **Options:**
 
-| Flag | Description |
-|------|-------------|
+| Flag                    | Description                       |
+| ----------------------- | --------------------------------- |
 | `-o, --output <FORMAT>` | Output format: table, json, plain |
 
 ### completions

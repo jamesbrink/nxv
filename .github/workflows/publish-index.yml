@@ -124,8 +124,11 @@ jobs:
           # Use GitHub API to count commits ahead on master branch
           # Note: We index from master, not nixos-unstable, as it has more packages
           echo "Querying GitHub API for commit count..."
+          # Capture both output and exit code, preventing errexit from stopping the script
+          set +e
           API_RESPONSE=$(gh api "repos/NixOS/nixpkgs/compare/${LAST_COMMIT}...master" 2>&1)
           API_EXIT_CODE=$?
+          set -e
 
           if [ $API_EXIT_CODE -ne 0 ]; then
             echo "::warning::GitHub API call failed for commit ${LAST_COMMIT} (exit code: $API_EXIT_CODE)"

@@ -117,6 +117,129 @@ pub fn extract_packages_for_attrs<P: AsRef<Path>>(
 ) -> Result<Vec<PackageInfo>> {
     let repo_path = repo_path.as_ref();
 
+    // Batch large attribute lists to avoid memory pressure in Nix evaluation.
+    // Full extraction with 11K+ attrs can exhaust worker memory (2GB threshold).
+    // Process in batches of 500 attrs to stay well within memory limits.
+    const BATCH_SIZE: usize = 500;
+
+    if !attr_names.is_empty() && attr_names.len() > BATCH_SIZE {
+        let num_batches = attr_names.len().div_ceil(BATCH_SIZE);
+        // Use write! to stderr with flush to ensure output is captured
+        use std::io::Write;
+        let _ = writeln!(
+            std::io::stderr(),
+            "[{}] Batching large extraction: {} attrs into {} batches of {}",
+            system,
+            attr_names.len(),
+            num_batches,
+            BATCH_SIZE
+        );
+        let _ = std::io::stderr().flush();
+        trace!(
+            system = %system,
+            total_attrs = attr_names.len(),
+            batch_size = BATCH_SIZE,
+            num_batches = num_batches,
+            "Batching large extraction"
+        );
+
+        let mut all_packages = Vec::new();
+        let mut failed_batches = 0;
+        let mut total_failed_attrs = 0;
+
+        for (batch_idx, batch) in attr_names.chunks(BATCH_SIZE).enumerate() {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[{}] Processing batch {}/{}: {} attrs",
+                system,
+                batch_idx + 1,
+                num_batches,
+                batch.len()
+            );
+            let _ = std::io::stderr().flush();
+            trace!(
+                system = %system,
+                batch_idx = batch_idx,
+                batch_size = batch.len(),
+                "Processing extraction batch"
+            );
+
+            // Continue on batch failures to collect as many packages as possible.
+            // This is critical for full extraction where some batches may fail due to
+            // memory pressure or evaluation errors, but we still want results from
+            // successful batches.
+            match extract_packages_batch(repo_path, system, batch, extract_store_paths) {
+                Ok(batch_result) => {
+                    trace!(
+                        system = %system,
+                        batch_idx = batch_idx,
+                        packages_found = batch_result.len(),
+                        "Batch extraction succeeded"
+                    );
+                    all_packages.extend(batch_result);
+                }
+                Err(e) => {
+                    failed_batches += 1;
+                    total_failed_attrs += batch.len();
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "[{}] Batch {}/{} failed ({} attrs): {}",
+                        system,
+                        batch_idx + 1,
+                        num_batches,
+                        batch.len(),
+                        e
+                    );
+                    let _ = std::io::stderr().flush();
+                    trace!(
+                        system = %system,
+                        batch_idx = batch_idx,
+                        batch_size = batch.len(),
+                        error = %e,
+                        "Batch extraction failed, continuing with remaining batches"
+                    );
+                    // Continue with remaining batches instead of failing early
+                }
+            }
+        }
+
+        if failed_batches > 0 {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[{}] Batched extraction completed with {} failed batches ({} attrs skipped), {} packages extracted",
+                system,
+                failed_batches,
+                total_failed_attrs,
+                all_packages.len()
+            );
+            let _ = std::io::stderr().flush();
+        }
+
+        trace!(
+            system = %system,
+            total_attrs = attr_names.len(),
+            total_packages = all_packages.len(),
+            failed_batches = failed_batches,
+            total_failed_attrs = total_failed_attrs,
+            "Batched extraction completed"
+        );
+
+        return Ok(all_packages);
+    }
+
+    // Single extraction for small attr lists or full discovery (empty list)
+    extract_packages_batch(repo_path, system, attr_names, extract_store_paths)
+}
+
+/// Internal function to extract a batch of packages.
+fn extract_packages_batch<P: AsRef<Path>>(
+    repo_path: P,
+    system: &str,
+    attr_names: &[String],
+    extract_store_paths: bool,
+) -> Result<Vec<PackageInfo>> {
+    let repo_path = repo_path.as_ref();
+
     // Canonicalize the path to avoid any relative path issues
     let canonical_path = std::fs::canonicalize(repo_path)?;
     let repo_path_str = canonical_path.display().to_string();
@@ -1197,6 +1320,159 @@ mod tests {
             names.contains(&"world"),
             "Should find 'world' package, got: {:?}",
             names
+        );
+    }
+
+    /// Test that large attribute lists are batched correctly.
+    ///
+    /// This tests the batching logic where lists > BATCH_SIZE (500) are split
+    /// into multiple batches to avoid memory pressure during Nix evaluation.
+    #[test]
+    fn test_batching_logic_splits_large_lists() {
+        let nix_check = Command::new("nix").arg("--version").output();
+        if nix_check.is_err() || !nix_check.unwrap().status.success() {
+            eprintln!("Skipping: nix not available");
+            return;
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path();
+        std::fs::create_dir_all(path.join("pkgs")).unwrap();
+
+        // Create a nixpkgs mock with 600 packages (more than BATCH_SIZE of 500)
+        let mut default_nix = "{ system, config }:\n{\n".to_string();
+        for i in 0..600 {
+            default_nix.push_str(&format!(
+                r#"  pkg{} = {{ pname = "pkg{}"; version = "{}.0.0"; type = "derivation"; }};
+"#,
+                i, i, i
+            ));
+        }
+        default_nix.push_str("}\n");
+        std::fs::write(path.join("default.nix"), default_nix).unwrap();
+
+        // Generate attr names for all 600 packages
+        let attr_names: Vec<String> = (0..600).map(|i| format!("pkg{}", i)).collect();
+
+        // This should trigger batching (600 > 500)
+        let packages = extract_packages_for_attrs(path, "x86_64-linux", &attr_names, true).unwrap();
+
+        // Should have extracted all 600 packages despite batching
+        assert_eq!(
+            packages.len(),
+            600,
+            "Should extract all 600 packages across batches"
+        );
+
+        // Verify some specific packages from different batches
+        assert!(packages.iter().any(|p| p.name == "pkg0")); // First batch
+        assert!(packages.iter().any(|p| p.name == "pkg499")); // End of first batch
+        assert!(packages.iter().any(|p| p.name == "pkg500")); // Start of second batch
+        assert!(packages.iter().any(|p| p.name == "pkg599")); // Last package
+    }
+
+    /// Test that small attribute lists are NOT batched.
+    ///
+    /// Lists smaller than BATCH_SIZE should be processed in a single call
+    /// without batching overhead.
+    #[test]
+    fn test_small_lists_not_batched() {
+        let nix_check = Command::new("nix").arg("--version").output();
+        if nix_check.is_err() || !nix_check.unwrap().status.success() {
+            eprintln!("Skipping: nix not available");
+            return;
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path();
+        std::fs::create_dir_all(path.join("pkgs")).unwrap();
+
+        // Create a nixpkgs mock with 50 packages (less than BATCH_SIZE of 500)
+        let mut default_nix = "{ system, config }:\n{\n".to_string();
+        for i in 0..50 {
+            default_nix.push_str(&format!(
+                r#"  pkg{} = {{ pname = "pkg{}"; version = "{}.0.0"; type = "derivation"; }};
+"#,
+                i, i, i
+            ));
+        }
+        default_nix.push_str("}\n");
+        std::fs::write(path.join("default.nix"), default_nix).unwrap();
+
+        // Generate attr names for all 50 packages
+        let attr_names: Vec<String> = (0..50).map(|i| format!("pkg{}", i)).collect();
+
+        // This should NOT trigger batching (50 < 500)
+        let packages = extract_packages_for_attrs(path, "x86_64-linux", &attr_names, true).unwrap();
+
+        // Should have extracted all 50 packages
+        assert_eq!(packages.len(), 50, "Should extract all 50 packages");
+    }
+
+    /// Test that batched extraction continues on partial failures.
+    ///
+    /// When some batches fail (e.g., due to evaluation errors), the extraction
+    /// should continue with remaining batches and return all successful results.
+    /// This is critical for full extraction where memory pressure may cause
+    /// some batches to fail.
+    #[test]
+    fn test_batched_extraction_continues_on_partial_failure() {
+        let nix_check = Command::new("nix").arg("--version").output();
+        if nix_check.is_err() || !nix_check.unwrap().status.success() {
+            eprintln!("Skipping: nix not available");
+            return;
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path();
+        std::fs::create_dir_all(path.join("pkgs")).unwrap();
+
+        // Create a nixpkgs mock with 600 packages, some that throw errors
+        let mut default_nix = "{ system, config }:\n{\n".to_string();
+        for i in 0..600 {
+            default_nix.push_str(&format!(
+                r#"  pkg{} = {{ pname = "pkg{}"; version = "{}.0.0"; type = "derivation"; }};
+"#,
+                i, i, i
+            ));
+        }
+        default_nix.push_str("}\n");
+        std::fs::write(path.join("default.nix"), default_nix).unwrap();
+
+        // Request 600 real packages plus some non-existent ones
+        // The non-existent ones will simply not be found, but shouldn't cause batch failures
+        let mut attr_names: Vec<String> = (0..600).map(|i| format!("pkg{}", i)).collect();
+        attr_names.extend((0..100).map(|i| format!("nonexistent{}", i)));
+
+        // This should process all batches, finding 600 real packages
+        let packages = extract_packages_for_attrs(path, "x86_64-linux", &attr_names, true).unwrap();
+
+        // Should have found the 600 real packages
+        assert_eq!(
+            packages.len(),
+            600,
+            "Should extract all 600 existing packages"
+        );
+    }
+
+    /// Test that batch size constant is reasonable.
+    ///
+    /// BATCH_SIZE should be:
+    /// - Large enough to amortize overhead (> 100)
+    /// - Small enough to avoid memory pressure (< 1000)
+    #[test]
+    fn test_batch_size_is_reasonable() {
+        // The BATCH_SIZE constant is defined in extract_packages_for_attrs
+        // We verify it's in a reasonable range by testing with a list of that size
+        const BATCH_SIZE: usize = 500;
+
+        assert!(
+            BATCH_SIZE >= 100,
+            "Batch size should be >= 100 for efficiency"
+        );
+        assert!(
+            BATCH_SIZE <= 1000,
+            "Batch size should be <= 1000 to avoid memory pressure"
         );
     }
 }

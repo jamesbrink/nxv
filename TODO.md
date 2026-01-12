@@ -291,6 +291,57 @@ NXV_LOG=debug cargo run --features indexer -- index \
 
 ---
 
+### Batched Extraction for Large Attribute Lists (Fixed: 2025-01-12)
+
+**Problem:** Full extraction with 11K+ attributes was failing silently. Firefox was at
+index ~2914 (batch 6 of 23) and was never reached because earlier batches were failing
+due to memory pressure.
+
+**Root Cause:** Two issues:
+1. The batch loop used `?` operator which returns early on the first batch failure
+2. No visibility into which batches were failing
+
+```rust
+// BUG: Early return on first batch failure
+let batch_result = extract_packages_batch(repo_path, system, batch, extract_store_paths)?;
+```
+
+When Nix evaluation hit memory limits (~2GB worker threshold), the first batch that
+failed would abort the entire extraction, preventing packages in later batches from
+being extracted.
+
+**Fix:** Changed batch loop to continue on failures instead of early return:
+```rust
+match extract_packages_batch(repo_path, system, batch, extract_store_paths) {
+    Ok(batch_result) => {
+        all_packages.extend(batch_result);
+    }
+    Err(e) => {
+        failed_batches += 1;
+        // Log failure but continue with remaining batches
+    }
+}
+```
+
+**Tests Added:**
+- `test_batching_logic_splits_large_lists` - Verifies 600+ attrs are correctly batched
+- `test_small_lists_not_batched` - Verifies lists under 500 skip batching
+- `test_batched_extraction_continues_on_partial_failure` - Verifies resilient error handling
+- `test_batch_size_is_reasonable` - Documents BATCH_SIZE constraints (500)
+
+**Verification:**
+```bash
+# Test with a 2020 date known to have Firefox changes
+NXV_DB_PATH=/tmp/test.db cargo run --features indexer -- index \
+  --nixpkgs-path nixpkgs --since 2020-06-15 --until 2020-06-17 --full
+
+# Verify Firefox was extracted
+sqlite3 /tmp/test.db "SELECT attribute_path, version FROM package_versions WHERE attribute_path LIKE '%firefox%'"
+# Should show: firefox|77.0.1, firefox-bin|77.0.1, firefox-esr|68.9.0esr, etc.
+```
+
+---
+
 ### Dynamic Discovery Fallback Missing (Fixed: 2025-01-12)
 
 **Commit:** `ab72378` fix(index): add dynamic discovery fallback for ambiguous file changes

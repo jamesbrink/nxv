@@ -146,7 +146,7 @@ clearing behavior.
 
 ### Store Path Extraction Causes Darwin SDK Errors (Fixed: 2025-01-11)
 
-**Commit:** (pending)
+**Commit:** `b10adc2` fix(index): skip store path extraction for pre-2020 commits
 
 **Problem:** When extracting all packages with `attrNames = []`, Nix evaluation fails for
 packages that have darwin dependencies (e.g., `emacsMacport`). The error:
@@ -288,6 +288,49 @@ NXV_LOG=debug cargo run --features indexer -- index \
   - Firefox 64.0 (2018-12-12)
   - Firefox 63.0.3 (2018-12-01)
 - **FIX VERIFIED:** Previously only had Firefox versions from 2017
+
+---
+
+### Dynamic Discovery Fallback Missing (Fixed: 2025-01-12)
+
+**Commit:** `ab72378` fix(index): add dynamic discovery fallback for ambiguous file changes
+
+**Problem:** Even with the wrapper package fix and store path fix, Firefox versions
+from 2020 were still missing. Full extraction was being triggered but nothing was
+extracted.
+
+**Root Cause:** When an ambiguous file (like `firefox/packages.nix`) triggered full
+extraction, AND `all_attrs` was `None` (file_attr_map unavailable for old commits),
+the code had no fallback - resulting in an empty `target_attr_paths` and the commit
+being silently skipped.
+
+```rust
+// BUG: If all_attrs is None, this block does nothing!
+if let Some(all_attrs_list) = all_attrs {
+    for attr in all_attrs_list {
+        target_attr_paths.insert(attr.clone());
+    }
+}
+// Missing: else { extract_all_packages = true; }
+```
+
+**Fix:** Added `extract_all_packages = true` fallback when `all_attrs` is `None` in
+both sequential and parallel indexing paths. This enables dynamic Nix discovery via
+`builtins.attrNames pkgs`.
+
+**Tests Added:** 9 TDD tests for wrapper package detection and fallback logic:
+- `test_ambiguous_file_detection_comprehensive`
+- `test_specific_package_files_still_work`
+- `test_ambiguous_filenames_list_completeness`
+- `test_full_extraction_trigger_logic`
+- `test_file_attr_map_simulation`
+- `test_wrapper_package_scenarios`
+- `test_non_package_prefixes_filter`
+- `test_ambiguous_file_triggers_dynamic_discovery_when_all_attrs_none`
+- `test_full_extraction_fallback_completeness`
+
+**Re-indexing Required:** The 2020 data must be re-indexed with this fix to capture
+Firefox and other wrapper package versions.
 
 ---
 

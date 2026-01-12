@@ -226,6 +226,15 @@ _No open issues currently._
 
 - [ ] Consider caching `file_attr_map` between commits with similar trees
 - [ ] Investigate incremental bloom filter updates vs full rebuild
+- [ ] **Dynamic memory reallocation between workers** - When running parallel ranges
+  (e.g., 16 quarters), early-finishing workers should release their memory budget
+  to still-running workers. Currently memory is statically allocated at startup
+  (`total_budget / num_workers`). When 14 of 16 ranges complete, only 2 workers
+  remain but they're still limited to 1/16th of memory each. Research approaches:
+  - Shared memory pool with atomic allocation
+  - Worker recycling with increased memory threshold for remaining workers
+  - Message-passing to notify workers of available memory
+  - Dynamic `MAX_MEMORY_MIB` adjustment in running workers via IPC
 
 ### Data Quality
 

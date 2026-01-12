@@ -124,10 +124,18 @@ jobs:
           # Use GitHub API to count commits ahead on master branch
           # Note: We index from master, not nixos-unstable, as it has more packages
           echo "Querying GitHub API for commit count..."
-          AHEAD=$(gh api "repos/NixOS/nixpkgs/compare/${LAST_COMMIT}...master" --jq '.ahead_by' 2>/dev/null || echo "")
+          API_RESPONSE=$(gh api "repos/NixOS/nixpkgs/compare/${LAST_COMMIT}...master" 2>&1) || {
+            echo "::error::GitHub API call failed for commit ${LAST_COMMIT}"
+            echo "Response: ${API_RESPONSE}"
+            echo "The indexed commit may have been garbage collected or rebased out."
+            exit 1
+          }
 
-          if [ -z "$AHEAD" ] || [ "$AHEAD" = "null" ]; then
+          AHEAD=$(echo "$API_RESPONSE" | jq -r '.ahead_by // empty')
+
+          if [ -z "$AHEAD" ] || ! [[ "$AHEAD" =~ ^[0-9]+$ ]]; then
             echo "::error::GitHub API failed or commit ${LAST_COMMIT} not found in master."
+            echo "Response: ${API_RESPONSE}"
             echo "The indexed commit may have been garbage collected or rebased out."
             exit 1
           fi
@@ -152,7 +160,7 @@ jobs:
           echo "The index is already up to date with nixpkgs master. No update needed." >> $GITHUB_STEP_SUMMARY
 
       - name: Clone nixpkgs (shallow)
-        if: ${{ steps.clone-strategy.outputs.strategy != 'skip' }}
+        if: steps.clone-strategy.outputs.strategy == 'shallow'
         run: |
           echo "Performing shallow clone with depth ${{ steps.clone-strategy.outputs.depth }}..."
           git clone --depth ${{ steps.clone-strategy.outputs.depth }} \
@@ -163,7 +171,7 @@ jobs:
           git -C nixpkgs rev-list --count HEAD
 
       - name: Get stats before indexing
-        if: ${{ steps.clone-strategy.outputs.strategy != 'skip' }}
+        if: steps.clone-strategy.outputs.strategy == 'shallow'
         id: stats-before
         run: |
           # Capture unique package count before indexing
@@ -172,11 +180,11 @@ jobs:
           echo "Packages before: ${PACKAGES_BEFORE}"
 
       - name: Run indexer
-        if: ${{ steps.clone-strategy.outputs.strategy != 'skip' }}
+        if: steps.clone-strategy.outputs.strategy == 'shallow'
         run: ./target/release/nxv index --nixpkgs-path ./nixpkgs
 
       - name: Get stats after indexing
-        if: ${{ steps.clone-strategy.outputs.strategy != 'skip' }}
+        if: steps.clone-strategy.outputs.strategy == 'shallow'
         id: stats-after
         run: |
           # Capture unique package count after indexing
@@ -191,7 +199,7 @@ jobs:
           echo "New packages: ${NEW_PACKAGES}"
 
       - name: Generate publishable artifacts
-        if: ${{ steps.clone-strategy.outputs.strategy != 'skip' }}
+        if: steps.clone-strategy.outputs.strategy == 'shallow'
         env:
           NXV_SECRET_KEY: ${{ secrets.NXV_SIGNING_KEY }}
         run: |
@@ -201,7 +209,7 @@ jobs:
             --sign
 
       - name: Upload workflow artifacts
-        if: ${{ steps.clone-strategy.outputs.strategy != 'skip' }}
+        if: steps.clone-strategy.outputs.strategy == 'shallow'
         uses: actions/upload-artifact@v4
         with:
           name: nxv-index
@@ -209,7 +217,7 @@ jobs:
           retention-days: 7
 
       - name: Upload to GitHub Release
-        if: ${{ steps.clone-strategy.outputs.strategy != 'skip' }}
+        if: steps.clone-strategy.outputs.strategy == 'shallow'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -233,7 +241,7 @@ jobs:
             --clobber
 
       - name: Summary
-        if: ${{ steps.clone-strategy.outputs.strategy != 'skip' }}
+        if: steps.clone-strategy.outputs.strategy == 'shallow'
         run: |
           echo "## Index Update Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY

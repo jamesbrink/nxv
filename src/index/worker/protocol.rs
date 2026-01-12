@@ -163,8 +163,12 @@ mod tests {
 
     #[test]
     fn test_work_request_serialization() {
-        let req =
-            WorkRequest::extract("x86_64-linux", "/path/to/nixpkgs", vec!["hello".into()], true);
+        let req = WorkRequest::extract(
+            "x86_64-linux",
+            "/path/to/nixpkgs",
+            vec!["hello".into()],
+            true,
+        );
         let line = req.to_line();
         assert!(line.ends_with('\n'));
         assert!(line.contains("extract"));

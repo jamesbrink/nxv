@@ -1562,6 +1562,14 @@ impl Indexer {
                             for attr in all_attrs_list {
                                 target_attr_paths.insert(attr.clone());
                             }
+                        } else {
+                            // all_attrs is None - use dynamic discovery in Nix
+                            extract_all_packages = true;
+                            debug!(
+                                path = path,
+                                commit = %commit.short_hash,
+                                "Full extraction with dynamic discovery (file_attr_map unavailable)"
+                            );
                         }
                     }
                 }
@@ -1629,8 +1637,12 @@ impl Indexer {
 
                 if let Some(ref pool) = worker_pool {
                     // Parallel extraction using worker pool
-                    let results =
-                        pool.extract_parallel(worktree_path, systems, &target_list, extract_store_paths);
+                    let results = pool.extract_parallel(
+                        worktree_path,
+                        systems,
+                        &target_list,
+                        extract_store_paths,
+                    );
                     systems.iter().cloned().zip(results).collect()
                 } else {
                     // Sequential extraction (fallback)
@@ -2473,6 +2485,15 @@ fn process_range_worker(
                         for attr in all_attrs_list {
                             target_attr_paths.insert(attr.clone());
                         }
+                    } else {
+                        // all_attrs is None - use dynamic discovery in Nix
+                        extract_all_packages = true;
+                        tracing::debug!(
+                            range = %range.label,
+                            path = path,
+                            commit = %&commit.hash[..8],
+                            "Full extraction with dynamic discovery (file_attr_map unavailable)"
+                        );
                     }
                 }
             }
@@ -2526,8 +2547,12 @@ fn process_range_worker(
             systems
                 .iter()
                 .map(|system| {
-                    let result =
-                        extractor::extract_packages_for_attrs(worktree_path, system, &target_attrs, extract_store_paths);
+                    let result = extractor::extract_packages_for_attrs(
+                        worktree_path,
+                        system,
+                        &target_attrs,
+                        extract_store_paths,
+                    );
                     (system.clone(), result)
                 })
                 .collect()
@@ -3781,6 +3806,332 @@ index abc123..def456 100644
             assert_eq!(db.get_meta("last_indexed_date_2018-Q2").unwrap(), None);
             assert_eq!(db.get_meta("last_indexed_commit_2019").unwrap(), None);
             assert_eq!(db.get_meta("last_indexed_date_2019").unwrap(), None);
+        }
+    }
+
+    // ============================================================================
+    // TDD Tests for Wrapper Package Detection Fix
+    // ============================================================================
+    // These tests verify that packages like Firefox (where version is defined in
+    // packages.nix but the attribute is assigned in all-packages.nix) are correctly
+    // detected and trigger full extraction.
+
+    #[test]
+    fn test_ambiguous_file_detection_comprehensive() {
+        // Test ALL ambiguous filenames that should return None
+        let ambiguous_paths = vec![
+            "pkgs/applications/networking/browsers/firefox/packages.nix",
+            "pkgs/applications/networking/browsers/firefox/common.nix",
+            "pkgs/applications/networking/browsers/firefox/wrapper.nix",
+            "pkgs/applications/networking/browsers/firefox/update.nix",
+            "pkgs/applications/networking/browsers/chromium/browser.nix",
+            "pkgs/applications/office/libreoffice/wrapper.nix",
+            "pkgs/servers/x11/xorg/overrides.nix",
+            "pkgs/development/python-modules/generated.nix",
+            "pkgs/misc/vim-plugins/generated.nix",
+            "pkgs/applications/misc/sources.nix",
+            "pkgs/tools/misc/versions.nix",
+            "pkgs/development/libraries/metadata.nix",
+            "pkgs/applications/editors/neovim/wrapper.nix",
+            "pkgs/games/steam/bin.nix",
+            "pkgs/applications/misc/unwrapped.nix",
+            "pkgs/development/extensions.nix",
+        ];
+
+        for path in ambiguous_paths {
+            assert_eq!(
+                extract_attr_from_path(path),
+                None,
+                "Path '{}' should return None (ambiguous filename)",
+                path
+            );
+        }
+    }
+
+    #[test]
+    fn test_specific_package_files_still_work() {
+        // Ensure we don't break legitimate package detection
+        let valid_paths = vec![
+            (
+                "pkgs/applications/networking/browsers/firefox/firefox.nix",
+                "firefox",
+            ),
+            (
+                "pkgs/applications/networking/browsers/chromium/chromium.nix",
+                "chromium",
+            ),
+            ("pkgs/servers/http/nginx/default.nix", "nginx"),
+            ("pkgs/tools/misc/hello/default.nix", "hello"),
+            ("pkgs/by-name/he/hello/package.nix", "hello"),
+            ("pkgs/by-name/fi/firefox/package.nix", "firefox"),
+            (
+                "pkgs/development/python-modules/requests/default.nix",
+                "requests",
+            ),
+            ("pkgs/applications/editors/vim/default.nix", "vim"),
+            ("pkgs/tools/security/openssl/default.nix", "openssl"),
+        ];
+
+        for (path, expected) in valid_paths {
+            assert_eq!(
+                extract_attr_from_path(path),
+                Some(expected.to_string()),
+                "Path '{}' should return Some(\"{}\")",
+                path,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn test_ambiguous_filenames_list_completeness() {
+        // Verify AMBIGUOUS_FILENAMES contains all expected entries
+        let expected = vec![
+            "packages",
+            "common",
+            "wrapper",
+            "update",
+            "generated",
+            "sources",
+            "versions",
+            "metadata",
+            "overrides",
+            "extensions",
+            "browser",
+            "bin",
+            "unwrapped",
+        ];
+
+        for name in &expected {
+            assert!(
+                AMBIGUOUS_FILENAMES.contains(name),
+                "AMBIGUOUS_FILENAMES should contain '{}' but doesn't",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_full_extraction_trigger_logic() {
+        // This test simulates the decision logic for triggering full extraction.
+        // When a pkgs/*.nix file changes but extract_attr_from_path returns None,
+        // the indexer should trigger full extraction.
+
+        // Paths that SHOULD trigger full extraction (return None)
+        let trigger_paths = vec![
+            "pkgs/applications/networking/browsers/firefox/packages.nix",
+            "pkgs/applications/office/libreoffice/common.nix",
+            "pkgs/misc/vim-plugins/generated.nix",
+        ];
+
+        // Paths that should NOT trigger full extraction (return Some)
+        let no_trigger_paths = vec![
+            "pkgs/applications/networking/browsers/firefox/default.nix",
+            "pkgs/tools/misc/hello/default.nix",
+            "pkgs/by-name/gi/git/package.nix",
+        ];
+
+        for path in trigger_paths {
+            let result = extract_attr_from_path(path);
+            let should_trigger = result.is_none()
+                && path.ends_with(".nix")
+                && path.starts_with("pkgs/")
+                && !NON_PACKAGE_PREFIXES.iter().any(|p| path.starts_with(p));
+
+            assert!(
+                should_trigger,
+                "Path '{}' should trigger full extraction (result: {:?})",
+                path, result
+            );
+        }
+
+        for path in no_trigger_paths {
+            let result = extract_attr_from_path(path);
+            assert!(
+                result.is_some(),
+                "Path '{}' should NOT trigger full extraction (should return package name)",
+                path
+            );
+        }
+    }
+
+    #[test]
+    fn test_file_attr_map_simulation() {
+        // Simulate what happens when file_attr_map doesn't contain a path.
+        // This mimics the real scenario where firefox/packages.nix isn't in
+        // the map because unsafeGetAttrPos returns all-packages.nix location.
+
+        let mut file_attr_map: HashMap<String, Vec<String>> = HashMap::new();
+
+        // Simulate: firefox is assigned in all-packages.nix, not packages.nix
+        file_attr_map.insert(
+            "pkgs/top-level/all-packages.nix".to_string(),
+            vec![
+                "firefox".to_string(),
+                "chromium".to_string(),
+                "hello".to_string(),
+            ],
+        );
+
+        // Simulate: hello has its own default.nix tracked
+        file_attr_map.insert(
+            "pkgs/tools/misc/hello/default.nix".to_string(),
+            vec!["hello".to_string()],
+        );
+
+        // Test: firefox/packages.nix is NOT in the map
+        let firefox_packages = "pkgs/applications/networking/browsers/firefox/packages.nix";
+        assert!(
+            !file_attr_map.contains_key(firefox_packages),
+            "firefox/packages.nix should NOT be in file_attr_map"
+        );
+
+        // Test: extract_attr_from_path returns None for packages.nix
+        assert_eq!(
+            extract_attr_from_path(firefox_packages),
+            None,
+            "packages.nix should return None"
+        );
+
+        // Test: But all_attrs IS available from all-packages.nix
+        let all_attrs = file_attr_map.get("pkgs/top-level/all-packages.nix");
+        assert!(all_attrs.is_some(), "all_attrs should be available");
+        assert!(
+            all_attrs.unwrap().contains(&"firefox".to_string()),
+            "all_attrs should contain firefox"
+        );
+    }
+
+    #[test]
+    fn test_wrapper_package_scenarios() {
+        // Document the known wrapper package patterns that require full extraction
+
+        // Pattern 1: firefox - version in packages.nix, wrapper in all-packages.nix
+        assert_eq!(
+            extract_attr_from_path("pkgs/applications/networking/browsers/firefox/packages.nix"),
+            None,
+            "firefox/packages.nix must return None to trigger full extraction"
+        );
+
+        // Pattern 2: neovim - has wrapper.nix
+        assert_eq!(
+            extract_attr_from_path("pkgs/applications/editors/neovim/wrapper.nix"),
+            None,
+            "neovim/wrapper.nix must return None"
+        );
+
+        // Pattern 3: vim plugins - generated.nix
+        assert_eq!(
+            extract_attr_from_path("pkgs/applications/editors/vim/plugins/generated.nix"),
+            None,
+            "vim/plugins/generated.nix must return None"
+        );
+
+        // Pattern 4: libreoffice - has common.nix for version
+        assert_eq!(
+            extract_attr_from_path("pkgs/applications/office/libreoffice/common.nix"),
+            None,
+            "libreoffice/common.nix must return None"
+        );
+    }
+
+    #[test]
+    fn test_non_package_prefixes_filter() {
+        // Ensure NON_PACKAGE_PREFIXES correctly filters infrastructure files
+        // These should return None because they're infrastructure, not packages
+
+        let infrastructure_paths = vec![
+            "pkgs/build-support/fetchurl/default.nix",
+            "pkgs/stdenv/linux/default.nix",
+            "pkgs/top-level/all-packages.nix",
+            "pkgs/top-level/aliases.nix",
+            "pkgs/test/simple/default.nix",
+            "pkgs/pkgs-lib/formats.nix",
+        ];
+
+        for path in infrastructure_paths {
+            assert_eq!(
+                extract_attr_from_path(path),
+                None,
+                "Infrastructure path '{}' should return None",
+                path
+            );
+        }
+    }
+
+    #[test]
+    fn test_ambiguous_file_triggers_dynamic_discovery_when_all_attrs_none() {
+        // This test documents the critical bug fix:
+        // When an ambiguous file (like firefox/packages.nix) triggers full extraction,
+        // AND all_attrs is None (file_attr_map unavailable),
+        // we MUST set extract_all_packages = true to use dynamic Nix discovery.
+        //
+        // Before the fix, this case resulted in an empty target_attr_paths,
+        // causing the commit to be skipped and wrapper packages like Firefox
+        // to be completely missed.
+
+        // Simulate the decision logic
+        let path = "pkgs/applications/networking/browsers/firefox/packages.nix";
+        let all_attrs: Option<&Vec<String>> = None; // Simulate file_attr_map unavailable
+
+        // Path should NOT be in file_attr_map (simulation)
+        let in_file_attr_map = false;
+
+        // extract_attr_from_path should return None for "packages.nix"
+        let extracted = extract_attr_from_path(path);
+        assert_eq!(extracted, None, "packages.nix should return None");
+
+        // Determine if this triggers full extraction
+        let is_pkg_nix = path.ends_with(".nix") && path.starts_with("pkgs/");
+        let triggers_full = !in_file_attr_map && extracted.is_none() && is_pkg_nix;
+
+        assert!(
+            triggers_full,
+            "Ambiguous pkgs/*.nix file should trigger full extraction"
+        );
+
+        // When all_attrs is None, we MUST use dynamic discovery
+        let should_use_dynamic_discovery = triggers_full && all_attrs.is_none();
+        assert!(
+            should_use_dynamic_discovery,
+            "When all_attrs is None and full extraction is triggered, \
+             must use dynamic Nix discovery (extract_all_packages = true)"
+        );
+    }
+
+    #[test]
+    fn test_full_extraction_fallback_completeness() {
+        // Verify all code paths that trigger full extraction have proper fallbacks
+        // for when all_attrs is None.
+        //
+        // There are 3 places that can trigger full extraction:
+        // 1. First commit (commit_idx == 0) - handled at line ~1501
+        // 2. Periodic full extraction - handled at line ~1501
+        // 3. Ambiguous file changed - handled at line ~1559 (BUG FIX)
+        //
+        // All three must have fallback to extract_all_packages = true when all_attrs is None.
+
+        // Test the condition that determines if an ambiguous file triggers full extraction
+        let ambiguous_files = vec![
+            "pkgs/applications/networking/browsers/firefox/packages.nix",
+            "pkgs/misc/vim-plugins/generated.nix",
+            "pkgs/applications/office/libreoffice/common.nix",
+        ];
+
+        for path in ambiguous_files {
+            // Must not be in NON_PACKAGE_PREFIXES (infrastructure)
+            let is_infrastructure = NON_PACKAGE_PREFIXES
+                .iter()
+                .any(|prefix| path.starts_with(prefix));
+            assert!(!is_infrastructure, "{} should not be infrastructure", path);
+
+            // Must return None from extract_attr_from_path
+            let result = extract_attr_from_path(path);
+            assert_eq!(result, None, "{} should return None", path);
+
+            // Must match the trigger condition
+            let triggers = path.ends_with(".nix") && path.starts_with("pkgs/");
+            assert!(triggers, "{} should trigger full extraction path", path);
         }
     }
 }

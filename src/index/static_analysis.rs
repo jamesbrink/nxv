@@ -10,11 +10,12 @@
 use crate::error::Result;
 use rnix::ast::{self, HasEntry};
 use rowan::ast::AstNode;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tracing::{debug, trace, warn};
 
 /// The type of callPackage invocation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CallKind {
     /// `callPackage ./path { }` - single package
     CallPackage,
@@ -23,7 +24,7 @@ pub enum CallKind {
 }
 
 /// A single callPackage hit extracted from the AST.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CallPackageHit {
     /// The attribute name (e.g., "firefox")
     pub attr_name: String,
@@ -34,7 +35,7 @@ pub struct CallPackageHit {
 }
 
 /// Result of static analysis of all-packages.nix.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StaticFileMap {
     /// file_path -> [attribute_names]
     /// Example: "pkgs/browsers/firefox/packages.nix" -> ["firefox", "firefox-esr"]

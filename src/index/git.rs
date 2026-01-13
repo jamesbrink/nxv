@@ -1343,6 +1343,82 @@ impl NixpkgsRepo {
 
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
+
+    /// Get the blob OID for a file at a specific commit without reading content.
+    ///
+    /// This is used to check if the blob has changed between commits, allowing
+    /// us to skip re-parsing if the content is the same.
+    ///
+    /// # Arguments
+    /// * `commit_hash` - The commit hash
+    /// * `file_path` - Path to the file relative to repo root
+    ///
+    /// # Returns
+    /// The blob OID (SHA1 hash) as an Oid, or an error if the file doesn't exist.
+    pub fn get_blob_oid(&self, commit_hash: &str, file_path: &str) -> Result<Oid> {
+        let oid = Oid::from_str(commit_hash).map_err(|_| {
+            NxvError::Git(git2::Error::from_str(&format!(
+                "Invalid commit hash: {}",
+                commit_hash
+            )))
+        })?;
+
+        let commit = self.repo.find_commit(oid)?;
+        let tree = commit.tree()?;
+        let entry = tree.get_path(std::path::Path::new(file_path))?;
+
+        if entry.kind() != Some(git2::ObjectType::Blob) {
+            return Err(NxvError::Git(git2::Error::from_str(&format!(
+                "Path '{}' does not point to a blob",
+                file_path
+            ))));
+        }
+
+        Ok(entry.id())
+    }
+
+    /// Read blob content for a file at a specific commit.
+    ///
+    /// This uses libgit2's tree traversal which is faster than shell commands
+    /// and doesn't require a checkout.
+    ///
+    /// # Arguments
+    /// * `commit_hash` - The commit hash
+    /// * `file_path` - Path to the file relative to repo root
+    ///
+    /// # Returns
+    /// A tuple of (blob_oid, content) so callers can cache by OID.
+    pub fn read_blob(&self, commit_hash: &str, file_path: &str) -> Result<(Oid, String)> {
+        let oid = Oid::from_str(commit_hash).map_err(|_| {
+            NxvError::Git(git2::Error::from_str(&format!(
+                "Invalid commit hash: {}",
+                commit_hash
+            )))
+        })?;
+
+        let commit = self.repo.find_commit(oid)?;
+        let tree = commit.tree()?;
+        let entry = tree.get_path(std::path::Path::new(file_path))?;
+
+        if entry.kind() != Some(git2::ObjectType::Blob) {
+            return Err(NxvError::Git(git2::Error::from_str(&format!(
+                "Path '{}' does not point to a blob",
+                file_path
+            ))));
+        }
+
+        let blob = self.repo.find_blob(entry.id())?;
+        let content = std::str::from_utf8(blob.content())
+            .map_err(|e| {
+                NxvError::Git(git2::Error::from_str(&format!(
+                    "Blob content is not valid UTF-8: {}",
+                    e
+                )))
+            })?
+            .to_string();
+
+        Ok((entry.id(), content))
+    }
 }
 
 /// Detect monthly gaps in a list of commits within a date range.

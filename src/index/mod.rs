@@ -7,6 +7,7 @@
 //! row is updated to track the earliest first_commit and latest last_commit.
 
 pub mod backfill;
+pub mod blob_cache;
 pub mod extractor;
 pub mod gc;
 pub mod git;

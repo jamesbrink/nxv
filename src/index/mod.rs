@@ -2145,35 +2145,73 @@ fn extract_attrs_from_diff(diff: &str) -> Option<Vec<String>> {
 }
 
 /// Extract attribute name from an assignment line like `  attrName = ...`
+/// or an attrpath like `  foo.bar.baz = ...`
 fn extract_assignment_attr(line: &str) -> Option<String> {
     let trimmed = line.trim_start();
 
-    // Find the `=` sign
+    // Find the `=` sign (but not `==`)
     let eq_pos = trimmed.find('=')?;
+
+    // Skip if it's `==` (comparison, not assignment)
+    if trimmed.get(eq_pos + 1..eq_pos + 2) == Some("=") {
+        return None;
+    }
 
     // Get the part before `=` and trim it
     let before_eq = trimmed[..eq_pos].trim();
 
-    // Validate: should be a single valid Nix identifier
-    // Valid Nix identifiers: start with letter or _, followed by letters, numbers, _, -
     if before_eq.is_empty() {
         return None;
     }
 
-    let first_char = before_eq.chars().next()?;
-    if !first_char.is_ascii_alphabetic() && first_char != '_' {
+    // Handle quoted string attributes (e.g., `"@scope/pkg"`)
+    if before_eq.starts_with('"') && before_eq.ends_with('"') {
+        // Remove surrounding quotes
+        let inner = &before_eq[1..before_eq.len() - 1];
+        if !inner.is_empty() {
+            return Some(inner.to_string());
+        }
         return None;
     }
 
-    // Check that the whole identifier is valid
-    if before_eq
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-    {
-        Some(before_eq.to_string())
-    } else {
-        None
+    // Validate attrpath: can be a single identifier or dot-separated identifiers
+    // Example: "hello", "python3Packages.hello", "gnome.shell.extensions.foo"
+    let parts: Vec<&str> = before_eq.split('.').collect();
+
+    for part in &parts {
+        // Handle quoted parts in attrpaths (e.g., `nodePackages."@angular/cli"`)
+        if part.starts_with('"') && part.ends_with('"') {
+            // String attribute names are allowed
+            continue;
+        }
+
+        // Validate each part is a valid Nix identifier
+        if !is_valid_nix_ident(part) {
+            return None;
+        }
     }
+
+    Some(before_eq.to_string())
+}
+
+/// Check if a string is a valid Nix identifier.
+/// Valid identifiers start with letter or _, followed by letters, numbers, _, or -
+fn is_valid_nix_ident(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+
+    let first_char = match s.chars().next() {
+        Some(c) => c,
+        None => return false,
+    };
+
+    if !first_char.is_ascii_alphabetic() && first_char != '_' {
+        return false;
+    }
+
+    s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 /// Extract attribute names from an inherit line like `  inherit (foo) attr1 attr2 attr3;`
@@ -3714,6 +3752,38 @@ mod tests {
 
         // Invalid identifier start
         assert_eq!(extract_assignment_attr("  123abc = bad"), None);
+
+        // === NEW: Attrpath support ===
+
+        // Simple attrpath (scoped package)
+        assert_eq!(
+            extract_assignment_attr("  python3Packages.requests = callPackage ../pkgs { };"),
+            Some("python3Packages.requests".to_string())
+        );
+
+        // Deep attrpath
+        assert_eq!(
+            extract_assignment_attr("  gnome.shell.extensions.foo = callPackage ../pkgs { };"),
+            Some("gnome.shell.extensions.foo".to_string())
+        );
+
+        // Quoted string attribute (scoped npm package)
+        assert_eq!(
+            extract_assignment_attr(r#"  "@angular/cli" = callPackage ../pkgs { };"#),
+            Some("@angular/cli".to_string())
+        );
+
+        // Quoted part in attrpath
+        assert_eq!(
+            extract_assignment_attr(r#"  nodePackages."@babel/core" = callPackage ../pkgs { };"#),
+            Some(r#"nodePackages."@babel/core""#.to_string())
+        );
+
+        // Comparison operator (==) should NOT match
+        assert_eq!(extract_assignment_attr("  if version == 1 then"), None);
+
+        // Empty string attribute should not match
+        assert_eq!(extract_assignment_attr(r#"  "" = foo;"#), None);
     }
 
     #[test]
@@ -3768,6 +3838,26 @@ index abc123..def456 100644
         assert!(attrs.contains(&"thunderbird".to_string()));
         assert!(attrs.contains(&"firefox".to_string()));
         assert_eq!(attrs.len(), 2); // Should deduplicate
+    }
+
+    #[test]
+    fn test_extract_attrs_from_diff_with_attrpaths() {
+        let diff = r#"diff --git a/pkgs/top-level/all-packages.nix b/pkgs/top-level/all-packages.nix
+index abc123..def456 100644
+--- a/pkgs/top-level/all-packages.nix
++++ b/pkgs/top-level/all-packages.nix
+@@ -100,4 +100,8 @@
++  python3Packages.requests = callPackage ../pkgs/development/python { };
++  nodePackages."@angular/cli" = callPackage ../pkgs/development/node { };
+-  gnome.mutter = callPackage ../pkgs/desktops/gnome/mutter { };
++  gnome.mutter = callPackage ../pkgs/desktops/gnome/mutter { enableX11 = false; };
+"#;
+
+        let attrs = extract_attrs_from_diff(diff).expect("Should extract attrs");
+        assert!(attrs.contains(&"python3Packages.requests".to_string()));
+        assert!(attrs.contains(&r#"nodePackages."@angular/cli""#.to_string()));
+        assert!(attrs.contains(&"gnome.mutter".to_string()));
+        assert_eq!(attrs.len(), 3);
     }
 
     #[test]

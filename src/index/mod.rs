@@ -1541,17 +1541,35 @@ impl Indexer {
                     for attr in attr_paths {
                         target_attr_paths.insert(attr.clone());
                     }
+                    trace!(
+                        path = path,
+                        commit = %commit.short_hash,
+                        attrs_found = attr_paths.len(),
+                        "Path found in file_attr_map"
+                    );
                 } else if let Some(attr) = extract_attr_from_path(path) {
                     // Fallback: extract attr name from path structure
                     // No validation against all_attrs - this allows detecting changes
                     // to packages that have moved (e.g., to pkgs/by-name/) since HEAD
-                    target_attr_paths.insert(attr);
+                    target_attr_paths.insert(attr.clone());
+                    trace!(
+                        path = path,
+                        commit = %commit.short_hash,
+                        attr = attr,
+                        "Path extracted via extract_attr_from_path"
+                    );
                 } else if path.ends_with(".nix") && path.starts_with("pkgs/") {
                     // Changed .nix file in pkgs/ but couldn't determine attribute
                     // This happens for files like firefox/packages.nix where the filename
                     // doesn't match the package name. Trigger full extraction to be safe.
+                    info!(
+                        path = path,
+                        commit = %commit.short_hash,
+                        needs_full_extraction = needs_full_extraction,
+                        "Ambiguous pkgs/*.nix file detected"
+                    );
                     if !needs_full_extraction {
-                        debug!(
+                        info!(
                             path = path,
                             commit = %commit.short_hash,
                             "Unknown package file changed, triggering full extraction"

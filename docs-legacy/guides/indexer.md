@@ -514,6 +514,38 @@ nix-store --verify --repair
 nxv reset --nixpkgs-path ./nixpkgs
 ```
 
+## Indexer Run History
+
+Reference metrics from completed indexing runs.
+
+### 2026-01-12: 2020 Gap Fill Re-index
+
+**Configuration:**
+- Mode: Incremental with gap detection
+- Date range: 2020-01-01 to 2020-12-31
+- Workers: 4 (2048 MiB each)
+- Memory budget: 8 GiB
+- Full extraction interval: 50 commits
+- GC interval: 5 checkpoints
+
+**Results:**
+
+| Metric | Value |
+|--------|-------|
+| Commits processed | 6,277 |
+| Total packages found | 5,601,806 |
+| Packages upserted | 5,601,806 |
+| Unique package names | 51,374 |
+| Duration | ~5.5 hours |
+| Final DB records | 205,486 |
+| Date coverage | 2017-01-01 to 2021-01-02 |
+
+**Notes:**
+- Gap detection identified 6,277 commits with package changes in 2020
+- Batching fix (BATCH_SIZE=500) prevented memory exhaustion during full extraction
+- Periodic full extraction (every 50 commits) ensured wrapper packages captured
+- Firefox captured: 62 total versions (2 new from 2020: 72.0.1, 76.0.1)
+
 ## See Also
 
 - [Database Optimization](../database-optimization.md) - SQLite tuning for large indexes

@@ -268,101 +268,66 @@ impl NixpkgsRepo {
 
     /// Get indexable commits touching the specified paths within a date range.
     ///
-    /// First tries with `--first-parent` to avoid processing duplicate commits from
-    /// merge branches. Then detects any monthly gaps in the results (which can happen
-    /// due to history restructuring in nixpkgs, e.g., the August-September 2020 gap)
-    /// and fills them by fetching those specific months without `--first-parent`.
+    /// Fetches commits BOTH with `--first-parent` (main line) and without it
+    /// (staging branches), then merges and deduplicates. This ensures we capture
+    /// all package version updates, including those committed on staging branches
+    /// before being merged to the main line (e.g., Firefox updates on staging).
     ///
-    /// This hybrid approach gives us the efficiency of `--first-parent` while ensuring
-    /// we don't miss commits during periods where the first-parent chain was broken.
+    /// The `--first-parent` results form the baseline, then we augment with
+    /// non-first-parent commits to catch staging branch changes.
     pub fn get_indexable_commits_touching_paths(
         &self,
         paths: &[&str],
         since: Option<&str>,
         until: Option<&str>,
     ) -> Result<Vec<CommitInfo>> {
-        // Try with --first-parent first for efficiency
-        let mut commits = self.get_commits_touching_paths_inner(paths, since, until, true)?;
+        // Get commits with --first-parent (main line)
+        let first_parent_commits =
+            self.get_commits_touching_paths_inner(paths, since, until, true)?;
 
-        // If no commits found with --first-parent, fall back to all commits
-        if commits.is_empty() {
-            tracing::warn!(
-                target: "nxv::index::git",
-                "No commits found with --first-parent for range {:?} to {:?}, falling back to all commits",
-                since, until
-            );
-            return self.get_commits_touching_paths_inner(paths, since, until, false);
+        // ALSO get ALL commits (including staging branches) to catch updates
+        // like Firefox that are committed on staging before merge
+        let all_commits = self.get_commits_touching_paths_inner(paths, since, until, false)?;
+
+        // If both are empty, nothing to do
+        if first_parent_commits.is_empty() && all_commits.is_empty() {
+            return Ok(Vec::new());
         }
 
-        // Detect monthly gaps and fill them
-        let gaps = detect_monthly_gaps(&commits, since, until);
-        if !gaps.is_empty() {
-            tracing::warn!(
+        // Merge and deduplicate
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut commits = Vec::new();
+
+        // Add first-parent commits first (they're the canonical history)
+        for commit in first_parent_commits {
+            if seen.insert(commit.hash.clone()) {
+                commits.push(commit);
+            }
+        }
+
+        // Add staging branch commits that aren't already included
+        let staging_added = {
+            let mut count = 0;
+            for commit in all_commits {
+                if seen.insert(commit.hash.clone()) {
+                    commits.push(commit);
+                    count += 1;
+                }
+            }
+            count
+        };
+
+        // Sort by date (oldest first)
+        commits.sort_by_key(|c| c.date);
+
+        if staging_added > 0 {
+            tracing::info!(
                 target: "nxv::index::git",
-                gap_count = gaps.len(),
-                gaps = ?gaps.iter().map(|(y, m)| format!("{}-{:02}", y, m)).collect::<Vec<_>>(),
-                "Detected monthly gaps in --first-parent results, fetching missing months"
+                first_parent = commits.len() - staging_added,
+                staging_added = staging_added,
+                total = commits.len(),
+                "Merged first-parent and staging branch commits"
             );
-
-            // Fetch commits for each gap month without --first-parent
-            let mut gap_commits = Vec::new();
-            for (year, month) in gaps {
-                let gap_since = format!("{}-{:02}-01", year, month);
-                let gap_until = if month == 12 {
-                    format!("{}-01-01", year + 1)
-                } else {
-                    format!("{}-{:02}-01", year, month + 1)
-                };
-
-                match self.get_commits_touching_paths_inner(
-                    paths,
-                    Some(&gap_since),
-                    Some(&gap_until),
-                    false,
-                ) {
-                    Ok(month_commits) => {
-                        tracing::info!(
-                            target: "nxv::index::git",
-                            year = year,
-                            month = month,
-                            commits_found = month_commits.len(),
-                            "Filled gap month"
-                        );
-                        gap_commits.extend(month_commits);
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            target: "nxv::index::git",
-                            year = year,
-                            month = month,
-                            error = %e,
-                            "Failed to fetch commits for gap month"
-                        );
-                    }
-                }
-            }
-
-            // Merge gap commits into the main list
-            if !gap_commits.is_empty() {
-                let original_count = commits.len();
-                // Use a HashSet to deduplicate by commit hash
-                let mut seen: HashSet<String> = commits.iter().map(|c| c.hash.clone()).collect();
-                for commit in gap_commits {
-                    if seen.insert(commit.hash.clone()) {
-                        commits.push(commit);
-                    }
-                }
-                // Sort by date (oldest first)
-                commits.sort_by_key(|c| c.date);
-
-                tracing::info!(
-                    target: "nxv::index::git",
-                    original = original_count,
-                    added = commits.len() - original_count,
-                    total = commits.len(),
-                    "Gap filling complete"
-                );
-            }
         }
 
         Ok(commits)
@@ -387,8 +352,12 @@ impl NixpkgsRepo {
         }
         args.push("--");
 
+        // Use UTC timezone for consistent date filtering across all environments.
+        // Without this, --since/--until are interpreted using local timezone,
+        // causing different commits to be selected depending on where the indexer runs.
         let output = Command::new("git")
             .current_dir(&self.path)
+            .env("TZ", "UTC")
             .args(&args)
             .args(paths)
             .output()?;
@@ -563,8 +532,10 @@ impl NixpkgsRepo {
         }
         args.push("--");
 
+        // Use UTC timezone for consistent date filtering across all environments.
         let output = Command::new("git")
             .current_dir(&self.path)
+            .env("TZ", "UTC")
             .args(&args)
             .args(paths)
             .output()?;

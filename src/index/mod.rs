@@ -12,6 +12,7 @@ pub mod gc;
 pub mod git;
 pub mod nix_ffi;
 pub mod publisher;
+pub mod static_analysis;
 pub mod worker;
 
 use crate::bloom::PackageBloomFilter;

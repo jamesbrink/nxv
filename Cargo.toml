@@ -28,6 +28,11 @@ rusqlite = { version = "0.38", features = ["bundled", "backup"] }
 # Git (dev/indexer only, feature-gated)
 git2 = { version = "0.20", optional = true }
 
+# Nix static analysis (indexer only, feature-gated)
+# Used to parse all-packages.nix and build file-to-attr maps
+rnix = { version = "0.12", optional = true }
+rowan = { version = "0.15", optional = true }  # AST library used by rnix
+
 # Nix FFI bindings (indexer only, feature-gated)
 # Raw bindings - we provide our own high-level wrappers
 nix-bindings = { version = "2.28", optional = true }
@@ -130,7 +135,7 @@ harness = false
 
 [features]
 default = []
-indexer = ["git2", "ctrlc", "nix-bindings", "nix"]  # Enable indexer functionality
+indexer = ["git2", "ctrlc", "nix-bindings", "nix", "rnix", "rowan"]  # Enable indexer functionality
 
 # Release profile optimizations
 [profile.release]

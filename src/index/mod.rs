@@ -2420,7 +2420,10 @@ fn build_hybrid_file_attr_map(
         // Fall back to Nix-based extraction
         match build_file_attr_map(worktree_path, systems, worker_pool) {
             Ok(nix_map) => {
-                // Merge Nix results with static results (Nix takes precedence for conflicts)
+                // Merge Nix results into static results.
+                // Both static and Nix attrs are additive - we keep the union.
+                // This ensures the all-packages.nix entry contains ALL attrs
+                // for full extraction support.
                 for (file, attrs) in nix_map {
                     let entry = file_attr_map.entry(file).or_default();
                     for attr in attrs {
@@ -2444,6 +2447,15 @@ fn build_hybrid_file_attr_map(
     for attrs in file_attr_map.values_mut() {
         attrs.sort();
         attrs.dedup();
+    }
+
+    // Log final all-packages entry size for debugging
+    if let Some(all_attrs) = file_attr_map.get(ALL_PACKAGES_PATH) {
+        tracing::trace!(
+            commit = %&commit_hash[..8],
+            all_attrs_count = all_attrs.len(),
+            "Final all-packages.nix attrs"
+        );
     }
 
     Ok((file_attr_map, static_coverage))

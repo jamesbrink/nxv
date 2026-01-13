@@ -152,8 +152,23 @@ impl BlobCache {
     pub fn save_to(&self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
 
-        // Write to temp file first, then rename for atomicity
-        let temp_path = path.with_extension("tmp");
+        // Use unique temp filename with PID and timestamp to avoid race conditions
+        // when multiple range workers save concurrently
+        let pid = std::process::id();
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let temp_filename = format!(
+            "{}.tmp.{}.{}",
+            path.file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("cache"),
+            pid,
+            timestamp
+        );
+        let temp_path = path.with_file_name(&temp_filename);
+
         let file = File::create(&temp_path).map_err(|e| {
             cache_error(format!(
                 "Failed to create cache temp file {}: {}",
@@ -165,28 +180,36 @@ impl BlobCache {
 
         // Use serde_json for serialization
         serde_json::to_writer(writer, self).map_err(|e| {
+            // Clean up temp file on error
+            let _ = std::fs::remove_file(&temp_path);
             cache_error(format!("Failed to encode cache: {}", e))
         })?;
 
         // Atomic replace: remove target first for Windows compatibility
         // (std::fs::rename fails on Windows if target exists)
+        // Note: There's still a small race window here, but the unique temp
+        // filename prevents concurrent writers from clobbering each other's
+        // temp files. The last writer wins, which is acceptable for a cache.
         if path.exists() {
-            std::fs::remove_file(path).map_err(|e| {
-                cache_error(format!(
-                    "Failed to remove old cache file {}: {}",
-                    path.display(),
-                    e
-                ))
-            })?;
+            if let Err(e) = std::fs::remove_file(path) {
+                // Another process may have already removed it; log and continue
+                debug!(
+                    path = %path.display(),
+                    error = %e,
+                    "Failed to remove old cache file (may have been removed by another worker)"
+                );
+            }
         }
-        std::fs::rename(&temp_path, path).map_err(|e| {
-            cache_error(format!(
+        if let Err(e) = std::fs::rename(&temp_path, path) {
+            // Clean up temp file on rename failure
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(cache_error(format!(
                 "Failed to rename cache file {} -> {}: {}",
                 temp_path.display(),
                 path.display(),
                 e
-            ))
-        })?;
+            )));
+        }
 
         info!(
             ?path,

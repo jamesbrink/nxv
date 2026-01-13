@@ -1165,6 +1165,7 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
         gc_interval: args.gc_interval,
         gc_min_free_bytes: args.gc_min_free_gb * 1024 * 1024 * 1024,
         full_extraction_interval: args.full_extraction_interval,
+        full_extraction_parallelism: args.full_extraction_parallelism,
     };
 
     let indexer = Indexer::new(config);

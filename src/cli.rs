@@ -397,12 +397,20 @@ pub struct IndexArgs {
     #[arg(long, default_value_t = 10)]
     pub gc_min_free_gb: u64,
 
-    /// Force full package extraction every N commits (default: 50).
+    /// Force full package extraction every N commits.
     /// This catches packages missed by incremental detection (e.g., firefox
     /// versions defined in packages.nix but assigned in all-packages.nix).
-    /// Set to 0 to disable (faster but may miss some package versions).
-    #[arg(long, default_value_t = 50)]
+    /// WARNING: Full extraction is very expensive (~12K packages, 24 Nix evals).
+    /// Set to 0 to disable (default, recommended for most use cases).
+    #[arg(long, default_value_t = 0)]
     pub full_extraction_interval: u32,
+
+    /// Maximum concurrent full extractions across parallel range workers.
+    /// Full extractions (first commit baseline, periodic) are very expensive.
+    /// Setting this to 1 (default) serializes them to prevent system thrash.
+    /// Higher values allow more parallelism but may overwhelm the system.
+    #[arg(long, default_value_t = 1)]
+    pub full_extraction_parallelism: usize,
 
     /// Internal flag for worker subprocess mode (hidden from help).
     #[arg(long, hide = true)]
@@ -662,17 +670,25 @@ impl Cli {
     pub fn log_config(&self) -> LogConfig {
         let mut config = LogConfig::default();
 
-        // Apply log level from CLI or verbose flags
-        if let Some(ref level_str) = self.log_level {
-            config.level = parse_log_level(level_str).unwrap_or(Level::INFO);
-        } else {
-            // Fall back to verbose flags if no explicit log level
+        // Verbose flags (-v, -vv) ALWAYS take precedence when specified.
+        // This ensures `-vv` works even if NXV_LOG_LEVEL env var is set.
+        // Priority: verbose flags > --log-level > env vars > default
+        if self.verbose > 0 {
+            // User explicitly requested verbosity via CLI flags
             config.level = match self.verbose {
-                0 => Level::INFO,  // Default: info for natural CLI output
                 1 => Level::DEBUG, // -v: debug for more detail
                 _ => Level::TRACE, // -vv+: trace for full detail
             };
+            // Lock in as filter so env vars don't override
+            config.filter = Some(format!("{}", config.level).to_lowercase());
+        } else if let Some(ref level_str) = self.log_level {
+            // Fall back to --log-level (which may come from env var NXV_LOG_LEVEL)
+            config.level = parse_log_level(level_str).unwrap_or(Level::INFO);
+            // Lock in as filter so other env vars (RUST_LOG) don't override
+            config.filter = Some(format!("{}", config.level).to_lowercase());
         }
+        // If neither verbose nor log_level is set, leave filter as None
+        // so with_env_overrides() can apply RUST_LOG/NXV_LOG
 
         // Apply log format from CLI
         if let Some(ref format_str) = self.log_format {
@@ -688,6 +704,7 @@ impl Cli {
         config.rotation = self.log_rotation.parse().unwrap_or(LogRotation::Daily);
 
         // Apply environment variable overrides (NXV_LOG, RUST_LOG, etc.)
+        // Note: If CLI set the level explicitly, the filter is already set and won't be overridden
         config.with_env_overrides()
     }
 }
@@ -1050,7 +1067,7 @@ mod tests {
 
     #[test]
     #[serial(env)]
-    fn test_log_level_overrides_verbose() {
+    fn test_verbose_flags_override_log_level() {
         // Clear any logging env vars that could interfere
         // SAFETY: Test runs serially via #[serial(env)] to avoid env var races
         unsafe {
@@ -1059,8 +1076,15 @@ mod tests {
             std::env::remove_var("RUST_LOG");
         }
 
-        // Explicit --log-level should override -v flags
+        // Verbose flags (-v/-vv) always take precedence over --log-level
+        // because -v is definitely from CLI, while --log-level might come
+        // from NXV_LOG_LEVEL env var (clap can't distinguish the source)
         let args = Cli::try_parse_from(["nxv", "-vvv", "--log-level", "warn", "stats"]).unwrap();
+        let config = args.log_config();
+        assert_eq!(config.level, Level::TRACE);
+
+        // But --log-level works when no verbose flags are used
+        let args = Cli::try_parse_from(["nxv", "--log-level", "warn", "stats"]).unwrap();
         let config = args.log_config();
         assert_eq!(config.level, Level::WARN);
     }
@@ -1075,6 +1099,87 @@ mod tests {
         let args = Cli::try_parse_from(["nxv", "stats"]).unwrap();
         let config = args.log_config();
         assert_eq!(config.level, Level::TRACE);
+        // SAFETY: Test runs serially via #[serial(env)] to avoid env var races
+        unsafe {
+            std::env::remove_var("NXV_LOG_LEVEL");
+        }
+    }
+
+    /// Regression test: CLI args should take precedence over environment variables.
+    /// This was a bug where RUST_LOG=info would override -vv flag.
+    #[test]
+    #[serial(env)]
+    fn test_cli_args_take_precedence_over_env_vars() {
+        // SAFETY: Test runs serially via #[serial(env)] to avoid env var races
+        unsafe {
+            // Set env vars that WOULD override if not handled correctly
+            std::env::set_var("RUST_LOG", "info");
+            std::env::set_var("NXV_LOG", "warn");
+            std::env::set_var("NXV_LOG_LEVEL", "error");
+        }
+
+        // -vv should give TRACE level regardless of env vars
+        let args = Cli::try_parse_from(["nxv", "-vv", "stats"]).unwrap();
+        let config = args.log_config();
+        assert_eq!(
+            config.level,
+            Level::TRACE,
+            "CLI -vv flag should take precedence over RUST_LOG/NXV_LOG env vars"
+        );
+        // Filter should be set to prevent env var override
+        assert!(
+            config.filter.is_some(),
+            "Filter should be set when CLI specifies log level"
+        );
+        assert_eq!(config.filter.as_deref(), Some("trace"));
+
+        // -v should give DEBUG level regardless of env vars
+        let args = Cli::try_parse_from(["nxv", "-v", "stats"]).unwrap();
+        let config = args.log_config();
+        assert_eq!(
+            config.level,
+            Level::DEBUG,
+            "CLI -v flag should take precedence over env vars"
+        );
+
+        // --log-level trace should work regardless of env vars
+        let args = Cli::try_parse_from(["nxv", "--log-level", "trace", "stats"]).unwrap();
+        let config = args.log_config();
+        assert_eq!(
+            config.level,
+            Level::TRACE,
+            "CLI --log-level should take precedence over env vars"
+        );
+
+        // SAFETY: Test runs serially via #[serial(env)] to avoid env var races
+        unsafe {
+            std::env::remove_var("RUST_LOG");
+            std::env::remove_var("NXV_LOG");
+            std::env::remove_var("NXV_LOG_LEVEL");
+        }
+    }
+
+    /// Test that env vars are still used when no CLI log level is specified.
+    #[test]
+    #[serial(env)]
+    fn test_env_vars_used_when_no_cli_level() {
+        // SAFETY: Test runs serially via #[serial(env)] to avoid env var races
+        unsafe {
+            std::env::remove_var("RUST_LOG");
+            std::env::remove_var("NXV_LOG");
+            std::env::set_var("NXV_LOG_LEVEL", "debug");
+        }
+
+        // No CLI flags = should use env var
+        let args = Cli::try_parse_from(["nxv", "stats"]).unwrap();
+        let config = args.log_config();
+        // NXV_LOG_LEVEL is read by clap, so it sets the log_level field
+        assert_eq!(
+            config.level,
+            Level::DEBUG,
+            "Should use NXV_LOG_LEVEL when no CLI args specified"
+        );
+
         // SAFETY: Test runs serially via #[serial(env)] to avoid env var races
         unsafe {
             std::env::remove_var("NXV_LOG_LEVEL");

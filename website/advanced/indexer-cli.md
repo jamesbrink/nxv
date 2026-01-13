@@ -28,12 +28,13 @@ nxv index --nixpkgs-path <PATH> [OPTIONS]
 | `--max-commits <N>`              | -            | Limit total commits processed                     |
 | `--workers <N>`                  | (auto)       | Number of parallel worker processes               |
 | `--max-memory <SIZE>`            | `8G`         | Total memory budget (e.g., `32G`, `16384M`)       |
-| `--verbose`                      | `false`      | Show extraction warnings                          |
-| `--gc-interval <N>`              | `5`          | Checkpoints between garbage collection            |
-| `--gc-min-free-gb <N>`           | `10`         | Trigger emergency GC when disk space falls below  |
-| `--full-extraction-interval <N>` | `50`         | Force full extraction every N commits             |
-| `--parallel-ranges <SPEC>`       | -            | Process year ranges in parallel                   |
-| `--max-range-workers <N>`        | `4`          | Maximum concurrent range workers                  |
+| `-v, --verbose`                      | `false`  | Show verbose output including extraction warnings |
+| `--gc-interval <N>`                  | `5`      | Checkpoints between garbage collection            |
+| `--gc-min-free-gb <N>`               | `10`     | Trigger emergency GC when disk space falls below  |
+| `--full-extraction-interval <N>`     | `0`      | Force full extraction every N commits (0=disabled)|
+| `--full-extraction-parallelism <N>`  | `1`      | Max concurrent full extractions (prevents thrash) |
+| `--parallel-ranges <SPEC>`           | -        | Process year ranges in parallel                   |
+| `--max-range-workers <N>`            | `4`      | Maximum concurrent range workers                  |
 
 ### Default Systems
 
@@ -74,7 +75,7 @@ The `--max-memory` flag accepts human-readable sizes:
 | With suffix  | `1024M`, `1024MB`   | Mebibytes                           |
 | Fractional   | `1.5G`              | 1.5 gibibytes (1536 MiB)            |
 
-Memory is divided equally among all workers. Minimum 512 MiB per worker.
+Memory is divided equally among all workers (default: 8G ÷ 4 workers = 2 GiB per worker).
 
 ### Examples
 
@@ -335,3 +336,23 @@ These environment variables affect indexer commands:
 | `NXV_LOG_FORMAT`      | Log format: `pretty`, `compact`, `json`                         |
 | `NXV_LOG_FILE`        | Write logs to file                                              |
 | `NXV_LOG_ROTATION`    | Log rotation: `hourly`, `daily`, `never`                        |
+| `RUST_LOG`            | Fallback log filter (standard Rust convention)                  |
+
+### Log Level Precedence
+
+CLI flags take precedence over environment variables:
+
+1. `-v` / `-vv` (verbose flags) - **highest priority**
+2. `--log-level <LEVEL>` or `NXV_LOG_LEVEL`
+3. `NXV_LOG` or `RUST_LOG`
+4. Default: `info`
+
+```bash
+# These all produce TRACE level logging:
+nxv -vv index ...                      # -vv flag
+nxv --log-level trace index ...        # explicit --log-level
+
+# CLI flags override env vars:
+RUST_LOG=info nxv -vv index ...        # Still TRACE (CLI wins)
+NXV_LOG_LEVEL=error nxv -v index ...   # Still DEBUG (CLI wins)
+```

@@ -314,6 +314,56 @@ pub struct RangeIndexResult {
     pub was_interrupted: bool,
 }
 
+/// Limiter to serialize full extractions across parallel range workers.
+///
+/// Full extractions (first commit baseline, periodic, infrastructure diffs) are
+/// very expensive (~12K packages, 24 Nix evaluations each). Running multiple
+/// full extractions in parallel can overwhelm the system. This limiter ensures
+/// at most N full extractions run concurrently (default: 1, i.e., serialized).
+///
+/// Normal incremental extractions (which process only changed packages) remain
+/// fully parallel and are not affected by this limiter.
+pub struct FullExtractionLimiter {
+    limit: usize,
+    state: std::sync::Mutex<usize>,
+    cv: std::sync::Condvar,
+}
+
+impl FullExtractionLimiter {
+    /// Create a new limiter with the specified concurrency limit.
+    pub fn new(limit: usize) -> Self {
+        Self {
+            limit: limit.max(1), // At least 1 allowed
+            state: std::sync::Mutex::new(0),
+            cv: std::sync::Condvar::new(),
+        }
+    }
+
+    /// Acquire a permit to perform a full extraction.
+    /// Blocks if the limit is reached until another extraction completes.
+    pub fn acquire(&self) -> FullExtractionPermit<'_> {
+        let mut in_flight = self.state.lock().unwrap();
+        while *in_flight >= self.limit {
+            in_flight = self.cv.wait(in_flight).unwrap();
+        }
+        *in_flight += 1;
+        FullExtractionPermit { limiter: self }
+    }
+}
+
+/// RAII permit for a full extraction. Released when dropped.
+pub struct FullExtractionPermit<'a> {
+    limiter: &'a FullExtractionLimiter,
+}
+
+impl Drop for FullExtractionPermit<'_> {
+    fn drop(&mut self) {
+        let mut in_flight = self.limiter.state.lock().unwrap();
+        *in_flight -= 1;
+        self.limiter.cv.notify_one();
+    }
+}
+
 /// Configuration for the indexer.
 #[derive(Debug, Clone)]
 pub struct IndexerConfig {
@@ -350,9 +400,15 @@ pub struct IndexerConfig {
     /// Interval for full package extraction (every N commits).
     /// This catches packages missed by incremental detection (e.g., firefox
     /// versions defined in packages.nix but assigned in all-packages.nix).
-    /// Set to 0 to disable periodic full extraction.
-    /// Default: 50
+    /// WARNING: Full extraction is very expensive (~12K packages, 24 Nix evals).
+    /// Set to 0 to disable periodic full extraction (recommended).
+    /// Default: 0 (disabled)
     pub full_extraction_interval: u32,
+    /// Maximum number of full extractions to run concurrently across parallel ranges.
+    /// Full extractions (first commit baseline, periodic) are very expensive.
+    /// Running them in parallel can overwhelm the system. This limits concurrency.
+    /// Default: 1 (serialize full extractions)
+    pub full_extraction_parallelism: usize,
 }
 
 impl Default for IndexerConfig {
@@ -374,7 +430,8 @@ impl Default for IndexerConfig {
             verbose: false,
             gc_interval: 20, // GC every 20 checkpoints (2000 commits by default)
             gc_min_free_bytes: 10 * 1024 * 1024 * 1024, // 10 GB
-            full_extraction_interval: 50, // Full extraction every 50 commits
+            full_extraction_interval: 0, // Disabled - full extraction is very expensive
+            full_extraction_parallelism: 1, // Serialize full extractions to avoid system thrash
         }
     }
 }
@@ -1123,6 +1180,13 @@ impl Indexer {
             "Memory allocation for parallel indexing"
         );
 
+        // Create limiter to serialize full extractions across parallel workers.
+        // This prevents multiple first-commit baseline extractions from running
+        // simultaneously and overwhelming the system.
+        let full_extraction_limiter = Arc::new(FullExtractionLimiter::new(
+            self.config.full_extraction_parallelism,
+        ));
+
         // Process ranges in batches to limit concurrency
         for batch in ranges.chunks(effective_max_workers) {
             // Check for shutdown before starting new batch
@@ -1143,6 +1207,7 @@ impl Indexer {
                         let errors = errors.clone();
                         let config = self.config.clone();
                         let range = range.clone();
+                        let full_extraction_limiter = full_extraction_limiter.clone();
 
                         s.spawn(move || {
                             match process_range_worker(
@@ -1152,6 +1217,7 @@ impl Indexer {
                                 &config,
                                 per_worker_memory_mib,
                                 shutdown,
+                                &full_extraction_limiter,
                             ) {
                                 Ok(result) => {
                                     results.lock().unwrap().push(result);
@@ -1166,7 +1232,26 @@ impl Indexer {
 
                 // Wait for all workers in this batch to complete
                 for handle in handles {
-                    let _ = handle.join();
+                    if let Err(panic_payload) = handle.join() {
+                        // Thread panicked - extract panic message and log as error
+                        let panic_msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                            s.to_string()
+                        } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                            s.clone()
+                        } else {
+                            "unknown panic".to_string()
+                        };
+                        tracing::error!(
+                            target: "nxv::index",
+                            panic_msg = %panic_msg,
+                            "Range worker thread panicked"
+                        );
+                        // Record as an error so it's not silently swallowed
+                        errors.lock().unwrap().push((
+                            "unknown_range".to_string(),
+                            NxvError::Config(format!("Worker thread panicked: {}", panic_msg)),
+                        ));
+                    }
                 }
             });
         }
@@ -1441,9 +1526,9 @@ impl Indexer {
                 file_attr_map.get("pkgs/top-level/all-packages.nix");
 
             // Check for infrastructure files and parse their diffs to extract affected attrs
-            // For the first commit, always do full extraction to capture baseline state
-            // Also trigger periodic full extraction every N commits to catch packages
-            // that can't be detected from file paths (e.g., firefox versions in packages.nix)
+            // First commit captures baseline state; periodic full extraction catches packages
+            // that can't be detected from file paths (e.g., firefox versions in packages.nix).
+            // Periodic full extraction is disabled by default (interval=0) since it's expensive.
             let periodic_full = self.config.full_extraction_interval > 0
                 && (commit_idx + 1) % self.config.full_extraction_interval as usize == 0;
             let mut needs_full_extraction = commit_idx == 0 || periodic_full;
@@ -1494,10 +1579,7 @@ impl Indexer {
             }
 
             // If full extraction is needed (first commit, periodic, or large infrastructure diff),
-            // extract all packages from all-packages.nix
-            // Track whether we should do full extraction with empty target list (triggers builtins.attrNames)
-            let mut extract_all_packages = false;
-
+            // extract all packages from all-packages.nix (if we have the file_attr_map)
             if needs_full_extraction {
                 if let Some(all_attrs_list) = all_attrs {
                     for attr in all_attrs_list {
@@ -1525,13 +1607,16 @@ impl Indexer {
                     }
                 } else {
                     // all_attrs is None (file_attr_map failed or is empty)
-                    // Pass empty list to extraction which triggers builtins.attrNames in Nix
-                    extract_all_packages = true;
-                    debug!(
+                    // DO NOT fall back to dynamic discovery (builtins.attrNames) - it's too expensive
+                    // and causes memory exhaustion when triggered repeatedly.
+                    // Instead, skip full extraction and just do incremental path-based extraction.
+                    warn!(
                         commit = %commit.short_hash,
                         reason = if commit_idx == 0 { "first_commit" } else if periodic_full { "periodic" } else { "infrastructure_diff" },
-                        "Full extraction with dynamic attr discovery (file_attr_map unavailable)"
+                        "Skipping full extraction: file_attr_map unavailable (will only extract changed paths)"
                     );
+                    // Reset needs_full_extraction since we can't actually do it
+                    needs_full_extraction = false;
                 }
             }
 
@@ -1561,47 +1646,47 @@ impl Indexer {
                 } else if path.ends_with(".nix") && path.starts_with("pkgs/") {
                     // Changed .nix file in pkgs/ but couldn't determine attribute
                     // This happens for files like firefox/packages.nix where the filename
-                    // doesn't match the package name. Trigger full extraction to be safe.
-                    info!(
+                    // doesn't match the package name.
+                    trace!(
                         path = path,
                         commit = %commit.short_hash,
                         needs_full_extraction = needs_full_extraction,
                         "Ambiguous pkgs/*.nix file detected"
                     );
                     if !needs_full_extraction {
-                        info!(
-                            path = path,
-                            commit = %commit.short_hash,
-                            "Unknown package file changed, triggering full extraction"
-                        );
-                        needs_full_extraction = true;
-                        // Add all packages since we now need full extraction
                         if let Some(all_attrs_list) = all_attrs {
+                            // We have the attr map - trigger full extraction
+                            debug!(
+                                path = path,
+                                commit = %commit.short_hash,
+                                "Unknown package file changed, triggering full extraction"
+                            );
+                            needs_full_extraction = true;
                             for attr in all_attrs_list {
                                 target_attr_paths.insert(attr.clone());
                             }
                         } else {
-                            // all_attrs is None - use dynamic discovery in Nix
-                            extract_all_packages = true;
-                            debug!(
+                            // all_attrs is None - DO NOT fall back to dynamic discovery
+                            // Just log and skip this file. This may miss some packages but
+                            // prevents memory exhaustion from repeated builtins.attrNames calls.
+                            trace!(
                                 path = path,
                                 commit = %commit.short_hash,
-                                "Full extraction with dynamic discovery (file_attr_map unavailable)"
+                                "Unknown package file changed but file_attr_map unavailable, skipping"
                             );
                         }
                     }
                 }
             }
 
-            // Skip commits with no targets UNLESS we're doing full extraction with dynamic discovery
-            if target_attr_paths.is_empty() && !extract_all_packages {
+            // Skip commits with no targets (dynamic discovery is no longer auto-enabled)
+            if target_attr_paths.is_empty() {
                 result.commits_processed += 1;
                 last_processed_commit = Some(commit.hash.clone());
                 progress.tick();
                 continue;
             }
 
-            // When extract_all_packages is true, pass empty list to trigger builtins.attrNames in Nix
             let mut target_list: Vec<String> = target_attr_paths.into_iter().collect();
             target_list.sort();
 
@@ -2264,6 +2349,9 @@ impl IndexResult {
 /// 3. Checks for and resumes from any existing checkpoint
 /// 4. Processes commits and UPSERTs packages to the shared database
 /// 5. Saves checkpoints periodically
+///
+/// The `full_extraction_limiter` serializes expensive full extractions across
+/// parallel range workers to prevent overwhelming the system.
 fn process_range_worker(
     nixpkgs_path: &Path,
     db: Arc<std::sync::Mutex<Database>>,
@@ -2271,8 +2359,17 @@ fn process_range_worker(
     config: &IndexerConfig,
     per_worker_memory_mib: usize,
     shutdown: Arc<AtomicBool>,
+    full_extraction_limiter: &FullExtractionLimiter,
 ) -> Result<RangeIndexResult> {
     use crate::db::queries::PackageVersion;
+
+    tracing::debug!(
+        target: "nxv::index",
+        range = %range.label,
+        since = %range.since,
+        until = %range.until,
+        "Starting range worker"
+    );
 
     let mut result = RangeIndexResult {
         range_label: range.label.clone(),
@@ -2281,6 +2378,12 @@ fn process_range_worker(
 
     // Open repo and create worktree for this range
     let repo = NixpkgsRepo::open(nixpkgs_path)?;
+
+    tracing::debug!(
+        target: "nxv::index",
+        range = %range.label,
+        "Listing commits (this may take a while for large ranges)..."
+    );
 
     // Get commits for this range
     let commits = repo.get_indexable_commits_touching_paths(
@@ -2427,8 +2530,9 @@ fn process_range_worker(
         let all_attrs: Option<&Vec<String>> = file_attr_map.get("pkgs/top-level/all-packages.nix");
 
         // Check for infrastructure files and parse their diffs
-        // Also trigger periodic full extraction every N commits to catch packages
-        // that can't be detected from file paths (e.g., firefox versions in packages.nix)
+        // First commit captures baseline state; periodic full extraction catches packages
+        // that can't be detected from file paths (e.g., firefox versions in packages.nix).
+        // Periodic full extraction is disabled by default (interval=0) since it's expensive.
         let periodic_full = config.full_extraction_interval > 0
             && (commit_idx + 1) % config.full_extraction_interval as usize == 0;
         let mut needs_full_extraction = commit_idx == 0 || periodic_full;
@@ -2453,9 +2557,7 @@ fn process_range_worker(
         }
 
         // Full extraction for first commit, periodic interval, or large infrastructure diff
-        // Track whether we should do full extraction with empty target list (triggers builtins.attrNames)
-        let mut extract_all_packages = false;
-
+        // (only if we have file_attr_map - dynamic discovery is disabled to prevent memory exhaustion)
         if needs_full_extraction {
             if let Some(all_attrs_list) = all_attrs {
                 for attr in all_attrs_list {
@@ -2463,14 +2565,17 @@ fn process_range_worker(
                 }
             } else {
                 // all_attrs is None (file_attr_map failed or is empty)
-                // Pass empty list to extraction which triggers builtins.attrNames in Nix
-                extract_all_packages = true;
-                tracing::debug!(
+                // DO NOT fall back to dynamic discovery (builtins.attrNames) - it's too expensive
+                // and causes memory exhaustion when triggered repeatedly.
+                // Instead, skip full extraction and just do incremental path-based extraction.
+                tracing::warn!(
                     range = %range.label,
                     commit = %&commit.hash[..8],
                     reason = if commit_idx == 0 { "first_commit" } else if periodic_full { "periodic" } else { "infrastructure_diff" },
-                    "Full extraction with dynamic attr discovery (file_attr_map unavailable)"
+                    "Skipping full extraction: file_attr_map unavailable (will only extract changed paths)"
                 );
+                // Reset needs_full_extraction since we can't actually do it
+                needs_full_extraction = false;
             }
         }
 
@@ -2489,28 +2594,29 @@ fn process_range_worker(
             } else if path.ends_with(".nix") && path.starts_with("pkgs/") {
                 // Changed .nix file in pkgs/ but couldn't determine attribute
                 // This happens for files like firefox/packages.nix where the filename
-                // doesn't match the package name. Trigger full extraction to be safe.
+                // doesn't match the package name.
                 if !needs_full_extraction {
-                    tracing::debug!(
-                        range = %range.label,
-                        path = path,
-                        commit = %&commit.hash[..8],
-                        "Unknown package file changed, triggering full extraction"
-                    );
-                    needs_full_extraction = true;
-                    // Add all packages since we now need full extraction
                     if let Some(all_attrs_list) = all_attrs {
-                        for attr in all_attrs_list {
-                            target_attr_paths.insert(attr.clone());
-                        }
-                    } else {
-                        // all_attrs is None - use dynamic discovery in Nix
-                        extract_all_packages = true;
+                        // We have the attr map - trigger full extraction
                         tracing::debug!(
                             range = %range.label,
                             path = path,
                             commit = %&commit.hash[..8],
-                            "Full extraction with dynamic discovery (file_attr_map unavailable)"
+                            "Unknown package file changed, triggering full extraction"
+                        );
+                        needs_full_extraction = true;
+                        for attr in all_attrs_list {
+                            target_attr_paths.insert(attr.clone());
+                        }
+                    } else {
+                        // all_attrs is None - DO NOT fall back to dynamic discovery
+                        // Just log and skip this file. This may miss some packages but
+                        // prevents memory exhaustion from repeated builtins.attrNames calls.
+                        tracing::debug!(
+                            range = %range.label,
+                            path = path,
+                            commit = %&commit.hash[..8],
+                            "Unknown package file changed but file_attr_map unavailable, skipping"
                         );
                     }
                 }
@@ -2539,8 +2645,8 @@ fn process_range_worker(
             );
         }
 
-        // Skip commits with no targets UNLESS we're doing full extraction with dynamic discovery
-        if target_attrs.is_empty() && !extract_all_packages {
+        // Skip commits with no targets (dynamic discovery is no longer auto-enabled)
+        if target_attrs.is_empty() {
             // No packages to extract for this commit
             result.commits_processed += 1;
             progress.tick();
@@ -2548,8 +2654,21 @@ fn process_range_worker(
         }
 
         // Extract packages for all systems
-        // When extract_all_packages is true, empty target_attrs triggers builtins.attrNames in Nix
         let extract_start = std::time::Instant::now();
+
+        // Acquire limiter permit for full extractions to prevent system thrash.
+        // This serializes expensive baseline/periodic extractions across parallel workers.
+        // The permit is held for the duration of extraction and released when _permit drops.
+        let _permit = if needs_full_extraction {
+            tracing::debug!(
+                range = %range.label,
+                commit = %&commit.hash[..8],
+                "Acquiring full extraction permit (may wait for other ranges)"
+            );
+            Some(full_extraction_limiter.acquire())
+        } else {
+            None
+        };
 
         // Skip store path extraction for old commits to avoid derivationStrict errors
         let extract_store_paths = is_after_store_path_cutoff(commit.date);
@@ -3096,6 +3215,7 @@ mod tests {
             gc_interval: 0, // Disable GC for tests
             gc_min_free_bytes: 0,
             full_extraction_interval: 0, // Disable periodic full extraction for tests
+            full_extraction_parallelism: 1,
         };
         let _indexer = Indexer::new(config);
 
@@ -3132,6 +3252,7 @@ mod tests {
             gc_interval: 0, // Disable GC for tests
             gc_min_free_bytes: 0,
             full_extraction_interval: 0, // Disable periodic full extraction for tests
+            full_extraction_parallelism: 1,
         };
         let _indexer = Indexer::new(config);
 
@@ -4078,15 +4199,14 @@ index abc123..def456 100644
     }
 
     #[test]
-    fn test_ambiguous_file_triggers_dynamic_discovery_when_all_attrs_none() {
-        // This test documents the critical bug fix:
-        // When an ambiguous file (like firefox/packages.nix) triggers full extraction,
+    fn test_ambiguous_file_skips_when_all_attrs_none() {
+        // This test documents the behavior when file_attr_map is unavailable:
+        // When an ambiguous file (like firefox/packages.nix) is encountered,
         // AND all_attrs is None (file_attr_map unavailable),
-        // we MUST set extract_all_packages = true to use dynamic Nix discovery.
+        // we SKIP full extraction to prevent memory exhaustion from builtins.attrNames.
         //
-        // Before the fix, this case resulted in an empty target_attr_paths,
-        // causing the commit to be skipped and wrapper packages like Firefox
-        // to be completely missed.
+        // This may miss some packages, but prevents repeated expensive evaluations
+        // that cause system thrashing and memory saturation.
 
         // Simulate the decision logic
         let path = "pkgs/applications/networking/browsers/firefox/packages.nix";
@@ -4099,35 +4219,36 @@ index abc123..def456 100644
         let extracted = extract_attr_from_path(path);
         assert_eq!(extracted, None, "packages.nix should return None");
 
-        // Determine if this triggers full extraction
+        // Determine if this would trigger full extraction path
         let is_pkg_nix = path.ends_with(".nix") && path.starts_with("pkgs/");
-        let triggers_full = !in_file_attr_map && extracted.is_none() && is_pkg_nix;
+        let triggers_full_path = !in_file_attr_map && extracted.is_none() && is_pkg_nix;
 
         assert!(
-            triggers_full,
-            "Ambiguous pkgs/*.nix file should trigger full extraction"
+            triggers_full_path,
+            "Ambiguous pkgs/*.nix file should trigger full extraction path"
         );
 
-        // When all_attrs is None, we MUST use dynamic discovery
-        let should_use_dynamic_discovery = triggers_full && all_attrs.is_none();
+        // When all_attrs is None, we should SKIP (not use dynamic discovery)
+        let should_skip_full_extraction = triggers_full_path && all_attrs.is_none();
         assert!(
-            should_use_dynamic_discovery,
+            should_skip_full_extraction,
             "When all_attrs is None and full extraction is triggered, \
-             must use dynamic Nix discovery (extract_all_packages = true)"
+             we should SKIP to prevent memory exhaustion"
         );
     }
 
     #[test]
-    fn test_full_extraction_fallback_completeness() {
-        // Verify all code paths that trigger full extraction have proper fallbacks
-        // for when all_attrs is None.
+    fn test_full_extraction_requires_file_attr_map() {
+        // Verify that full extraction is only performed when file_attr_map is available.
+        // Without file_attr_map, we fall back to incremental path-based extraction only.
         //
         // There are 3 places that can trigger full extraction:
-        // 1. First commit (commit_idx == 0) - handled at line ~1501
-        // 2. Periodic full extraction - handled at line ~1501
-        // 3. Ambiguous file changed - handled at line ~1559 (BUG FIX)
+        // 1. First commit (commit_idx == 0)
+        // 2. Periodic full extraction
+        // 3. Ambiguous file changed
         //
-        // All three must have fallback to extract_all_packages = true when all_attrs is None.
+        // All three REQUIRE file_attr_map (all_attrs != None) to actually perform
+        // full extraction. If all_attrs is None, full extraction is skipped.
 
         // Test the condition that determines if an ambiguous file triggers full extraction
         let ambiguous_files = vec![

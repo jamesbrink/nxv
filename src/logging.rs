@@ -212,16 +212,22 @@ impl LogConfig {
     /// Apply environment variable overrides.
     ///
     /// Reads from:
-    /// - `NXV_LOG` or `RUST_LOG` for filter
+    /// - `NXV_LOG` or `RUST_LOG` for filter (only if filter not already set from CLI)
     /// - `NXV_LOG_FORMAT` for format
     /// - `NXV_LOG_FILE` for file path
-    /// - `NXV_LOG_LEVEL` for level
+    /// - `NXV_LOG_LEVEL` for level (only if filter not already set)
+    ///
+    /// Note: CLI arguments take precedence over environment variables. If a filter
+    /// is already set (e.g., from -v or --log-level), env vars won't override it.
     pub fn with_env_overrides(mut self) -> Self {
-        // NXV_LOG takes precedence over RUST_LOG for filter
-        if let Ok(filter) = std::env::var("NXV_LOG") {
-            self.filter = Some(filter);
-        } else if let Ok(filter) = std::env::var("RUST_LOG") {
-            self.filter = Some(filter);
+        // NXV_LOG takes precedence over RUST_LOG for filter (only if no filter already set)
+        // This allows CLI args like -v or --log-level to take precedence over env vars
+        if self.filter.is_none() {
+            if let Ok(filter) = std::env::var("NXV_LOG") {
+                self.filter = Some(filter);
+            } else if let Ok(filter) = std::env::var("RUST_LOG") {
+                self.filter = Some(filter);
+            }
         }
 
         // NXV_LOG_LEVEL overrides level (only if no filter is set)

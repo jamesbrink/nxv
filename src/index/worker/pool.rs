@@ -29,6 +29,8 @@ pub struct WorkerPoolConfig {
     pub timeout: Duration,
     /// Custom eval store path (for parallel range isolation).
     pub eval_store_path: Option<String>,
+    /// Label for this pool (e.g., "2020-Q1") for debugging.
+    pub label: Option<String>,
 }
 
 impl Default for WorkerPoolConfig {
@@ -41,6 +43,7 @@ impl Default for WorkerPoolConfig {
                 as usize,
             timeout: Duration::from_secs(300), // 5 minutes
             eval_store_path: None,
+            label: None,
         }
     }
 }

@@ -179,25 +179,63 @@ pub fn extract_packages_for_attrs<P: AsRef<Path>>(
                     all_packages.extend(batch_result);
                 }
                 Err(e) => {
-                    failed_batches += 1;
-                    total_failed_attrs += batch.len();
-                    let _ = writeln!(
-                        std::io::stderr(),
-                        "[{}] Batch {}/{} failed ({} attrs): {}",
-                        system,
-                        batch_idx + 1,
-                        num_batches,
-                        batch.len(),
-                        e
-                    );
-                    let _ = std::io::stderr().flush();
-                    trace!(
-                        system = %system,
-                        batch_idx = batch_idx,
-                        batch_size = batch.len(),
-                        error = %e,
-                        "Batch extraction failed, continuing with remaining batches"
-                    );
+                    // Try subdivision: retry failed batch with smaller chunks
+                    // This helps recover from OOM by reducing memory pressure
+                    const MIN_SUBDIVISION_SIZE: usize = 50;
+                    if batch.len() > MIN_SUBDIVISION_SIZE {
+                        let _ = writeln!(
+                            std::io::stderr(),
+                            "[{}] Batch {}/{} failed, retrying with subdivision ({} -> {} chunks)",
+                            system,
+                            batch_idx + 1,
+                            num_batches,
+                            batch.len(),
+                            batch.len().div_ceil(MIN_SUBDIVISION_SIZE)
+                        );
+                        let _ = std::io::stderr().flush();
+
+                        let mut sub_failed = 0;
+                        for sub_batch in batch.chunks(MIN_SUBDIVISION_SIZE) {
+                            match extract_packages_batch(
+                                repo_path,
+                                system,
+                                sub_batch,
+                                extract_store_paths,
+                            ) {
+                                Ok(sub_result) => {
+                                    all_packages.extend(sub_result);
+                                }
+                                Err(_sub_e) => {
+                                    sub_failed += sub_batch.len();
+                                }
+                            }
+                        }
+                        if sub_failed > 0 {
+                            failed_batches += 1;
+                            total_failed_attrs += sub_failed;
+                        }
+                    } else {
+                        // Batch is already small, can't subdivide further
+                        failed_batches += 1;
+                        total_failed_attrs += batch.len();
+                        let _ = writeln!(
+                            std::io::stderr(),
+                            "[{}] Batch {}/{} failed ({} attrs): {}",
+                            system,
+                            batch_idx + 1,
+                            num_batches,
+                            batch.len(),
+                            e
+                        );
+                        let _ = std::io::stderr().flush();
+                        trace!(
+                            system = %system,
+                            batch_idx = batch_idx,
+                            batch_size = batch.len(),
+                            error = %e,
+                            "Batch extraction failed, continuing with remaining batches"
+                        );
+                    }
                     // Continue with remaining batches instead of failing early
                 }
             }

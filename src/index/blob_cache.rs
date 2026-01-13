@@ -93,7 +93,18 @@ impl BlobCache {
                 Ok(cache)
             }
             Err(e) => {
-                warn!(?path, error = %e, "Failed to load cache, creating new one");
+                warn!(?path, error = %e, "Failed to load cache, renaming corrupt file");
+                // Rename corrupt file to preserve evidence
+                let corrupt_path = path.with_extension("corrupt");
+                if let Err(rename_err) = std::fs::rename(path, &corrupt_path) {
+                    warn!(
+                        ?corrupt_path,
+                        error = %rename_err,
+                        "Failed to rename corrupt cache file"
+                    );
+                } else {
+                    info!(?corrupt_path, "Renamed corrupt cache file");
+                }
                 Ok(Self::with_path(path))
             }
         }
@@ -157,7 +168,17 @@ impl BlobCache {
             cache_error(format!("Failed to encode cache: {}", e))
         })?;
 
-        // Atomic rename
+        // Atomic replace: remove target first for Windows compatibility
+        // (std::fs::rename fails on Windows if target exists)
+        if path.exists() {
+            std::fs::remove_file(path).map_err(|e| {
+                cache_error(format!(
+                    "Failed to remove old cache file {}: {}",
+                    path.display(),
+                    e
+                ))
+            })?;
+        }
         std::fs::rename(&temp_path, path).map_err(|e| {
             cache_error(format!(
                 "Failed to rename cache file {} -> {}: {}",
@@ -191,7 +212,53 @@ impl BlobCache {
         self.entries.insert(blob_oid.into(), map);
     }
 
+    /// Get or parse with lazy content loading.
+    ///
+    /// This is the preferred API when you want to avoid reading blob content
+    /// unless necessary. The closure is only called on cache miss.
+    ///
+    /// # Arguments
+    /// * `blob_oid` - Git blob OID (SHA) as hex string
+    /// * `base_path` - Base path for resolving relative paths
+    /// * `content_fn` - Closure that loads content only on cache miss
+    ///
+    /// # Example
+    /// ```ignore
+    /// cache.get_or_parse_with("abc123", "pkgs/top-level", || {
+    ///     repo.read_blob(commit, "pkgs/top-level/all-packages.nix")
+    ///         .map(|(_, content)| content)
+    /// })?;
+    /// ```
+    pub fn get_or_parse_with<F>(
+        &mut self,
+        blob_oid: &str,
+        base_path: &str,
+        content_fn: F,
+    ) -> Result<&StaticFileMap>
+    where
+        F: FnOnce() -> Result<String>,
+    {
+        // Check if we already have this blob cached
+        if self.entries.contains_key(blob_oid) {
+            self.hits += 1;
+            debug!(blob_oid, "Cache hit for blob");
+            return Ok(self.entries.get(blob_oid).unwrap());
+        }
+
+        // Cache miss - load content via closure and parse
+        self.misses += 1;
+        debug!(blob_oid, "Cache miss, loading and parsing all-packages.nix");
+
+        let content = content_fn()?;
+        let map = super::static_analysis::parse_all_packages(&content, base_path)?;
+        self.entries.insert(blob_oid.to_string(), map);
+        Ok(self.entries.get(blob_oid).unwrap())
+    }
+
     /// Get or parse: returns cached entry or parses content and caches result.
+    ///
+    /// This is a convenience wrapper for when content is already loaded.
+    /// Prefer `get_or_parse_with` when content loading can be deferred.
     ///
     /// # Arguments
     /// * `blob_oid` - Git blob OID (SHA) as hex string
@@ -203,20 +270,7 @@ impl BlobCache {
         content: &str,
         base_path: &str,
     ) -> Result<&StaticFileMap> {
-        // Check if we already have this blob cached
-        if self.entries.contains_key(blob_oid) {
-            self.hits += 1;
-            debug!(blob_oid, "Cache hit for blob");
-            return Ok(self.entries.get(blob_oid).unwrap());
-        }
-
-        // Parse and cache
-        self.misses += 1;
-        debug!(blob_oid, "Cache miss, parsing all-packages.nix");
-
-        let map = super::static_analysis::parse_all_packages(content, base_path)?;
-        self.entries.insert(blob_oid.to_string(), map);
-        Ok(self.entries.get(blob_oid).unwrap())
+        self.get_or_parse_with(blob_oid, base_path, || Ok(content.to_string()))
     }
 
     /// Get cache statistics.
@@ -375,5 +429,109 @@ mod tests {
         assert_eq!(stats.hits, 2);
         assert_eq!(stats.misses, 1);
         assert!((stats.hit_ratio() - 0.666).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_cache_version_mismatch() {
+        let dir = tempdir().unwrap();
+        let cache_path = dir.path().join("version_mismatch.json");
+
+        // Write a cache with wrong version
+        let bad_cache = serde_json::json!({
+            "version": 9999,  // Wrong version
+            "entries": {}
+        });
+        std::fs::write(&cache_path, bad_cache.to_string()).unwrap();
+
+        // load() should fail with version mismatch
+        let result = BlobCache::load(&cache_path);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("version mismatch"));
+    }
+
+    #[test]
+    fn test_cache_corrupt_json() {
+        let dir = tempdir().unwrap();
+        let cache_path = dir.path().join("corrupt.json");
+
+        // Write invalid JSON
+        std::fs::write(&cache_path, "{ invalid json }").unwrap();
+
+        // load() should fail
+        let result = BlobCache::load(&cache_path);
+        assert!(result.is_err());
+
+        // load_or_create() should recover and rename corrupt file
+        let cache = BlobCache::load_or_create(&cache_path).unwrap();
+        assert!(cache.is_empty());
+
+        // Corrupt file should be renamed
+        let corrupt_path = cache_path.with_extension("corrupt");
+        assert!(corrupt_path.exists());
+    }
+
+    #[test]
+    fn test_cache_save_without_path() {
+        let cache = BlobCache::new();
+
+        // save() without path should fail
+        let result = cache.save();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("no path configured"));
+    }
+
+    #[test]
+    fn test_cache_overwrite_existing() {
+        let dir = tempdir().unwrap();
+        let cache_path = dir.path().join("overwrite.json");
+
+        // Create initial cache
+        {
+            let mut cache = BlobCache::with_path(&cache_path);
+            cache.insert("first", StaticFileMap::default());
+            cache.save().unwrap();
+        }
+
+        // Overwrite with new cache
+        {
+            let mut cache = BlobCache::with_path(&cache_path);
+            cache.insert("second", StaticFileMap::default());
+            cache.save().unwrap();
+        }
+
+        // Verify new cache replaced old
+        let cache = BlobCache::load(&cache_path).unwrap();
+        assert_eq!(cache.len(), 1);
+        assert!(cache.entries.contains_key("second"));
+        assert!(!cache.entries.contains_key("first"));
+    }
+
+    #[test]
+    fn test_get_or_parse_with_lazy() {
+        let mut cache = BlobCache::new();
+
+        // First call should invoke the closure
+        let mut called = false;
+        let _result = cache.get_or_parse_with("abc123", "pkgs", || {
+            called = true;
+            // Return minimal valid Nix content
+            Ok("{ }".to_string())
+        });
+        assert!(called, "Closure should be called on cache miss");
+
+        // Second call should NOT invoke the closure (cache hit)
+        let mut called_again = false;
+        let _result = cache.get_or_parse_with("abc123", "pkgs", || {
+            called_again = true;
+            Ok("{ }".to_string())
+        });
+        assert!(!called_again, "Closure should NOT be called on cache hit");
+
+        // Verify stats
+        let stats = cache.stats();
+        assert_eq!(stats.hits, 1);
+        assert_eq!(stats.misses, 1);
     }
 }

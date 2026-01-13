@@ -1419,6 +1419,21 @@ impl NixpkgsRepo {
 
         Ok((entry.id(), content))
     }
+
+    /// Try to get blob OID, returning None if file doesn't exist at this commit.
+    ///
+    /// This is useful for historical commits where all-packages.nix might not exist
+    /// or have a different path.
+    pub fn try_get_blob_oid(&self, commit_hash: &str, file_path: &str) -> Option<Oid> {
+        self.get_blob_oid(commit_hash, file_path).ok()
+    }
+
+    /// Try to read blob content, returning None if file doesn't exist or isn't UTF-8.
+    ///
+    /// This is useful for gracefully handling missing files in historical commits.
+    pub fn try_read_blob(&self, commit_hash: &str, file_path: &str) -> Option<(Oid, String)> {
+        self.read_blob(commit_hash, file_path).ok()
+    }
 }
 
 /// Detect monthly gaps in a list of commits within a date range.

@@ -2174,15 +2174,20 @@ fn extract_assignment_attr(line: &str) -> Option<String> {
         return None;
     }
 
-    // Validate attrpath: can be a single identifier or dot-separated identifiers
-    // Example: "hello", "python3Packages.hello", "gnome.shell.extensions.foo"
-    let parts: Vec<&str> = before_eq.split('.').collect();
+    // Split attrpath into parts, respecting quotes
+    // Example: "nodePackages.\"foo.bar\"" -> ["nodePackages", "\"foo.bar\""]
+    let parts = split_attrpath(before_eq);
 
     for part in &parts {
         // Handle quoted parts in attrpaths (e.g., `nodePackages."@angular/cli"`)
-        if part.starts_with('"') && part.ends_with('"') {
-            // String attribute names are allowed
+        if part.starts_with('"') && part.ends_with('"') && part.len() > 2 {
+            // String attribute names are allowed (but not empty "")
             continue;
+        }
+
+        // Reject empty quoted parts
+        if *part == "\"\"" {
+            return None;
         }
 
         // Validate each part is a valid Nix identifier
@@ -2192,6 +2197,40 @@ fn extract_assignment_attr(line: &str) -> Option<String> {
     }
 
     Some(before_eq.to_string())
+}
+
+/// Split an attrpath into parts, respecting quoted strings.
+/// This handles cases like `nodePackages."foo.bar"` where dots inside quotes
+/// should not be treated as separators.
+fn split_attrpath(s: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut in_quotes = false;
+    let bytes = s.as_bytes();
+
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
+            b'"' => {
+                in_quotes = !in_quotes;
+            }
+            b'.' if !in_quotes => {
+                let part = s[start..i].trim();
+                if !part.is_empty() {
+                    parts.push(part);
+                }
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+
+    // Add the last part
+    let last_part = s[start..].trim();
+    if !last_part.is_empty() {
+        parts.push(last_part);
+    }
+
+    parts
 }
 
 /// Check if a string is a valid Nix identifier.
@@ -3784,6 +3823,59 @@ mod tests {
 
         // Empty string attribute should not match
         assert_eq!(extract_assignment_attr(r#"  "" = foo;"#), None);
+
+        // === Codex review edge cases ===
+
+        // Quoted attrpath with dot inside quotes (should NOT split on dot inside quotes)
+        assert_eq!(
+            extract_assignment_attr(r#"  nodePackages."foo.bar" = callPackage ../pkgs { };"#),
+            Some(r#"nodePackages."foo.bar""#.to_string())
+        );
+
+        // Multiple quoted parts with dots
+        assert_eq!(
+            extract_assignment_attr(r#"  scope."@org/pkg"."sub.mod" = callPackage ../pkgs { };"#),
+            Some(r#"scope."@org/pkg"."sub.mod""#.to_string())
+        );
+
+        // Empty quoted part in attrpath should be rejected
+        assert_eq!(extract_assignment_attr(r#"  foo."" = bar;"#), None);
+
+        // Whitespace around dots in attrpaths (Nix allows this)
+        assert_eq!(
+            extract_assignment_attr("  foo . bar = callPackage ../pkgs { };"),
+            Some("foo . bar".to_string())
+        );
+    }
+
+    #[test]
+    fn test_split_attrpath() {
+        // Simple identifier (no dots)
+        assert_eq!(split_attrpath("hello"), vec!["hello"]);
+
+        // Simple attrpath
+        assert_eq!(
+            split_attrpath("python3Packages.requests"),
+            vec!["python3Packages", "requests"]
+        );
+
+        // Quoted part (no split inside quotes)
+        assert_eq!(
+            split_attrpath(r#"nodePackages."foo.bar""#),
+            vec!["nodePackages", r#""foo.bar""#]
+        );
+
+        // Multiple dots inside quotes
+        assert_eq!(
+            split_attrpath(r#"pkg."a.b.c.d""#),
+            vec!["pkg", r#""a.b.c.d""#]
+        );
+
+        // Whitespace around dots
+        assert_eq!(split_attrpath("foo . bar"), vec!["foo", "bar"]);
+
+        // Empty input
+        assert_eq!(split_attrpath(""), Vec::<&str>::new());
     }
 
     #[test]

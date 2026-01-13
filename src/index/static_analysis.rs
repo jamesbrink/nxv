@@ -92,20 +92,11 @@ pub fn parse_all_packages(content: &str, base_path: &str) -> Result<StaticFileMa
     let mut result = StaticFileMap::default();
     let mut hits = Vec::new();
 
-    // Walk all nodes looking for entry containers
-    for node in root.syntax().descendants() {
-        // AttrSet entries (most common in all-packages.nix)
-        if let Some(attrset) = ast::AttrSet::cast(node.clone()) {
-            collect_entries(attrset.entries(), &mut hits, &mut result.total_attrs);
-        }
-        // LetIn entries
-        if let Some(let_in) = ast::LetIn::cast(node.clone()) {
-            collect_entries(let_in.entries(), &mut hits, &mut result.total_attrs);
-        }
-        // LegacyLet entries (older syntax)
-        if let Some(legacy) = ast::LegacyLet::cast(node) {
-            collect_entries(legacy.entries(), &mut hits, &mut result.total_attrs);
-        }
+    // Find the root expression - all-packages.nix is typically:
+    // { self, ... }: { attr1 = ...; attr2 = ...; }
+    // We want to find the top-level attrset, not nested ones.
+    if let Some(root_expr) = root.expr() {
+        collect_from_expr(root_expr, "", &mut hits, &mut result.total_attrs);
     }
 
     // Build file-to-attrs map
@@ -139,9 +130,62 @@ pub fn parse_all_packages(content: &str, base_path: &str) -> Result<StaticFileMa
     Ok(result)
 }
 
-/// Collect entries from an iterator of Entry nodes.
-fn collect_entries<I>(entries: I, hits: &mut Vec<CallPackageHit>, total_attrs: &mut usize)
-where
+/// Recursively collect entries from an expression, tracking the attribute path prefix.
+///
+/// This handles the structure of all-packages.nix where:
+/// - Top-level is a function returning an attrset
+/// - We want to track nested paths like `foo.bar = callPackage ...`
+fn collect_from_expr(
+    expr: ast::Expr,
+    prefix: &str,
+    hits: &mut Vec<CallPackageHit>,
+    total_attrs: &mut usize,
+) {
+    let expr = strip_parens(expr);
+
+    match expr {
+        // Function: { args }: body - recurse into body
+        ast::Expr::Lambda(lambda) => {
+            if let Some(body) = lambda.body() {
+                collect_from_expr(body, prefix, hits, total_attrs);
+            }
+        }
+        // AttrSet: { attr1 = ...; attr2 = ...; }
+        ast::Expr::AttrSet(attrset) => {
+            collect_entries_with_prefix(attrset.entries(), prefix, hits, total_attrs);
+        }
+        // LetIn: let ... in body - process both bindings and body
+        ast::Expr::LetIn(let_in) => {
+            // Process let bindings (these define local variables, not exported attrs)
+            // We still want to track them for coverage but they're usually not callPackage
+            for entry in let_in.entries() {
+                if let ast::Entry::AttrpathValue(_) = entry {
+                    *total_attrs += 1;
+                }
+            }
+            // Recurse into body
+            if let Some(body) = let_in.body() {
+                collect_from_expr(body, prefix, hits, total_attrs);
+            }
+        }
+        // With: with expr; body - recurse into body
+        ast::Expr::With(with_expr) => {
+            if let Some(body) = with_expr.body() {
+                collect_from_expr(body, prefix, hits, total_attrs);
+            }
+        }
+        // Other expressions - don't recurse into nested attrsets
+        _ => {}
+    }
+}
+
+/// Collect entries from an iterator of Entry nodes with a prefix for nested attrs.
+fn collect_entries_with_prefix<I>(
+    entries: I,
+    prefix: &str,
+    hits: &mut Vec<CallPackageHit>,
+    total_attrs: &mut usize,
+) where
     I: Iterator<Item = ast::Entry>,
 {
     for entry in entries {
@@ -149,17 +193,26 @@ where
             ast::Entry::AttrpathValue(apv) => {
                 *total_attrs += 1;
 
-                // Extract attribute name (first component of attrpath)
-                let name = apv
-                    .attrpath()
-                    .and_then(|p| p.attrs().next())
-                    .and_then(attr_text);
+                // Extract full attribute path (e.g., "foo.bar.baz")
+                let attrpath = apv.attrpath().map(|p| {
+                    p.attrs()
+                        .filter_map(attr_text)
+                        .collect::<Vec<_>>()
+                        .join(".")
+                });
 
-                if let (Some(name), Some(value)) = (name, apv.value()) {
+                if let (Some(path_str), Some(value)) = (attrpath, apv.value()) {
+                    // Combine prefix with attrpath
+                    let full_name = if prefix.is_empty() {
+                        path_str
+                    } else {
+                        format!("{}.{}", prefix, path_str)
+                    };
+
                     if let Some((kind, path_expr)) = match_call(value) {
                         if let Some(path) = path_text(path_expr) {
                             hits.push(CallPackageHit {
-                                attr_name: name,
+                                attr_name: full_name,
                                 path,
                                 kind,
                             });
@@ -175,8 +228,13 @@ where
                             for attr in inh.attrs() {
                                 *total_attrs += 1;
                                 if let Some(name) = attr_text(attr) {
+                                    let full_name = if prefix.is_empty() {
+                                        name
+                                    } else {
+                                        format!("{}.{}", prefix, name)
+                                    };
                                     hits.push(CallPackageHit {
-                                        attr_name: name,
+                                        attr_name: full_name,
                                         path: path.clone(),
                                         kind,
                                     });
@@ -193,6 +251,15 @@ where
             }
         }
     }
+}
+
+/// Collect entries from an iterator of Entry nodes (no prefix, for tests).
+#[cfg(test)]
+fn collect_entries<I>(entries: I, hits: &mut Vec<CallPackageHit>, total_attrs: &mut usize)
+where
+    I: Iterator<Item = ast::Entry>,
+{
+    collect_entries_with_prefix(entries, "", hits, total_attrs);
 }
 
 /// Match a callPackage/callPackages expression.
@@ -489,5 +556,57 @@ mod tests {
         assert_eq!(attrs.len(), 2);
         assert!(attrs.contains(&"firefox".to_string()));
         assert!(attrs.contains(&"firefoxDev".to_string()));
+    }
+
+    #[test]
+    fn test_full_attrpath() {
+        // Test that we extract full attrpaths like foo.bar, not just foo
+        let content = r#"
+        {
+            python3Packages.requests = callPackage ./python-modules/requests { };
+            qt6.qtbase = callPackage ./qt/qtbase { };
+        }
+        "#;
+
+        let result = parse_all_packages(content, "pkgs").unwrap();
+        assert_eq!(result.hits.len(), 2);
+
+        let names: Vec<_> = result.hits.iter().map(|h| h.attr_name.as_str()).collect();
+        assert!(names.contains(&"python3Packages.requests"), "Expected python3Packages.requests, got {:?}", names);
+        assert!(names.contains(&"qt6.qtbase"), "Expected qt6.qtbase, got {:?}", names);
+    }
+
+    #[test]
+    fn test_lambda_body() {
+        // Test that we handle function definitions correctly
+        let content = r#"
+        { lib, pkgs }:
+        {
+            hello = callPackage ./hello { };
+        }
+        "#;
+
+        let result = parse_all_packages(content, "pkgs").unwrap();
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].attr_name, "hello");
+    }
+
+    #[test]
+    fn test_let_in_body() {
+        // Test that let bindings don't produce false positives
+        let content = r#"
+        let
+            helper = ./helper.nix;
+        in
+        {
+            hello = callPackage ./hello { };
+        }
+        "#;
+
+        let result = parse_all_packages(content, "pkgs").unwrap();
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].attr_name, "hello");
+        // The let binding should be counted but not as a callPackage hit
+        assert_eq!(result.total_attrs, 2); // let binding + attrset entry
     }
 }

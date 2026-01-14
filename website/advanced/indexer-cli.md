@@ -73,9 +73,9 @@ nxv index --nixpkgs-path ./nixpkgs --parallel-ranges "2023-H1,2023-H2,2024-H1"
 nxv index --nixpkgs-path ./nixpkgs --parallel-ranges "2024-Q1,2024-Q2,2024-Q3,2024-Q4"
 ```
 
-::: warning Memory-Safe Limiting
-The indexer automatically limits concurrent ranges to prevent OOM. With 16 GiB
-memory and 4 systems, only 2 ranges run concurrently (requires 2 GiB per worker).
+::: warning Memory Allocation
+Memory is divided evenly among all concurrent workers (systems × ranges).
+With 32 GiB, 4 systems, and 4 ranges, each worker gets 2 GiB. Plan accordingly.
 :::
 
 ### Memory Format

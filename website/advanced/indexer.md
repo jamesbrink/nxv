@@ -94,10 +94,10 @@ nxv index --nixpkgs-path ./nixpkgs \
 
 This can reduce build time by 2-3x on systems with 8+ cores and sufficient RAM.
 
-::: tip Memory-Safe Parallelism
-The indexer automatically limits concurrent ranges based on your memory budget.
-With 16 GiB and 4 systems, only 2 ranges run concurrently (16G / 2G per worker / 4 systems = 2).
-Ranges are processed in batches, with staggered startup to prevent system saturation.
+::: tip Memory Allocation
+Memory is divided evenly among all workers (systems × concurrent ranges).
+With 32 GiB, 4 systems, and 4 parallel ranges, each worker gets 32G / 16 = 2 GiB.
+Use `--max-range-workers` to limit concurrent ranges if needed.
 :::
 
 ### Indexing a Specific Date Range
@@ -137,8 +137,8 @@ Memory is divided among workers (systems × concurrent ranges). With 4 systems
 | 32 GiB       | 4       | 8 GiB      |
 
 With parallel ranges, memory is divided among all workers (systems × ranges).
-The indexer automatically limits concurrent ranges to ensure at least 2 GiB per
-worker to prevent OOM issues during heavy Nix evaluations.
+Plan your memory budget accordingly - with many parallel ranges, per-worker
+memory decreases. For example, 32G with 4 systems × 8 ranges = 32 workers = 1 GiB each.
 
 The minimum per-worker allocation is 512 MiB (hard limit). Indexing will fail if
 the budget can't meet this threshold.
@@ -239,7 +239,7 @@ The indexer uses a two-tier approach for file-to-attribute mapping:
    (computed attributes, complex inherit patterns), falls back to Nix's
    `builtins.unsafeGetAttrPos`.
 
-Static analysis typically covers 50-70% of packages. The hybrid approach
+Static analysis typically covers 80-90% of packages. The hybrid approach
 combines both for complete coverage while minimizing expensive Nix evaluations.
 
 ### Nix FFI Evaluation

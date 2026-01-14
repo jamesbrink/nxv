@@ -108,10 +108,10 @@ Nix evaluation requires significant RAM:
 
 ```bash
 # Increase memory budget
-nxv index --nixpkgs-path ./nixpkgs --memory-budget 16G
+nxv index --nixpkgs-path ./nixpkgs --max-memory 16G
 
-# Reduce parallel workers
-nxv index --nixpkgs-path ./nixpkgs --workers 2
+# Reduce systems (fewer parallel workers)
+nxv index --nixpkgs-path ./nixpkgs --systems x86_64-linux
 ```
 
 ### Disk full during indexing
@@ -119,8 +119,8 @@ nxv index --nixpkgs-path ./nixpkgs --workers 2
 Nix store grows during indexing:
 
 ```bash
-# Run garbage collection more aggressively
-nxv index --nixpkgs-path ./nixpkgs --gc-threshold 50
+# Run garbage collection more frequently
+nxv index --nixpkgs-path ./nixpkgs --gc-interval 2
 
 # Manual cleanup
 nix-collect-garbage -d
@@ -145,8 +145,8 @@ nix-collect-garbage -d
 Workers may crash on certain commits:
 
 ```bash
-# Skip problematic commits
-nxv index --nixpkgs-path ./nixpkgs --skip-errors
+# Skip problematic date range
+nxv index --nixpkgs-path ./nixpkgs --since 2023-06-01
 
 # Check worker logs
 NXV_LOG_LEVEL=trace nxv index --nixpkgs-path ./nixpkgs

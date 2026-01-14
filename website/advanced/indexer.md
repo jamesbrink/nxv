@@ -354,9 +354,6 @@ nxv index --nixpkgs-path ./nixpkgs --gc-interval 2
 
 # Disable automatic GC
 nxv index --nixpkgs-path ./nixpkgs --gc-interval 0
-
-# Trigger emergency GC when disk is low
-nxv index --nixpkgs-path ./nixpkgs --gc-min-free-gb 20
 ```
 
 ## Troubleshooting

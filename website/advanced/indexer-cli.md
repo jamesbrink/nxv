@@ -15,6 +15,11 @@ Build the package index from a local nixpkgs repository.
 nxv index --nixpkgs-path <PATH> [OPTIONS]
 ```
 
+::: tip Verbose Logging
+Use global `-v` for debug logging (`nxv -v index ...` or `nxv index ... -v`).
+Use `--show-warnings` to see extraction failures during indexing.
+:::
+
 ### Options
 
 | Flag                             | Default      | Description                                       |
@@ -26,7 +31,7 @@ nxv index --nixpkgs-path <PATH> [OPTIONS]
 | `--until <DATE>`                 | -            | Only process commits before this date             |
 | `--max-commits <N>`              | -            | Limit total commits processed                     |
 | `--max-memory <SIZE>`            | `8G`         | Total memory budget (e.g., `32G`, `16384M`)       |
-| `-v, --verbose`                  | `false`      | Show verbose output including extraction warnings |
+| `--show-warnings`                | `false`      | Show extraction warnings (failed evals, missing)  |
 | `--parallel-ranges <SPEC>`       | -            | Process year ranges in parallel                   |
 
 ### Hidden Expert Options

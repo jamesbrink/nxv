@@ -1161,7 +1161,7 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
         max_commits: args.max_commits,
         worker_count: args.workers,
         memory_budget: args.max_memory,
-        verbose: args.verbose,
+        verbose: args.show_warnings,
         gc_interval: args.gc_interval,
         // Use defaults for removed CLI options
         ..IndexerConfig::default()

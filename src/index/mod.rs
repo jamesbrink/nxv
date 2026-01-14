@@ -2556,7 +2556,9 @@ fn build_hybrid_file_attr_map(
             // for full extraction (first commit, periodic). This is critical for
             // correctness - static analysis typically only captures ~50-70% of attrs.
             if let Some(nix_all_attrs) = nix_map.get(ALL_PACKAGES_PATH) {
-                let entry = file_attr_map.entry(ALL_PACKAGES_PATH.to_string()).or_default();
+                let entry = file_attr_map
+                    .entry(ALL_PACKAGES_PATH.to_string())
+                    .or_default();
                 for attr in nix_all_attrs {
                     if !entry.contains(attr) {
                         entry.push(attr.clone());
@@ -4808,7 +4810,10 @@ index abc123..def456 100644
             Ok(test_content.to_string())
         });
         assert!(result2.is_ok());
-        assert!(!closure_called, "Cache should have been hit, closure should not be called");
+        assert!(
+            !closure_called,
+            "Cache should have been hit, closure should not be called"
+        );
 
         // Verify cache stats
         let stats = cache.stats();
@@ -4837,9 +4842,12 @@ index abc123..def456 100644
         }
         "#;
 
-        let result = cache.get_or_parse_with("coverage_test", "pkgs/top-level", || {
-            Ok(content.to_string())
-        });
+        let result =
+            cache.get_or_parse_with(
+                "coverage_test",
+                "pkgs/top-level",
+                || Ok(content.to_string()),
+            );
         assert!(result.is_ok());
 
         let map = result.unwrap();
@@ -4867,9 +4875,12 @@ index abc123..def456 100644
         }
         "#;
 
-        let result = cache.get_or_parse_with("file_map_test", "pkgs/top-level", || {
-            Ok(content.to_string())
-        });
+        let result =
+            cache.get_or_parse_with(
+                "file_map_test",
+                "pkgs/top-level",
+                || Ok(content.to_string()),
+            );
         assert!(result.is_ok());
 
         let map = result.unwrap();

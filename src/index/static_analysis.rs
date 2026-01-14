@@ -256,6 +256,7 @@ fn collect_entries_with_prefix<I>(
 
 /// Collect entries from an iterator of Entry nodes (no prefix, for tests).
 #[cfg(test)]
+#[allow(dead_code)]
 fn collect_entries<I>(entries: I, hits: &mut Vec<CallPackageHit>, total_attrs: &mut usize)
 where
     I: Iterator<Item = ast::Entry>,

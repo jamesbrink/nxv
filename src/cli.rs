@@ -22,11 +22,11 @@ pub struct Cli {
     pub db_path: PathBuf,
 
     /// Enable verbose output (-v for debug, -vv for trace).
-    #[arg(short, long, action = clap::ArgAction::Count)]
+    #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     pub verbose: u8,
 
     /// Suppress all output except errors.
-    #[arg(short, long, conflicts_with = "verbose")]
+    #[arg(short, long, conflicts_with = "verbose", global = true)]
     pub quiet: bool,
 
     /// Disable colored output.
@@ -374,9 +374,9 @@ pub struct IndexArgs {
     #[arg(long, default_value = "8G", value_parser = parse_memory_size)]
     pub max_memory: MemorySize,
 
-    /// Show verbose output including extraction warnings.
-    #[arg(long, short = 'v')]
-    pub verbose: bool,
+    /// Show extraction warnings (failed evaluations, missing packages).
+    #[arg(long)]
+    pub show_warnings: bool,
 
     /// Process year ranges in parallel for faster indexing.
     /// Formats:
@@ -388,7 +388,6 @@ pub struct IndexArgs {
     pub parallel_ranges: Option<String>,
 
     // === Hidden expert options (not shown in --help) ===
-
     /// Commits between checkpoints (expert tuning).
     #[arg(long, default_value_t = 100, hide = true)]
     pub checkpoint_interval: usize,

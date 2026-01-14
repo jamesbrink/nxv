@@ -13,7 +13,7 @@ nix run github:jamesbrink/nxv -- search python
 # Or use the web interface at https://nxv.urandom.io
 ```
 
-## Shell Script (Recommended)
+## Shell Script
 
 One-liner install that downloads a static binary:
 
@@ -31,9 +31,9 @@ Install to your Nix profile:
 nix profile install github:jamesbrink/nxv
 ```
 
-## NixOS / Home Manager (Declarative)
+## NixOS / Home Manager (Recommended)
 
-Add nxv to your system or user packages:
+Add nxv declaratively to your system or user packages:
 
 ```nix
 # flake.nix

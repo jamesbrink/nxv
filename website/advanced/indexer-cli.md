@@ -63,7 +63,7 @@ builds on multi-core machines:
 # Auto-partition into 4 concurrent ranges
 nxv index --nixpkgs-path ./nixpkgs --parallel-ranges 4
 
-# Explicit year ranges
+# Explicit year ranges (end year is inclusive: 2017-2019 covers 2017, 2018, 2019)
 nxv index --nixpkgs-path ./nixpkgs --parallel-ranges "2017-2019,2020-2022,2023-2024"
 
 # Half-year granularity
@@ -72,6 +72,11 @@ nxv index --nixpkgs-path ./nixpkgs --parallel-ranges "2023-H1,2023-H2,2024-H1"
 # Quarterly ranges
 nxv index --nixpkgs-path ./nixpkgs --parallel-ranges "2024-Q1,2024-Q2,2024-Q3,2024-Q4"
 ```
+
+::: warning Memory-Safe Limiting
+The indexer automatically limits concurrent ranges to prevent OOM. With 16 GiB
+memory and 4 systems, only 2 ranges run concurrently (requires 2 GiB per worker).
+:::
 
 ### Memory Format
 
@@ -124,16 +129,21 @@ nxv backfill --nixpkgs-path <PATH> [OPTIONS]
 
 ### Options
 
-| Flag                    | Default    | Description                                 |
-| ----------------------- | ---------- | ------------------------------------------- |
-| `--nixpkgs-path <PATH>` | (required) | Path to local nixpkgs clone                 |
-| `--fields <FIELDS>`     | all        | Comma-separated fields to backfill          |
-| `--limit <N>`           | -          | Process only first N packages               |
-| `--dry-run`             | `false`    | Show what would be updated without changes  |
-| `--history`             | `false`    | Use historical mode (slower, comprehensive) |
-| `--since <DATE>`        | -          | Only packages first seen after date         |
-| `--until <DATE>`        | -          | Only packages first seen before date        |
-| `--max-commits <N>`     | -          | Limit commits in historical mode            |
+| Flag                    | Default    | Description                                        |
+| ----------------------- | ---------- | -------------------------------------------------- |
+| `--nixpkgs-path <PATH>` | (required) | Path to local nixpkgs clone                        |
+| `--fields <FIELDS>`     | all        | Comma-separated fields to backfill                 |
+| `--limit <N>`           | -          | Process only first N packages                      |
+| `--dry-run`             | `false`    | Show what would be updated without changes         |
+| `--history`             | `false`    | Use historical mode (slower, comprehensive)        |
+| `--since <DATE>`        | -          | Only packages first seen after date (history only) |
+| `--until <DATE>`        | -          | Only packages first seen before date (history only)|
+| `--max-commits <N>`     | -          | Limit commits processed (history only)             |
+
+::: tip History Mode Options
+The `--since`, `--until`, and `--max-commits` options only apply when using
+`--history` mode. In HEAD mode (default), these options are ignored.
+:::
 
 ### Fields
 

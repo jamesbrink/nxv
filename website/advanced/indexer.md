@@ -87,12 +87,18 @@ For faster builds on multi-core machines, process year ranges in parallel:
 # Auto-partition into 4 concurrent ranges
 nxv index --nixpkgs-path ./nixpkgs --parallel-ranges 4 --max-memory 32G
 
-# Or specify explicit ranges
+# Or specify explicit ranges (end year is inclusive: 2017-2019 = 2017, 2018, 2019)
 nxv index --nixpkgs-path ./nixpkgs \
   --parallel-ranges "2017-2019,2020-2022,2023-2024"
 ```
 
 This can reduce build time by 2-3x on systems with 8+ cores and sufficient RAM.
+
+::: tip Memory-Safe Parallelism
+The indexer automatically limits concurrent ranges based on your memory budget.
+With 16 GiB and 4 systems, only 2 ranges run concurrently (16G / 2G per worker / 4 systems = 2).
+Ranges are processed in batches, with staggered startup to prevent system saturation.
+:::
 
 ### Indexing a Specific Date Range
 
@@ -121,14 +127,21 @@ nxv index --nixpkgs-path ./nixpkgs --max-memory 32G
 
 ### Memory Budget Allocation
 
+Memory is divided among workers (systems × concurrent ranges). With 4 systems
+(default) and 1 range:
+
 | Total Budget | Workers | Per Worker |
 | ------------ | ------- | ---------- |
 | 8 GiB        | 4       | 2 GiB      |
 | 16 GiB       | 4       | 4 GiB      |
-| 32 GiB       | 8       | 4 GiB      |
+| 32 GiB       | 4       | 8 GiB      |
 
-The minimum per-worker allocation is 512 MiB. Indexing will fail if the budget
-can't meet this threshold.
+With parallel ranges, memory is divided among all workers (systems × ranges).
+The indexer automatically limits concurrent ranges to ensure at least 2 GiB per
+worker to prevent OOM issues during heavy Nix evaluations.
+
+The minimum per-worker allocation is 512 MiB (hard limit). Indexing will fail if
+the budget can't meet this threshold.
 
 ### Memory Format
 
@@ -214,6 +227,20 @@ nxv update
 ```
 
 ## Architecture Deep Dive
+
+### Hybrid Static + Dynamic Analysis
+
+The indexer uses a two-tier approach for file-to-attribute mapping:
+
+1. **Static analysis** (fast): Parses `all-packages.nix` with `rnix-parser` to
+   extract `callPackage` patterns. Results are cached by git blob hash.
+
+2. **Nix evaluation** (fallback): For packages not covered by static analysis
+   (computed attributes, complex inherit patterns), falls back to Nix's
+   `builtins.unsafeGetAttrPos`.
+
+Static analysis typically covers 50-70% of packages. The hybrid approach
+combines both for complete coverage while minimizing expensive Nix evaluations.
 
 ### Nix FFI Evaluation
 
@@ -368,11 +395,15 @@ The memory budget is too small for the number of workers. Either:
 
 ### Stuck on a Commit
 
-Some commits may have evaluation issues. Skip them with `--max-commits`:
+Some commits may have evaluation issues. Use `--max-commits` to limit processing
+and isolate the problematic commit, or use `--since`/`--until` to skip a date range:
 
 ```bash
-# Process only next 100 commits then stop
+# Limit to next 100 commits to isolate the issue
 nxv index --nixpkgs-path ./nixpkgs --max-commits 100
+
+# Skip problematic date range
+nxv index --nixpkgs-path ./nixpkgs --since 2023-06-01
 ```
 
 ### Database Corruption

@@ -1149,18 +1149,23 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
     let nixpkgs_path = paths::expand_tilde(&args.nixpkgs_path);
     eprintln!("Indexing nixpkgs from {:?}", nixpkgs_path);
 
+    let systems = args
+        .systems
+        .clone()
+        .unwrap_or_else(|| IndexerConfig::default().systems);
+    // Save values needed after config is moved into Indexer
+    let system_count = systems.len();
+    let memory_budget = args.max_memory;
+
     let config = IndexerConfig {
         checkpoint_interval: args.checkpoint_interval,
         show_progress: !cli.quiet,
-        systems: args
-            .systems
-            .clone()
-            .unwrap_or_else(|| IndexerConfig::default().systems),
+        systems,
         since: args.since.clone(),
         until: args.until.clone(),
         max_commits: args.max_commits,
         worker_count: args.workers,
-        memory_budget: args.max_memory,
+        memory_budget,
         verbose: args.show_warnings,
         gc_interval: args.gc_interval,
         // Use defaults for removed CLI options
@@ -1190,10 +1195,16 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
         let current_year = chrono::Utc::now().year() as u16;
         let ranges = YearRange::parse_ranges(ranges_spec, 2017, current_year + 1)?;
 
+        let effective_max_workers = args.max_range_workers.min(ranges.len());
+
+        // Calculate and display memory allocation
+        let total_workers = system_count * effective_max_workers;
+        let per_worker_mib = memory_budget.as_mib() / total_workers as u64;
+
         eprintln!(
-            "Using parallel year-range indexing with {} ranges (max {} workers)",
+            "Using parallel year-range indexing with {} ranges (max {} concurrent)",
             ranges.len(),
-            args.max_range_workers.min(ranges.len())
+            effective_max_workers
         );
         for range in &ranges {
             eprintln!(
@@ -1202,12 +1213,17 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
             );
         }
         eprintln!();
+        eprintln!(
+            "Memory: {} / {} workers = {} MiB per worker",
+            memory_budget, total_workers, per_worker_mib
+        );
+        eprintln!();
 
         indexer.index_parallel_ranges(
             &nixpkgs_path,
             &cli.db_path,
             ranges,
-            args.max_range_workers,
+            effective_max_workers,
             args.full,
         )?
     } else if args.full {

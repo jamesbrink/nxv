@@ -1191,6 +1191,12 @@ impl Indexer {
             self.config.full_extraction_parallelism,
         ));
 
+        // Create startup barrier to stagger range worker initialization.
+        // This prevents all ranges from creating worker pools and building
+        // hybrid maps simultaneously, which can overwhelm the system.
+        // Only 1 range initializes at a time; after init, they run concurrently.
+        let startup_barrier = Arc::new(FullExtractionLimiter::new(1));
+
         // Process ranges in batches to limit concurrency
         for batch in ranges.chunks(effective_max_workers) {
             // Check for shutdown before starting new batch
@@ -1212,6 +1218,7 @@ impl Indexer {
                         let config = self.config.clone();
                         let range = range.clone();
                         let full_extraction_limiter = full_extraction_limiter.clone();
+                        let startup_barrier = startup_barrier.clone();
 
                         s.spawn(move || {
                             match process_range_worker(
@@ -1222,6 +1229,7 @@ impl Indexer {
                                 per_worker_memory_mib,
                                 shutdown,
                                 &full_extraction_limiter,
+                                &startup_barrier,
                             ) {
                                 Ok(result) => {
                                     results.lock().unwrap().push(result);
@@ -2645,6 +2653,10 @@ impl IndexResult {
 ///
 /// The `full_extraction_limiter` serializes expensive full extractions across
 /// parallel range workers to prevent overwhelming the system.
+///
+/// The `startup_barrier` staggers initialization (worker pool + hybrid map building)
+/// so ranges don't all start their heavy setup work simultaneously.
+#[allow(clippy::too_many_arguments)]
 fn process_range_worker(
     nixpkgs_path: &Path,
     db: Arc<std::sync::Mutex<Database>>,
@@ -2653,6 +2665,7 @@ fn process_range_worker(
     per_worker_memory_mib: usize,
     shutdown: Arc<AtomicBool>,
     full_extraction_limiter: &FullExtractionLimiter,
+    startup_barrier: &FullExtractionLimiter,
 ) -> Result<RangeIndexResult> {
     use crate::db::queries::PackageVersion;
 
@@ -2747,6 +2760,20 @@ fn process_range_worker(
     let use_parallel = config.worker_count != Some(1) && systems.len() > 1;
     let worker_count = config.worker_count.unwrap_or(systems.len());
 
+    // Acquire startup barrier to stagger heavy initialization work.
+    // This prevents all ranges from creating worker pools and building
+    // hybrid maps simultaneously, which can overwhelm the system.
+    // The permit is held during init and released after the hybrid map is built.
+    tracing::debug!(
+        range = %range.label,
+        "Waiting for startup barrier (staggered initialization)"
+    );
+    let _startup_permit = startup_barrier.acquire();
+    tracing::debug!(
+        range = %range.label,
+        "Acquired startup barrier, initializing worker pool"
+    );
+
     // Create worker pool for parallel system evaluation (if enabled)
     // Each range gets its own eval store to avoid SQLite contention
     let worker_pool = if use_parallel && worker_count > 1 {
@@ -2786,6 +2813,9 @@ fn process_range_worker(
                 }
             }
         };
+
+    // Release startup barrier - initialization complete, other ranges can now start
+    drop(_startup_permit);
 
     tracing::info!(
         range = %range.label,

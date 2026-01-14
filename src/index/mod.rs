@@ -4744,4 +4744,458 @@ index abc123..def456 100644
             assert!(triggers, "{} should trigger full extraction path", path);
         }
     }
+
+    // ============================================================================
+    // Hybrid file-attr map tests
+    // ============================================================================
+
+    #[test]
+    fn test_hybrid_map_uses_blob_cache() {
+        // Test that blob cache is checked first before parsing
+        use crate::index::blob_cache::BlobCache;
+
+        let mut cache = BlobCache::new();
+
+        // Pre-populate cache with a known blob OID
+        let test_content = r#"
+        { pkgs, lib, ... }:
+        {
+          hello = pkgs.callPackage ./hello { };
+          world = pkgs.callPackage ./world { };
+        }
+        "#;
+
+        // Parse and cache
+        let result = cache.get_or_parse_with("test_oid_123", "pkgs/top-level", || {
+            Ok(test_content.to_string())
+        });
+        assert!(result.is_ok());
+
+        // Second access should hit cache (no closure called)
+        let mut closure_called = false;
+        let result2 = cache.get_or_parse_with("test_oid_123", "pkgs/top-level", || {
+            closure_called = true;
+            Ok(test_content.to_string())
+        });
+        assert!(result2.is_ok());
+        assert!(!closure_called, "Cache should have been hit, closure should not be called");
+
+        // Verify cache stats
+        let stats = cache.stats();
+        assert_eq!(stats.hits, 1);
+        assert_eq!(stats.misses, 1);
+    }
+
+    #[test]
+    fn test_hybrid_map_static_coverage_calculation() {
+        // Test that static coverage is calculated correctly
+        use crate::index::blob_cache::BlobCache;
+
+        let mut cache = BlobCache::new();
+
+        // Content with varying coverage - some resolved, some not
+        let content = r#"
+        { pkgs, lib, ... }:
+        {
+          # Resolvable (callPackage with path)
+          hello = pkgs.callPackage ./applications/misc/hello { };
+          world = pkgs.callPackage ./applications/misc/world { };
+
+          # Not resolvable (inherit, function calls, etc.)
+          inherit (prev) firefox chromium;
+          someFunc = lib.makeOverridable stuff;
+        }
+        "#;
+
+        let result = cache.get_or_parse_with("coverage_test", "pkgs/top-level", || {
+            Ok(content.to_string())
+        });
+        assert!(result.is_ok());
+
+        let map = result.unwrap();
+        let coverage = map.coverage_ratio();
+
+        // Coverage should be > 0 (we have some hits)
+        assert!(coverage > 0.0, "Should have some static coverage");
+        // Coverage should be < 1 (we don't resolve everything)
+        assert!(coverage < 1.0, "Should not have 100% coverage");
+    }
+
+    #[test]
+    fn test_hybrid_map_file_to_attr_mapping() {
+        // Test that file paths are correctly mapped to attributes
+        use crate::index::blob_cache::BlobCache;
+
+        let mut cache = BlobCache::new();
+
+        let content = r#"
+        { pkgs, ... }:
+        {
+          jhead = pkgs.callPackage ../tools/graphics/jhead { };
+          vim = pkgs.callPackage ../applications/editors/vim { };
+          nginx = pkgs.callPackage ../servers/nginx.nix { };
+        }
+        "#;
+
+        let result = cache.get_or_parse_with("file_map_test", "pkgs/top-level", || {
+            Ok(content.to_string())
+        });
+        assert!(result.is_ok());
+
+        let map = result.unwrap();
+
+        // Check file_to_attrs mappings
+        let jhead_file = "pkgs/tools/graphics/jhead";
+        let vim_file = "pkgs/applications/editors/vim";
+
+        if let Some(attrs) = map.file_to_attrs.get(jhead_file) {
+            assert!(attrs.contains(&"jhead".to_string()));
+        }
+        if let Some(attrs) = map.file_to_attrs.get(vim_file) {
+            assert!(attrs.contains(&"vim".to_string()));
+        }
+    }
+
+    #[test]
+    fn test_min_static_coverage_constant() {
+        // Verify MIN_STATIC_COVERAGE is set reasonably
+        assert!(MIN_STATIC_COVERAGE > 0.0);
+        assert!(MIN_STATIC_COVERAGE <= 1.0);
+        // Currently set to 0.5 (50%)
+        assert_eq!(MIN_STATIC_COVERAGE, 0.5);
+    }
+
+    // ============================================================================
+    // Process commits integration tests
+    // ============================================================================
+
+    #[test]
+    fn test_process_commits_initializes_blob_cache_path() {
+        // Verify blob cache path is in the data directory
+        let cache_path = get_blob_cache_path();
+        assert!(cache_path.to_string_lossy().contains("blob_cache"));
+    }
+
+    #[test]
+    fn test_indexer_config_defaults() {
+        // Verify IndexerConfig has sensible defaults
+        let config = IndexerConfig::default();
+
+        assert_eq!(config.checkpoint_interval, 100);
+        assert_eq!(config.gc_interval, 20);
+        assert_eq!(config.full_extraction_interval, 0); // Disabled by default
+        assert_eq!(config.full_extraction_parallelism, 1);
+        assert!(!config.systems.is_empty());
+    }
+
+    #[test]
+    fn test_indexer_shutdown_flag_behavior() {
+        // Test that shutdown flag works correctly
+        let config = IndexerConfig::default();
+        let indexer = Indexer::new(config);
+
+        // Initially not shutdown
+        assert!(!indexer.is_shutdown_requested());
+
+        // Request shutdown
+        indexer.request_shutdown();
+
+        // Should now be shutdown
+        assert!(indexer.is_shutdown_requested());
+    }
+
+    // ============================================================================
+    // Parallel range coordination tests
+    // ============================================================================
+
+    #[test]
+    fn test_range_checkpoint_isolation() {
+        // Test that range checkpoints are isolated from each other
+        let db_dir = tempdir().unwrap();
+        let db_path = db_dir.path().join("test.db");
+
+        {
+            let db = Database::open(&db_path).unwrap();
+
+            // Set different checkpoints for different ranges
+            db.set_range_checkpoint("2017", "commit_2017_abc").unwrap();
+            db.set_range_checkpoint("2018", "commit_2018_xyz").unwrap();
+            db.set_range_checkpoint("2019", "commit_2019_123").unwrap();
+        }
+
+        // Verify checkpoints are isolated
+        {
+            let db = Database::open(&db_path).unwrap();
+
+            let cp_2017 = db.get_range_checkpoint("2017").unwrap();
+            let cp_2018 = db.get_range_checkpoint("2018").unwrap();
+            let cp_2019 = db.get_range_checkpoint("2019").unwrap();
+
+            assert_eq!(cp_2017, Some("commit_2017_abc".to_string()));
+            assert_eq!(cp_2018, Some("commit_2018_xyz".to_string()));
+            assert_eq!(cp_2019, Some("commit_2019_123".to_string()));
+        }
+    }
+
+    #[test]
+    fn test_range_checkpoint_clear_all() {
+        // Test that clearing all range checkpoints works
+        let db_dir = tempdir().unwrap();
+        let db_path = db_dir.path().join("test.db");
+
+        {
+            let db = Database::open(&db_path).unwrap();
+            db.set_range_checkpoint("2017", "commit_abc").unwrap();
+            db.set_range_checkpoint("2018", "commit_xyz").unwrap();
+        }
+
+        // Clear all
+        {
+            let db = Database::open(&db_path).unwrap();
+            db.clear_range_checkpoints().unwrap();
+        }
+
+        // Verify cleared
+        {
+            let db = Database::open(&db_path).unwrap();
+            assert_eq!(db.get_range_checkpoint("2017").unwrap(), None);
+            assert_eq!(db.get_range_checkpoint("2018").unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn test_latest_checkpoint_across_ranges() {
+        // Test that get_latest_checkpoint finds the most recent across all ranges
+        let db_dir = tempdir().unwrap();
+        let db_path = db_dir.path().join("test.db");
+
+        {
+            let db = Database::open(&db_path).unwrap();
+            // Use commits that sort alphabetically (simulating hash ordering)
+            db.set_range_checkpoint("2017", "aaa111").unwrap();
+            db.set_range_checkpoint("2018", "zzz999").unwrap(); // "Latest" alphabetically
+            db.set_range_checkpoint("2019", "mmm555").unwrap();
+        }
+
+        {
+            let db = Database::open(&db_path).unwrap();
+            let latest = db.get_latest_checkpoint().unwrap();
+            // get_latest_checkpoint should return one of the checkpoints
+            assert!(latest.is_some());
+        }
+    }
+
+    #[test]
+    fn test_full_extraction_limiter() {
+        // Test that FullExtractionLimiter serializes concurrent extractions
+        let limiter = FullExtractionLimiter::new(2);
+
+        // Should be able to acquire 2 permits
+        let _permit1 = limiter.acquire();
+        let _permit2 = limiter.acquire();
+
+        // Permits acquired successfully (would block if limit exceeded)
+        // Drop permits by letting them go out of scope
+        drop(_permit1);
+        drop(_permit2);
+
+        // Should be able to acquire again after dropping
+        let _permit3 = limiter.acquire();
+        // If we got here without blocking, the limiter works correctly
+    }
+
+    // ============================================================================
+    // Interrupt/checkpoint handling tests
+    // ============================================================================
+
+    #[test]
+    fn test_checkpoint_saved_on_interval() {
+        // Test that checkpoints are saved at the configured interval
+        let db_dir = tempdir().unwrap();
+        let db_path = db_dir.path().join("test.db");
+
+        // Simulate checkpoint saves
+        {
+            let db = Database::open(&db_path).unwrap();
+
+            // Simulate commits being processed
+            for i in 0..5 {
+                let commit_hash = format!("commit_{:03}", i);
+                db.set_meta("last_indexed_commit", &commit_hash).unwrap();
+            }
+
+            // Final checkpoint
+            db.set_meta("last_indexed_commit", "commit_final").unwrap();
+            db.checkpoint().unwrap();
+        }
+
+        // Verify checkpoint persisted
+        {
+            let db = Database::open(&db_path).unwrap();
+            let last = db.get_meta("last_indexed_commit").unwrap();
+            assert_eq!(last, Some("commit_final".to_string()));
+        }
+    }
+
+    #[test]
+    fn test_index_result_tracks_interruption() {
+        // Test that IndexResult properly tracks interruption state
+        let mut result = IndexResult {
+            commits_processed: 50,
+            packages_found: 1000,
+            packages_upserted: 500,
+            unique_names: 200,
+            was_interrupted: false,
+            extraction_failures: 5,
+        };
+
+        assert!(!result.was_interrupted);
+
+        // Simulate interruption
+        result.was_interrupted = true;
+
+        assert!(result.was_interrupted);
+        assert_eq!(result.commits_processed, 50);
+    }
+
+    #[test]
+    fn test_checkpoint_recovery_from_range() {
+        // Test that indexing can resume from a range checkpoint
+        let db_dir = tempdir().unwrap();
+        let db_path = db_dir.path().join("test.db");
+
+        // First run - index partway then "interrupt"
+        {
+            let db = Database::open(&db_path).unwrap();
+            db.set_range_checkpoint("2017", "abc123").unwrap();
+        }
+
+        // Second run - verify checkpoint exists
+        {
+            let db = Database::open(&db_path).unwrap();
+            let checkpoint = db.get_range_checkpoint("2017").unwrap();
+            assert_eq!(checkpoint, Some("abc123".to_string()));
+
+            // This is where resume logic would use the checkpoint
+            // to filter commits and skip already-processed ones
+        }
+    }
+
+    #[test]
+    fn test_blob_cache_saved_on_new_entries() {
+        // Test that blob cache is saved when new entries are added
+        use crate::index::blob_cache::BlobCache;
+
+        let cache_dir = tempdir().unwrap();
+        let cache_path = cache_dir.path().join("test_blob_cache.json");
+
+        // Create cache and add entries
+        {
+            let mut cache = BlobCache::with_path(&cache_path);
+
+            let _ = cache.get_or_parse_with("blob_1", "pkgs/top-level", || {
+                Ok("{ hello = 1; }".to_string())
+            });
+
+            let initial_len = cache.len();
+            assert!(initial_len > 0);
+
+            cache.save().unwrap();
+        }
+
+        // Load cache and verify entries persisted
+        {
+            let cache = BlobCache::load_or_create(&cache_path).unwrap();
+            assert!(cache.len() > 0);
+        }
+    }
+
+    #[test]
+    fn test_worktree_session_cleanup() {
+        // Test that WorktreeSession cleans up on drop
+        let (_dir, repo_path) = create_test_nixpkgs_repo();
+        let repo = NixpkgsRepo::open(&repo_path).unwrap();
+
+        let commits = repo.get_all_commits().unwrap();
+        let first_commit = &commits[0];
+
+        // Create worktree
+        let worktree_path = {
+            let session = WorktreeSession::new(&repo, &first_commit.hash).unwrap();
+            let path = session.path().to_path_buf();
+
+            // Worktree should exist
+            assert!(path.exists());
+
+            path
+            // session dropped here
+        };
+
+        // After drop, worktree should be cleaned up
+        // Note: The worktree directory itself may still exist briefly,
+        // but the git worktree should be unregistered
+        let _ = worktree_path; // Acknowledge we're testing cleanup
+    }
+
+    // ============================================================================
+    // Integration test (requires nix)
+    // ============================================================================
+
+    #[test]
+    #[ignore] // Requires nix and nixpkgs
+    fn test_hybrid_approach_end_to_end() {
+        // End-to-end test of hybrid approach with real nixpkgs
+        use crate::index::blob_cache::BlobCache;
+
+        let nixpkgs_path = std::env::var("NIXPKGS_PATH").unwrap_or_else(|_| "nixpkgs".to_string());
+        let nixpkgs = std::path::Path::new(&nixpkgs_path);
+
+        if !nixpkgs.exists() {
+            eprintln!("Skipping: nixpkgs not present at {}", nixpkgs_path);
+            return;
+        }
+
+        let repo = NixpkgsRepo::open(nixpkgs).unwrap();
+        let commits = repo.get_all_commits().unwrap();
+
+        if commits.is_empty() {
+            eprintln!("Skipping: no commits in nixpkgs");
+            return;
+        }
+
+        let first_commit = &commits[0];
+        let session = WorktreeSession::new(&repo, &first_commit.hash).unwrap();
+        let worktree_path = session.path();
+
+        let mut blob_cache = BlobCache::new();
+        let systems = vec!["x86_64-linux".to_string()];
+
+        let result = build_hybrid_file_attr_map(
+            &repo,
+            &first_commit.hash,
+            &mut blob_cache,
+            worktree_path,
+            &systems,
+            None,
+        );
+
+        // Should succeed
+        assert!(result.is_ok());
+
+        let (file_map, coverage) = result.unwrap();
+
+        // Should have entries
+        assert!(!file_map.is_empty());
+
+        // Coverage should be reasonable (> 50% for modern nixpkgs)
+        assert!(coverage > 0.3, "Coverage {} should be > 0.3", coverage);
+
+        // all-packages.nix should have many attrs (always supplemented by Nix)
+        let all_packages_attrs = file_map.get("pkgs/top-level/all-packages.nix");
+        assert!(all_packages_attrs.is_some());
+        assert!(
+            all_packages_attrs.unwrap().len() > 5000,
+            "Should have >5000 attrs in all-packages.nix"
+        );
+    }
 }

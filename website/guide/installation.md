@@ -2,16 +2,33 @@
 
 There are several ways to install nxv depending on your needs.
 
-## Nix Flakes (Recommended)
+## Run Without Installing
 
-The easiest way to install nxv:
+Try nxv instantly without any installation:
 
 ```bash
-# Install to your profile
-nix profile install github:jamesbrink/nxv
-
-# Or run directly without installing
+# Run directly via Nix flakes - nothing persisted
 nix run github:jamesbrink/nxv -- search python
+
+# Or use the web interface at https://nxv.urandom.io
+```
+
+## Shell Script (Recommended)
+
+One-liner install that downloads a static binary:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jamesbrink/nxv/main/install.sh | sh
+```
+
+This installs to `~/.local/bin/nxv` (or `/usr/local/bin` with sudo).
+
+## Nix Flakes
+
+Install to your Nix profile:
+
+```bash
+nix profile install github:jamesbrink/nxv
 ```
 
 ## NixOS Module

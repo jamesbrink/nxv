@@ -31,9 +31,41 @@ Install to your Nix profile:
 nix profile install github:jamesbrink/nxv
 ```
 
-## NixOS Module
+## NixOS / Home Manager (Declarative)
 
-Add nxv as a service to your NixOS configuration:
+Add nxv to your system or user packages:
+
+```nix
+# flake.nix
+{
+  inputs.nxv.url = "github:jamesbrink/nxv";
+
+  outputs = { nixpkgs, nxv, ... }: {
+    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [{
+        # Add the overlay
+        nixpkgs.overlays = [ nxv.overlays.default ];
+        # Install the package
+        environment.systemPackages = [ pkgs.nxv ];
+      }];
+    };
+  };
+}
+```
+
+For Home Manager:
+
+```nix
+{
+  nixpkgs.overlays = [ inputs.nxv.overlays.default ];
+  home.packages = [ pkgs.nxv ];
+}
+```
+
+## NixOS Module (Server)
+
+Run nxv as a systemd service:
 
 ```nix
 # flake.nix

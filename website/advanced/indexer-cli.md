@@ -21,20 +21,24 @@ nxv index --nixpkgs-path <PATH> [OPTIONS]
 | -------------------------------- | ------------ | ------------------------------------------------- |
 | `--nixpkgs-path <PATH>`          | (required)   | Path to local nixpkgs clone                       |
 | `--full`                         | `false`      | Force full rebuild, ignoring checkpoints          |
-| `--checkpoint-interval <N>`      | `100`        | Commits between checkpoint saves                  |
 | `--systems <SYSTEMS>`            | all 4        | Comma-separated systems to evaluate               |
 | `--since <DATE>`                 | `2017-01-01` | Only process commits after this date (YYYY-MM-DD) |
 | `--until <DATE>`                 | -            | Only process commits before this date             |
 | `--max-commits <N>`              | -            | Limit total commits processed                     |
-| `--workers <N>`                  | (auto)       | Number of parallel worker processes               |
 | `--max-memory <SIZE>`            | `8G`         | Total memory budget (e.g., `32G`, `16384M`)       |
-| `-v, --verbose`                      | `false`  | Show verbose output including extraction warnings |
-| `--gc-interval <N>`                  | `5`      | Checkpoints between garbage collection            |
-| `--gc-min-free-gb <N>`               | `10`     | Trigger emergency GC when disk space falls below  |
-| `--full-extraction-interval <N>`     | `0`      | Force full extraction every N commits (0=disabled)|
-| `--full-extraction-parallelism <N>`  | `1`      | Max concurrent full extractions (prevents thrash) |
-| `--parallel-ranges <SPEC>`           | -        | Process year ranges in parallel                   |
-| `--max-range-workers <N>`            | `4`      | Maximum concurrent range workers                  |
+| `-v, --verbose`                  | `false`      | Show verbose output including extraction warnings |
+| `--parallel-ranges <SPEC>`       | -            | Process year ranges in parallel                   |
+
+### Hidden Expert Options
+
+These options are available for debugging and performance tuning but are hidden from `--help`:
+
+| Flag                        | Default | Description                            |
+| --------------------------- | ------- | -------------------------------------- |
+| `--checkpoint-interval <N>` | `100`   | Commits between checkpoint saves       |
+| `--workers <N>`             | (auto)  | Number of parallel worker processes    |
+| `--gc-interval <N>`         | `5`     | Checkpoints between garbage collection |
+| `--max-range-workers <N>`   | `4`     | Maximum concurrent range workers       |
 
 ### Default Systems
 

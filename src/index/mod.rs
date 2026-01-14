@@ -1428,6 +1428,14 @@ impl Indexer {
         let mut checkpoints_since_gc: usize = 0;
         let mut last_processed_commit: Option<String> = resume_from.map(String::from);
 
+        // Load or create blob cache for static analysis caching
+        let blob_cache_path = get_blob_cache_path();
+        let mut blob_cache = BlobCache::load_or_create(&blob_cache_path).unwrap_or_else(|e| {
+            warn!(target: "nxv::index", "Failed to load blob cache: {}, creating new", e);
+            BlobCache::with_path(&blob_cache_path)
+        });
+        let initial_cache_entries = blob_cache.len();
+
         // Build the initial file-to-attribute map
         let first_commit = commits
             .first()
@@ -1437,19 +1445,26 @@ impl Indexer {
         let session = WorktreeSession::new(repo, &first_commit.hash)?;
         let worktree_path = session.path();
 
-        // Build initial file-to-attribute map, handling failure gracefully
+        // Build initial file-to-attribute map using hybrid approach (static + Nix)
         // If this fails (e.g., Nix eval error on first commit), start with empty map
         // and try to rebuild on first commit that changes top-level files
-        let (mut file_attr_map, mut mapping_commit) =
-            match build_file_attr_map(worktree_path, systems, worker_pool.as_ref()) {
-                Ok(map) => (map, first_commit.hash.clone()),
+        let (mut file_attr_map, mut mapping_commit, mut _last_static_coverage) =
+            match build_hybrid_file_attr_map(
+                repo,
+                &first_commit.hash,
+                &mut blob_cache,
+                worktree_path,
+                systems,
+                worker_pool.as_ref(),
+            ) {
+                Ok((map, coverage)) => (map, first_commit.hash.clone(), coverage),
                 Err(e) => {
                     warn!(
                         target: "nxv::index",
-                        "Initial file-to-attribute map failed ({}), using empty map",
+                        "Initial hybrid file-to-attribute map failed ({}), using empty map",
                         e
                     );
-                    (HashMap::new(), String::new())
+                    (HashMap::new(), String::new(), 0.0)
                 }
             };
 
@@ -1485,6 +1500,13 @@ impl Indexer {
                     );
                 }
 
+                // Save blob cache on interrupt
+                if blob_cache.len() > initial_cache_entries
+                    && let Err(e) = blob_cache.save()
+                {
+                    tracing::warn!(error = %e, "Failed to save blob cache on interrupt");
+                }
+
                 break;
             }
 
@@ -1518,10 +1540,18 @@ impl Indexer {
             let need_refresh = file_attr_map.is_empty() || should_refresh_file_map(&changed_paths);
             if need_refresh
                 && mapping_commit != commit.hash
-                && let Ok(map) = build_file_attr_map(worktree_path, systems, worker_pool.as_ref())
+                && let Ok((new_map, coverage)) = build_hybrid_file_attr_map(
+                    repo,
+                    &commit.hash,
+                    &mut blob_cache,
+                    worktree_path,
+                    systems,
+                    worker_pool.as_ref(),
+                )
             {
-                file_attr_map = map;
+                file_attr_map = new_map;
                 mapping_commit = commit.hash.clone();
+                _last_static_coverage = coverage;
             }
 
             // Determine target attributes
@@ -1939,6 +1969,21 @@ impl Indexer {
             result.packages_found,
             result.packages_upserted
         );
+
+        // Save blob cache if we added new entries
+        let cache_stats = blob_cache.stats();
+        if blob_cache.len() > initial_cache_entries {
+            if let Err(e) = blob_cache.save() {
+                tracing::warn!(error = %e, "Failed to save blob cache");
+            } else {
+                tracing::debug!(
+                    new_entries = blob_cache.len() - initial_cache_entries,
+                    total_entries = blob_cache.len(),
+                    hit_ratio = %format!("{:.1}%", cache_stats.hit_ratio() * 100.0),
+                    "Saved blob cache"
+                );
+            }
+        }
 
         // WorktreeSession auto-cleans on drop - no need to restore HEAD
 
@@ -2484,23 +2529,39 @@ fn build_hybrid_file_attr_map(
         "Static analysis complete"
     );
 
-    // Step 3: If coverage is below threshold, supplement with Nix evaluation
-    if static_coverage < MIN_STATIC_COVERAGE {
-        tracing::debug!(
-            commit = %&commit_hash[..8],
-            static_coverage = %format!("{:.1}%", static_coverage * 100.0),
-            threshold = %format!("{:.1}%", MIN_STATIC_COVERAGE * 100.0),
-            "Coverage below threshold, supplementing with Nix evaluation"
-        );
+    // Step 3: ALWAYS get complete attr list from Nix for full extraction support.
+    // Static analysis is great for file-to-attr mappings, but for full extraction
+    // we need the complete list of package attrs from Nix evaluation.
+    // When coverage is below threshold, we also use Nix for file-to-attr mappings.
+    let needs_full_nix_supplement = static_coverage < MIN_STATIC_COVERAGE;
 
-        // Fall back to Nix-based extraction
-        match build_file_attr_map(worktree_path, systems, worker_pool) {
-            Ok(nix_map) => {
-                // Merge Nix results into static results.
-                // Both static and Nix attrs are additive - we keep the union.
-                // This ensures the all-packages.nix entry contains ALL attrs
-                // for full extraction support.
+    tracing::debug!(
+        commit = %&commit_hash[..8],
+        static_coverage = %format!("{:.1}%", static_coverage * 100.0),
+        needs_file_mappings = needs_full_nix_supplement,
+        "Getting complete attr list from Nix for full extraction support"
+    );
+
+    match build_file_attr_map(worktree_path, systems, worker_pool) {
+        Ok(nix_map) => {
+            // ALWAYS merge the all-packages.nix entry to ensure complete attr list
+            // for full extraction (first commit, periodic). This is critical for
+            // correctness - static analysis typically only captures ~50-70% of attrs.
+            if let Some(nix_all_attrs) = nix_map.get(ALL_PACKAGES_PATH) {
+                let entry = file_attr_map.entry(ALL_PACKAGES_PATH.to_string()).or_default();
+                for attr in nix_all_attrs {
+                    if !entry.contains(attr) {
+                        entry.push(attr.clone());
+                    }
+                }
+            }
+
+            // Only merge other file-to-attr mappings when static coverage is low
+            if needs_full_nix_supplement {
                 for (file, attrs) in nix_map {
+                    if file == ALL_PACKAGES_PATH {
+                        continue; // Already handled above
+                    }
                     let entry = file_attr_map.entry(file).or_default();
                     for attr in attrs {
                         if !entry.contains(&attr) {
@@ -2509,13 +2570,13 @@ fn build_hybrid_file_attr_map(
                     }
                 }
             }
-            Err(e) => {
-                tracing::warn!(
-                    commit = %&commit_hash[..8],
-                    error = %e,
-                    "Nix fallback failed, using static analysis only"
-                );
-            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                commit = %&commit_hash[..8],
+                error = %e,
+                "Nix evaluation failed, full extraction may be incomplete"
+            );
         }
     }
 

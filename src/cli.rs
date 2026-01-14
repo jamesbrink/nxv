@@ -352,10 +352,6 @@ pub struct IndexArgs {
     #[arg(long)]
     pub full: bool,
 
-    /// Commits between checkpoints.
-    #[arg(long, default_value_t = 100)]
-    pub checkpoint_interval: usize,
-
     /// Comma-separated list of systems to evaluate (e.g. x86_64-linux,aarch64-linux).
     #[arg(long, value_delimiter = ',')]
     pub systems: Option<Vec<String>>,
@@ -372,10 +368,6 @@ pub struct IndexArgs {
     #[arg(long)]
     pub max_commits: Option<usize>,
 
-    /// Number of parallel worker processes for evaluation (default: number of systems).
-    #[arg(long)]
-    pub workers: Option<usize>,
-
     /// Total memory budget for all workers (e.g., "32G", "8GiB", "16384M").
     /// Plain numbers are MiB for backwards compatibility.
     /// Divided automatically among workers.
@@ -386,36 +378,6 @@ pub struct IndexArgs {
     #[arg(long, short = 'v')]
     pub verbose: bool,
 
-    /// Number of checkpoints between garbage collection runs.
-    /// Set to 0 to disable automatic garbage collection.
-    /// Default: 5 (GC every 500 commits with default checkpoint_interval of 100)
-    #[arg(long, default_value_t = 5)]
-    pub gc_interval: usize,
-
-    /// Minimum free disk space (GB) before triggering emergency GC.
-    /// If available space falls below this, GC runs at next checkpoint.
-    #[arg(long, default_value_t = 10)]
-    pub gc_min_free_gb: u64,
-
-    /// Force full package extraction every N commits.
-    /// This catches packages missed by incremental detection (e.g., firefox
-    /// versions defined in packages.nix but assigned in all-packages.nix).
-    /// WARNING: Full extraction is very expensive (~12K packages, 24 Nix evals).
-    /// Set to 0 to disable (default, recommended for most use cases).
-    #[arg(long, default_value_t = 0)]
-    pub full_extraction_interval: u32,
-
-    /// Maximum concurrent full extractions across parallel range workers.
-    /// Full extractions (first commit baseline, periodic) are very expensive.
-    /// Setting this to 1 (default) serializes them to prevent system thrash.
-    /// Higher values allow more parallelism but may overwhelm the system.
-    #[arg(long, default_value_t = 1)]
-    pub full_extraction_parallelism: usize,
-
-    /// Internal flag for worker subprocess mode (hidden from help).
-    #[arg(long, hide = true)]
-    pub internal_worker: bool,
-
     /// Process year ranges in parallel for faster indexing.
     /// Formats:
     ///   "4"             - Auto-partition into 4 equal year ranges
@@ -425,11 +387,27 @@ pub struct IndexArgs {
     #[arg(long, value_name = "RANGES")]
     pub parallel_ranges: Option<String>,
 
-    /// Maximum concurrent range workers for parallel indexing.
-    /// Each range gets its own worktree and worker pool.
-    /// Default: min(num_cpus / 4, number of ranges)
-    #[arg(long, default_value_t = 4)]
+    // === Hidden expert options (not shown in --help) ===
+
+    /// Commits between checkpoints (expert tuning).
+    #[arg(long, default_value_t = 100, hide = true)]
+    pub checkpoint_interval: usize,
+
+    /// Number of parallel worker processes for evaluation (expert tuning).
+    #[arg(long, hide = true)]
+    pub workers: Option<usize>,
+
+    /// Number of checkpoints between garbage collection runs (expert tuning).
+    #[arg(long, default_value_t = 5, hide = true)]
+    pub gc_interval: usize,
+
+    /// Maximum concurrent range workers for parallel indexing (expert tuning).
+    #[arg(long, default_value_t = 4, hide = true)]
     pub max_range_workers: usize,
+
+    /// Internal flag for worker subprocess mode.
+    #[arg(long, hide = true)]
+    pub internal_worker: bool,
 }
 
 /// Parse memory size from CLI argument.

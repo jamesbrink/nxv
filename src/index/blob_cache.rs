@@ -60,6 +60,7 @@ impl Default for BlobCache {
     }
 }
 
+#[allow(dead_code)]
 impl BlobCache {
     /// Create a new empty cache.
     pub fn new() -> Self {
@@ -114,7 +115,11 @@ impl BlobCache {
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let file = File::open(path).map_err(|e| {
-            cache_error(format!("Failed to open cache file {}: {}", path.display(), e))
+            cache_error(format!(
+                "Failed to open cache file {}: {}",
+                path.display(),
+                e
+            ))
         })?;
         let reader = BufReader::new(file);
 
@@ -141,9 +146,10 @@ impl BlobCache {
 
     /// Save cache to disk.
     pub fn save(&self) -> Result<()> {
-        let path = self.cache_path.as_ref().ok_or_else(|| {
-            cache_error("Cannot save cache: no path configured")
-        })?;
+        let path = self
+            .cache_path
+            .as_ref()
+            .ok_or_else(|| cache_error("Cannot save cache: no path configured"))?;
 
         self.save_to(path.clone())
     }
@@ -161,9 +167,7 @@ impl BlobCache {
             .unwrap_or(0);
         let temp_filename = format!(
             "{}.tmp.{}.{}",
-            path.file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("cache"),
+            path.file_name().and_then(|s| s.to_str()).unwrap_or("cache"),
             pid,
             timestamp
         );
@@ -190,15 +194,15 @@ impl BlobCache {
         // Note: There's still a small race window here, but the unique temp
         // filename prevents concurrent writers from clobbering each other's
         // temp files. The last writer wins, which is acceptable for a cache.
-        if path.exists() {
-            if let Err(e) = std::fs::remove_file(path) {
-                // Another process may have already removed it; log and continue
-                debug!(
-                    path = %path.display(),
-                    error = %e,
-                    "Failed to remove old cache file (may have been removed by another worker)"
-                );
-            }
+        if path.exists()
+            && let Err(e) = std::fs::remove_file(path)
+        {
+            // Another process may have already removed it; log and continue
+            debug!(
+                path = %path.display(),
+                error = %e,
+                "Failed to remove old cache file (may have been removed by another worker)"
+            );
         }
         if let Err(e) = std::fs::rename(&temp_path, path) {
             // Clean up temp file on rename failure

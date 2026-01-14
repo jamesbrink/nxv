@@ -62,6 +62,7 @@ impl StaticFileMap {
     }
 
     /// Get attributes affected by a file change.
+    #[allow(dead_code)]
     pub fn attrs_for_file(&self, file_path: &str) -> Option<&Vec<String>> {
         self.file_to_attrs.get(file_path)
     }
@@ -210,37 +211,36 @@ fn collect_entries_with_prefix<I>(
                         format!("{}.{}", prefix, path_str)
                     };
 
-                    if let Some((kind, path_expr)) = match_call(value) {
-                        if let Some(path) = path_text(path_expr) {
-                            hits.push(CallPackageHit {
-                                attr_name: full_name,
-                                path,
-                                kind,
-                            });
-                        }
+                    if let Some((kind, path_expr)) = match_call(value)
+                        && let Some(path) = path_text(path_expr)
+                    {
+                        hits.push(CallPackageHit {
+                            attr_name: full_name,
+                            path,
+                            kind,
+                        });
                     }
                 }
             }
             ast::Entry::Inherit(inh) => {
                 // Handle: inherit (callPackages ./path { }) foo bar;
-                if let Some(from) = inh.from().and_then(|f| f.expr()) {
-                    if let Some((kind, path_expr)) = match_call(from) {
-                        if let Some(path) = path_text(path_expr) {
-                            for attr in inh.attrs() {
-                                *total_attrs += 1;
-                                if let Some(name) = attr_text(attr) {
-                                    let full_name = if prefix.is_empty() {
-                                        name
-                                    } else {
-                                        format!("{}.{}", prefix, name)
-                                    };
-                                    hits.push(CallPackageHit {
-                                        attr_name: full_name,
-                                        path: path.clone(),
-                                        kind,
-                                    });
-                                }
-                            }
+                if let Some(from) = inh.from().and_then(|f| f.expr())
+                    && let Some((kind, path_expr)) = match_call(from)
+                    && let Some(path) = path_text(path_expr)
+                {
+                    for attr in inh.attrs() {
+                        *total_attrs += 1;
+                        if let Some(name) = attr_text(attr) {
+                            let full_name = if prefix.is_empty() {
+                                name
+                            } else {
+                                format!("{}.{}", prefix, name)
+                            };
+                            hits.push(CallPackageHit {
+                                attr_name: full_name,
+                                path: path.clone(),
+                                kind,
+                            });
                         }
                     }
                 } else {
@@ -288,9 +288,7 @@ fn match_call(expr: ast::Expr) -> Option<(CallKind, ast::Expr)> {
     };
 
     // Verify final argument is an attrset (the override set)
-    if ast::AttrSet::cast(arg.syntax().clone()).is_none() {
-        return None;
-    }
+    ast::AttrSet::cast(arg.syntax().clone())?;
 
     Some((kind, path))
 }
@@ -299,11 +297,11 @@ fn match_call(expr: ast::Expr) -> Option<(CallKind, ast::Expr)> {
 fn strip_parens(expr: ast::Expr) -> ast::Expr {
     let mut cur = expr;
     loop {
-        if let ast::Expr::Paren(ref p) = cur {
-            if let Some(inner) = p.expr() {
-                cur = inner;
-                continue;
-            }
+        if let ast::Expr::Paren(ref p) = cur
+            && let Some(inner) = p.expr()
+        {
+            cur = inner;
+            continue;
         }
         return cur;
     }
@@ -396,8 +394,7 @@ mod tests {
     #[test]
     #[ignore]
     fn test_real_all_packages() {
-        let nixpkgs_path = std::env::var("NIXPKGS_PATH")
-            .unwrap_or_else(|_| "nixpkgs".to_string());
+        let nixpkgs_path = std::env::var("NIXPKGS_PATH").unwrap_or_else(|_| "nixpkgs".to_string());
         let all_packages_path = format!("{}/pkgs/top-level/all-packages.nix", nixpkgs_path);
 
         let content = match std::fs::read_to_string(&all_packages_path) {
@@ -436,8 +433,16 @@ mod tests {
 
         // Assert reasonable coverage (we expect 30-50% for all-packages.nix)
         // because many attrs use inherit, let bindings, etc.
-        assert!(result.coverage_ratio() > 0.2, "Coverage too low: {:.1}%", result.coverage_ratio() * 100.0);
-        assert!(result.hits.len() > 1000, "Expected >1000 callPackage hits, got {}", result.hits.len());
+        assert!(
+            result.coverage_ratio() > 0.2,
+            "Coverage too low: {:.1}%",
+            result.coverage_ratio() * 100.0
+        );
+        assert!(
+            result.hits.len() > 1000,
+            "Expected >1000 callPackage hits, got {}",
+            result.hits.len()
+        );
     }
 
     #[test]
@@ -573,8 +578,16 @@ mod tests {
         assert_eq!(result.hits.len(), 2);
 
         let names: Vec<_> = result.hits.iter().map(|h| h.attr_name.as_str()).collect();
-        assert!(names.contains(&"python3Packages.requests"), "Expected python3Packages.requests, got {:?}", names);
-        assert!(names.contains(&"qt6.qtbase"), "Expected qt6.qtbase, got {:?}", names);
+        assert!(
+            names.contains(&"python3Packages.requests"),
+            "Expected python3Packages.requests, got {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"qt6.qtbase"),
+            "Expected qt6.qtbase, got {:?}",
+            names
+        );
     }
 
     #[test]

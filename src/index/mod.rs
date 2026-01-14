@@ -2430,31 +2430,30 @@ fn build_hybrid_file_attr_map(
     const BASE_PATH: &str = "pkgs/top-level";
 
     // Step 1: Try to get static file map from cache
-    let static_map: Option<&StaticFileMap> = if let Some(blob_oid) =
-        repo.try_get_blob_oid(commit_hash, ALL_PACKAGES_PATH)
-    {
-        let blob_hex = blob_oid.to_string();
-        match blob_cache.get_or_parse_with(&blob_hex, BASE_PATH, || {
-            repo.read_blob(commit_hash, ALL_PACKAGES_PATH)
-                .map(|(_, content)| content)
-        }) {
-            Ok(map) => Some(map),
-            Err(e) => {
-                tracing::debug!(
-                    commit = %&commit_hash[..8],
-                    error = %e,
-                    "Failed to get static file map, falling back to Nix"
-                );
-                None
+    let static_map: Option<&StaticFileMap> =
+        if let Some(blob_oid) = repo.try_get_blob_oid(commit_hash, ALL_PACKAGES_PATH) {
+            let blob_hex = blob_oid.to_string();
+            match blob_cache.get_or_parse_with(&blob_hex, BASE_PATH, || {
+                repo.read_blob(commit_hash, ALL_PACKAGES_PATH)
+                    .map(|(_, content)| content)
+            }) {
+                Ok(map) => Some(map),
+                Err(e) => {
+                    tracing::debug!(
+                        commit = %&commit_hash[..8],
+                        error = %e,
+                        "Failed to get static file map, falling back to Nix"
+                    );
+                    None
+                }
             }
-        }
-    } else {
-        tracing::debug!(
-            commit = %&commit_hash[..8],
-            "all-packages.nix not found at this commit"
-        );
-        None
-    };
+        } else {
+            tracing::debug!(
+                commit = %&commit_hash[..8],
+                "all-packages.nix not found at this commit"
+            );
+            None
+        };
 
     // Step 2: Convert static map to file_attr_map format
     let mut file_attr_map: HashMap<String, Vec<String>> = HashMap::new();
@@ -2758,10 +2757,10 @@ fn process_range_worker(
             }
 
             // Save blob cache on interruption
-            if blob_cache.len() > initial_cache_entries {
-                if let Err(e) = blob_cache.save() {
-                    tracing::warn!(error = %e, "Failed to save blob cache on interrupt");
-                }
+            if blob_cache.len() > initial_cache_entries
+                && let Err(e) = blob_cache.save()
+            {
+                tracing::warn!(error = %e, "Failed to save blob cache on interrupt");
             }
 
             info!(target: "nxv::index", "Range {}: interrupted", range.label);

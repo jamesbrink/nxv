@@ -1431,6 +1431,7 @@ impl NixpkgsRepo {
     /// Try to read blob content, returning None if file doesn't exist or isn't UTF-8.
     ///
     /// This is useful for gracefully handling missing files in historical commits.
+    #[allow(dead_code)]
     pub fn try_read_blob(&self, commit_hash: &str, file_path: &str) -> Option<(Oid, String)> {
         self.read_blob(commit_hash, file_path).ok()
     }

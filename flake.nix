@@ -397,6 +397,7 @@
             pkgs.k6  # Load testing tool
             pkgs.python3  # For benchmark scripts
             pkgs.ruff  # Python linter and formatter
+            pkgs.sysstat  # Performance monitoring (sar, iostat, mpstat, pidstat)
             # For indexer feature with nix-bindings
             pkgs.clang
             pkgs.llvmPackages.libclang

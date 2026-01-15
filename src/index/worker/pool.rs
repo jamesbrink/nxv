@@ -8,12 +8,13 @@ use super::proc::Proc;
 use super::protocol::{WorkRequest, WorkResponse};
 use super::signals::{TerminationReason, WorkerFailure, analyze_wait_status};
 use super::spawn::{WorkerConfig, spawn_worker};
+use super::watchdog::{MEMORY_CRITICAL, WorkerWatchdog};
 use crate::error::{NxvError, Result};
 use crate::index::extractor::{AttrPosition, PackageInfo};
 use crate::memory::DEFAULT_MEMORY_BUDGET;
 use std::path::Path;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{instrument, trace};
 
@@ -60,18 +61,34 @@ struct Worker {
     jobs_completed: usize,
     /// Number of times this worker has been restarted.
     restarts: usize,
+    /// Shared watchdog for memory monitoring.
+    watchdog: Arc<WorkerWatchdog>,
+    /// Label for this worker (for watchdog registration).
+    label: String,
 }
 
 impl Worker {
     /// Create a new worker and spawn its subprocess.
-    fn new(id: usize, config: WorkerConfig) -> Result<Self> {
+    fn new(
+        id: usize,
+        config: WorkerConfig,
+        watchdog: Arc<WorkerWatchdog>,
+        label: String,
+    ) -> Result<Self> {
         let proc = spawn_worker(&config)?;
+
+        // Register with watchdog for RSS monitoring
+        let pid = proc.pid().as_raw() as u32;
+        watchdog.register(pid, config.per_worker_memory_mib, &label);
+
         Ok(Self {
             proc: Some(proc),
             config,
             id,
             jobs_completed: 0,
             restarts: 0,
+            watchdog,
+            label,
         })
     }
 
@@ -86,7 +103,19 @@ impl Worker {
 
     /// Spawn or respawn the worker subprocess.
     fn spawn(&mut self) -> Result<()> {
+        // Unregister old PID if any (worker may have died)
+        if let Some(ref old_proc) = self.proc {
+            let old_pid = old_proc.pid().as_raw() as u32;
+            self.watchdog.unregister(old_pid);
+        }
+
         let proc = spawn_worker(&self.config)?;
+
+        // Register new PID with watchdog
+        let pid = proc.pid().as_raw() as u32;
+        self.watchdog
+            .register(pid, self.config.per_worker_memory_mib, &self.label);
+
         self.proc = Some(proc);
         Ok(())
     }
@@ -450,6 +479,9 @@ impl Worker {
     /// Shutdown the worker gracefully.
     fn shutdown(&mut self) {
         if let Some(mut proc) = self.proc.take() {
+            // Unregister from watchdog before stopping
+            let pid = proc.pid().as_raw() as u32;
+            self.watchdog.unregister(pid);
             let _ = proc.stop(Duration::from_secs(5));
         }
     }
@@ -461,6 +493,8 @@ pub struct WorkerPool {
     config: WorkerPoolConfig,
     /// Round-robin counter for worker selection when all are busy.
     next_worker: AtomicUsize,
+    /// Memory watchdog for RSS enforcement.
+    watchdog: Arc<WorkerWatchdog>,
 }
 
 impl WorkerPool {
@@ -473,6 +507,12 @@ impl WorkerPool {
             "Initializing worker pool"
         );
 
+        // Create shared watchdog for RSS monitoring
+        let watchdog = Arc::new(WorkerWatchdog::new());
+
+        // Create label prefix from pool config
+        let label_prefix = config.label.as_deref().unwrap_or("pool");
+
         let mut workers = Vec::with_capacity(config.worker_count);
         for id in 0..config.worker_count {
             // Each worker gets its own eval store to avoid SQLite contention
@@ -484,7 +524,8 @@ impl WorkerPool {
                 per_worker_memory_mib: config.per_worker_memory_mib,
                 eval_store_path: worker_store_path,
             };
-            let worker = Worker::new(id, worker_config)?;
+            let label = format!("{}-w{}", label_prefix, id);
+            let worker = Worker::new(id, worker_config, watchdog.clone(), label)?;
             workers.push(Mutex::new(worker));
         }
 
@@ -502,6 +543,7 @@ impl WorkerPool {
             workers,
             config,
             next_worker: AtomicUsize::new(0),
+            watchdog,
         })
     }
 
@@ -510,10 +552,71 @@ impl WorkerPool {
         self.workers.len()
     }
 
+    /// Check if the system is under critical memory pressure.
+    pub fn is_memory_critical(&self) -> bool {
+        MEMORY_CRITICAL.load(Ordering::Relaxed)
+    }
+
+    /// Get recommended batch size based on current memory pressure.
+    ///
+    /// Returns a reduced batch size when the system is under memory pressure:
+    /// - Normal: 500 packages per batch
+    /// - High pressure: 100 packages per batch
+    /// - Critical: 50 packages (caller should check is_memory_critical first)
+    ///
+    /// This enables graceful degradation under memory pressure rather than OOM.
+    pub fn recommended_batch_size(&self, default_batch_size: usize) -> usize {
+        use super::super::memory_pressure::get_memory_pressure;
+
+        if MEMORY_CRITICAL.load(Ordering::Relaxed) {
+            // Critical pressure - use minimum batch size
+            return default_batch_size.min(50);
+        }
+
+        let pressure = get_memory_pressure();
+        if pressure.is_high() {
+            // High pressure - reduce batch size significantly
+            default_batch_size.min(100)
+        } else {
+            // Normal operation
+            default_batch_size
+        }
+    }
+
+    /// Wait for memory pressure to clear before starting new work.
+    ///
+    /// Uses exponential backoff starting at 100ms, maxing at 5 seconds.
+    /// Logs a warning on first wait and info when cleared.
+    fn wait_for_memory_clear(&self) {
+        use std::thread;
+
+        if !MEMORY_CRITICAL.load(Ordering::Relaxed) {
+            return; // Fast path - no pressure
+        }
+
+        let mut backoff_ms = 100u64;
+        const MAX_BACKOFF_MS: u64 = 5000;
+        let mut logged_warning = false;
+
+        while MEMORY_CRITICAL.load(Ordering::Relaxed) {
+            if !logged_warning {
+                tracing::warn!("Memory critical - pausing new extractions until pressure clears");
+                logged_warning = true;
+            }
+
+            thread::sleep(Duration::from_millis(backoff_ms));
+            backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
+        }
+
+        if logged_warning {
+            tracing::info!("Memory pressure cleared - resuming extractions");
+        }
+    }
+
     /// Extract packages for a single system using an available worker.
     ///
     /// This method acquires a worker from the pool, sends the extraction request,
-    /// and returns the result.
+    /// and returns the result. It will wait if the system is under critical memory pressure.
     pub fn extract(
         &self,
         system: &str,
@@ -521,6 +624,9 @@ impl WorkerPool {
         attrs: &[String],
         extract_store_paths: bool,
     ) -> Result<Vec<PackageInfo>> {
+        // Wait for memory pressure to clear before starting new work
+        self.wait_for_memory_clear();
+
         // Find an available worker using try_lock
         for worker in &self.workers {
             if let Ok(mut w) = worker.try_lock() {
@@ -538,6 +644,7 @@ impl WorkerPool {
     ///
     /// Each system is assigned to a different worker. If there are more systems
     /// than workers, some workers will process multiple systems sequentially.
+    /// Waits for memory pressure to clear before starting.
     #[instrument(level = "debug", skip(self, repo_path, attrs), fields(systems = systems.len(), attrs = attrs.len()))]
     pub fn extract_parallel(
         &self,
@@ -547,6 +654,9 @@ impl WorkerPool {
         extract_store_paths: bool,
     ) -> Vec<Result<Vec<PackageInfo>>> {
         use std::thread;
+
+        // Wait for memory pressure to clear before starting parallel extraction
+        self.wait_for_memory_clear();
 
         let parallel_start = Instant::now();
 
@@ -610,8 +720,12 @@ impl WorkerPool {
     ///
     /// Uses a worker subprocess to avoid memory accumulation in the parent process.
     /// The worker will restart if it exceeds the memory threshold.
+    /// Waits for memory pressure to clear before starting.
     #[instrument(level = "debug", skip(self, repo_path))]
     pub fn extract_positions(&self, system: &str, repo_path: &Path) -> Result<Vec<AttrPosition>> {
+        // Wait for memory pressure to clear before starting
+        self.wait_for_memory_clear();
+
         // Find an available worker using try_lock
         for worker in &self.workers {
             if let Ok(mut w) = worker.try_lock() {

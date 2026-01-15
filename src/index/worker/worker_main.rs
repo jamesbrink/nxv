@@ -339,8 +339,7 @@ mod tests {
 
             // Verify it was set (16 GiB + 50% headroom = 24 GiB)
             let (soft, _) = getrlimit(Resource::RLIMIT_AS).expect("Failed to get rlimit");
-            let expected_bytes =
-                (16 * 1024 * 1024 * 1024_u64) + (16 * 1024 * 1024 * 1024_u64 / 2);
+            let expected_bytes = (16 * 1024 * 1024 * 1024_u64) + (16 * 1024 * 1024 * 1024_u64 / 2);
             assert_eq!(soft, expected_bytes);
         } else {
             // Can only lower the limit - just verify the function is callable

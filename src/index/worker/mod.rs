@@ -35,10 +35,15 @@ mod proc;
 mod protocol;
 mod signals;
 mod spawn;
+pub mod watchdog;
 pub mod worker_main;
 
 pub use pool::{WorkerPool, WorkerPoolConfig};
 pub use worker_main::run_worker_main;
+
+// Re-export watchdog for memory pressure monitoring
+#[allow(unused_imports)]
+pub use watchdog::{MEMORY_CRITICAL, WorkerWatchdog};
 
 // Re-export for potential external use
 #[allow(unused_imports)]

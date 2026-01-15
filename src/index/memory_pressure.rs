@@ -216,7 +216,8 @@ fn read_psi_memory() -> (Option<f64>, Option<f64>) {
         }
 
         // Parse avg10 value (most recent 10-second average)
-        let avg10 = parts.iter()
+        let avg10 = parts
+            .iter()
             .find(|p| p.starts_with("avg10="))
             .and_then(|p| p.strip_prefix("avg10="))
             .and_then(|v| v.parse::<f64>().ok());

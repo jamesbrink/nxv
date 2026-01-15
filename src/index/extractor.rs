@@ -118,9 +118,10 @@ pub fn extract_packages_for_attrs<P: AsRef<Path>>(
     let repo_path = repo_path.as_ref();
 
     // Batch large attribute lists to avoid memory pressure in Nix evaluation.
-    // Full extraction with 11K+ attrs can exhaust worker memory (2GB threshold).
-    // Process in batches of 500 attrs to stay well within memory limits.
-    const BATCH_SIZE: usize = 500;
+    // Full extraction with 11K+ attrs can exhaust worker memory.
+    // Nix has ~1.5GB baseline overhead, so with 2GB workers we need small batches.
+    // Process in batches of 100 attrs to stay well within memory limits.
+    const BATCH_SIZE: usize = 100;
 
     if !attr_names.is_empty() && attr_names.len() > BATCH_SIZE {
         let num_batches = attr_names.len().div_ceil(BATCH_SIZE);
@@ -1363,7 +1364,7 @@ mod tests {
 
     /// Test that large attribute lists are batched correctly.
     ///
-    /// This tests the batching logic where lists > BATCH_SIZE (500) are split
+    /// This tests the batching logic where lists > BATCH_SIZE (100) are split
     /// into multiple batches to avoid memory pressure during Nix evaluation.
     #[test]
     fn test_batching_logic_splits_large_lists() {
@@ -1377,9 +1378,9 @@ mod tests {
         let path = temp_dir.path();
         std::fs::create_dir_all(path.join("pkgs")).unwrap();
 
-        // Create a nixpkgs mock with 600 packages (more than BATCH_SIZE of 500)
+        // Create a nixpkgs mock with 250 packages (more than BATCH_SIZE of 100)
         let mut default_nix = "{ system, config }:\n{\n".to_string();
-        for i in 0..600 {
+        for i in 0..250 {
             default_nix.push_str(&format!(
                 r#"  pkg{} = {{ pname = "pkg{}"; version = "{}.0.0"; type = "derivation"; }};
 "#,
@@ -1389,24 +1390,24 @@ mod tests {
         default_nix.push_str("}\n");
         std::fs::write(path.join("default.nix"), default_nix).unwrap();
 
-        // Generate attr names for all 600 packages
-        let attr_names: Vec<String> = (0..600).map(|i| format!("pkg{}", i)).collect();
+        // Generate attr names for all 250 packages
+        let attr_names: Vec<String> = (0..250).map(|i| format!("pkg{}", i)).collect();
 
-        // This should trigger batching (600 > 500)
+        // This should trigger batching (250 > 100)
         let packages = extract_packages_for_attrs(path, "x86_64-linux", &attr_names, true).unwrap();
 
-        // Should have extracted all 600 packages despite batching
+        // Should have extracted all 250 packages despite batching
         assert_eq!(
             packages.len(),
-            600,
-            "Should extract all 600 packages across batches"
+            250,
+            "Should extract all 250 packages across batches"
         );
 
         // Verify some specific packages from different batches
         assert!(packages.iter().any(|p| p.name == "pkg0")); // First batch
-        assert!(packages.iter().any(|p| p.name == "pkg499")); // End of first batch
-        assert!(packages.iter().any(|p| p.name == "pkg500")); // Start of second batch
-        assert!(packages.iter().any(|p| p.name == "pkg599")); // Last package
+        assert!(packages.iter().any(|p| p.name == "pkg99")); // End of first batch
+        assert!(packages.iter().any(|p| p.name == "pkg100")); // Start of second batch
+        assert!(packages.iter().any(|p| p.name == "pkg249")); // Last package
     }
 
     /// Test that small attribute lists are NOT batched.
@@ -1425,7 +1426,7 @@ mod tests {
         let path = temp_dir.path();
         std::fs::create_dir_all(path.join("pkgs")).unwrap();
 
-        // Create a nixpkgs mock with 50 packages (less than BATCH_SIZE of 500)
+        // Create a nixpkgs mock with 50 packages (less than BATCH_SIZE of 100)
         let mut default_nix = "{ system, config }:\n{\n".to_string();
         for i in 0..50 {
             default_nix.push_str(&format!(
@@ -1496,21 +1497,22 @@ mod tests {
     /// Test that batch size constant is reasonable.
     ///
     /// BATCH_SIZE should be:
-    /// - Large enough to amortize overhead (> 100)
-    /// - Small enough to avoid memory pressure (< 1000)
+    /// - Large enough to amortize overhead (>= 50)
+    /// - Small enough to avoid memory pressure (<= 200)
     #[test]
     fn test_batch_size_is_reasonable() {
         // The BATCH_SIZE constant is defined in extract_packages_for_attrs
         // We verify it's in a reasonable range by testing with a list of that size
-        const BATCH_SIZE: usize = 500;
+        // Reduced to 100 because Nix has ~1.5GB baseline overhead
+        const BATCH_SIZE: usize = 100;
 
         assert!(
-            BATCH_SIZE >= 100,
-            "Batch size should be >= 100 for efficiency"
+            BATCH_SIZE >= 50,
+            "Batch size should be >= 50 for efficiency"
         );
         assert!(
-            BATCH_SIZE <= 1000,
-            "Batch size should be <= 1000 to avoid memory pressure"
+            BATCH_SIZE <= 200,
+            "Batch size should be <= 200 to avoid memory pressure with 2GB workers"
         );
     }
 }

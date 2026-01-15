@@ -1225,7 +1225,8 @@ impl Indexer {
                     psi_some = ?pressure.psi_some,
                     "System under memory pressure, waiting before starting batch"
                 );
-                if !memory_pressure::wait_for_memory(MIN_AVAILABLE_MEMORY_MIB, MEMORY_WAIT_TIMEOUT) {
+                if !memory_pressure::wait_for_memory(MIN_AVAILABLE_MEMORY_MIB, MEMORY_WAIT_TIMEOUT)
+                {
                     warn!(
                         target: "nxv::index",
                         "Timeout waiting for memory, proceeding with caution"
@@ -5130,8 +5131,8 @@ index abc123..def456 100644
     fn test_startup_barrier_serializes_first_commit() {
         // Test that startup barrier with limit=1 properly serializes initialization
         // AND first commit extraction (held until explicitly dropped after commit_idx==0)
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::thread;
         use std::time::Duration;
 
@@ -5183,8 +5184,8 @@ index abc123..def456 100644
     fn test_startup_barrier_enforces_mutual_exclusion() {
         // Verify that barrier with limit=1 enforces mutual exclusion.
         // Uses an atomic counter that must NEVER exceed 1 if serialization works.
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::thread;
         use std::time::Duration;
 

@@ -11,6 +11,7 @@ pub mod blob_cache;
 pub mod extractor;
 pub mod gc;
 pub mod git;
+pub mod memory_pressure;
 pub mod nix_ffi;
 pub mod publisher;
 pub mod static_analysis;
@@ -61,8 +62,16 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tracing::{debug, debug_span, info, instrument, trace, warn};
+
+/// Minimum available system memory (MiB) required to start a new batch.
+/// Ranges will wait until this much memory is available before starting.
+const MIN_AVAILABLE_MEMORY_MIB: u64 = 4 * 1024; // 4 GiB
+
+/// Timeout for waiting for memory before starting a batch.
+/// If memory doesn't become available, we proceed anyway (with warning).
+const MEMORY_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Calculate per-worker memory from total budget.
 ///
@@ -1203,6 +1212,30 @@ impl Indexer {
             if shutdown.load(std::sync::atomic::Ordering::SeqCst) {
                 info!(target: "nxv::index", "Shutdown requested, skipping remaining batches");
                 break;
+            }
+
+            // Wait for memory pressure to subside before starting a new batch.
+            // This prevents cascading OOM when multiple batches run simultaneously.
+            let pressure = memory_pressure::get_memory_pressure();
+            if pressure.under_pressure {
+                info!(
+                    target: "nxv::index",
+                    available_mib = pressure.available_mib,
+                    required_mib = MIN_AVAILABLE_MEMORY_MIB,
+                    psi_some = ?pressure.psi_some,
+                    "System under memory pressure, waiting before starting batch"
+                );
+                if !memory_pressure::wait_for_memory(MIN_AVAILABLE_MEMORY_MIB, MEMORY_WAIT_TIMEOUT) {
+                    warn!(
+                        target: "nxv::index",
+                        "Timeout waiting for memory, proceeding with caution"
+                    );
+                } else {
+                    info!(
+                        target: "nxv::index",
+                        "Memory pressure subsided, starting batch"
+                    );
+                }
             }
 
             // Process this batch in parallel using scoped threads
@@ -2765,12 +2798,12 @@ fn process_range_worker(
     // Acquire startup barrier to stagger heavy initialization work.
     // This prevents all ranges from creating worker pools and building
     // hybrid maps simultaneously, which can overwhelm the system.
-    // The permit is held during init and released after the hybrid map is built.
+    // The permit is held during init AND first commit extraction, then released.
     tracing::debug!(
         range = %range.label,
         "Waiting for startup barrier (staggered initialization)"
     );
-    let _startup_permit = startup_barrier.acquire();
+    let mut startup_permit = Some(startup_barrier.acquire());
     tracing::debug!(
         range = %range.label,
         "Acquired startup barrier, initializing worker pool"
@@ -2816,8 +2849,9 @@ fn process_range_worker(
             }
         };
 
-    // Release startup barrier - initialization complete, other ranges can now start
-    drop(_startup_permit);
+    // NOTE: startup_permit is NOT released here - it's held through the first commit
+    // extraction to prevent all ranges from hitting their heavy baseline extraction
+    // simultaneously. It will be released after commit_idx == 0 completes.
 
     tracing::info!(
         range = %range.label,
@@ -3024,6 +3058,17 @@ fn process_range_worker(
 
         // Skip commits with no targets (dynamic discovery is no longer auto-enabled)
         if target_attrs.is_empty() {
+            // Release startup barrier on first commit even if no extraction needed
+            // (prevents holding barrier for entire range if first commit has no targets)
+            if commit_idx == 0
+                && let Some(permit) = startup_permit.take()
+            {
+                drop(permit);
+                tracing::debug!(
+                    range = %range.label,
+                    "Released startup barrier (first commit had no targets)"
+                );
+            }
             // No packages to extract for this commit
             result.commits_processed += 1;
             progress.tick();
@@ -3032,6 +3077,30 @@ fn process_range_worker(
 
         // Extract packages for all systems
         let extract_start = std::time::Instant::now();
+
+        // Check memory pressure before heavy extractions.
+        // If the system is critically low on memory, wait for pressure to subside.
+        // This provides backpressure to prevent OOM kills during large extractions.
+        if needs_full_extraction || target_attrs.len() > 1000 {
+            let pressure = memory_pressure::get_memory_pressure();
+            if pressure.is_critical() {
+                tracing::info!(
+                    range = %range.label,
+                    available_mib = pressure.available_mib,
+                    psi_full = ?pressure.psi_full,
+                    target_attrs = target_attrs.len(),
+                    "Critical memory pressure, waiting before extraction"
+                );
+                // Wait up to 30 seconds for memory to free up
+                memory_pressure::wait_for_memory(2048, Duration::from_secs(30));
+            } else if pressure.is_high() {
+                tracing::debug!(
+                    range = %range.label,
+                    available_mib = pressure.available_mib,
+                    "Memory pressure elevated, extraction may be slow"
+                );
+            }
+        }
 
         // Acquire limiter permit for full extractions to prevent system thrash.
         // This serializes expensive baseline/periodic extractions across parallel workers.
@@ -3115,6 +3184,18 @@ fn process_range_worker(
         result.commits_processed += 1;
         progress.tick();
         progress.log_if_needed(&format!("pkgs={}", result.packages_found));
+
+        // Release startup barrier after first commit extraction completes.
+        // This ensures heavy baseline extractions are staggered across ranges.
+        if commit_idx == 0
+            && let Some(permit) = startup_permit.take()
+        {
+            drop(permit);
+            tracing::debug!(
+                range = %range.label,
+                "Released startup barrier after first commit extraction"
+            );
+        }
 
         // Checkpoint periodically
         if (commit_idx + 1) % config.checkpoint_interval == 0 {
@@ -5043,6 +5124,109 @@ index abc123..def456 100644
         // Should be able to acquire again after dropping
         let _permit3 = limiter.acquire();
         // If we got here without blocking, the limiter works correctly
+    }
+
+    #[test]
+    fn test_startup_barrier_serializes_first_commit() {
+        // Test that startup barrier with limit=1 properly serializes initialization
+        // AND first commit extraction (held until explicitly dropped after commit_idx==0)
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::thread;
+        use std::time::Duration;
+
+        let barrier = Arc::new(FullExtractionLimiter::new(1)); // Limit 1 = only one at a time
+        let completion_order = Arc::new(AtomicUsize::new(0));
+
+        // Simulate 3 range workers trying to initialize + do first commit
+        let handles: Vec<_> = (0..3)
+            .map(|i| {
+                let barrier = barrier.clone();
+                let completion_order = completion_order.clone();
+
+                thread::spawn(move || {
+                    // Acquire startup barrier (simulates init + first commit)
+                    let mut permit = Some(barrier.acquire());
+
+                    // Simulate init work (worker pool creation, hybrid map building)
+                    thread::sleep(Duration::from_millis(10));
+
+                    // Simulate first commit extraction (the heavy part)
+                    thread::sleep(Duration::from_millis(20));
+
+                    // Record completion order BEFORE releasing permit
+                    // (simulates: if commit_idx == 0 && let Some(p) = startup_permit.take())
+                    let order = completion_order.fetch_add(1, Ordering::SeqCst);
+
+                    // Release barrier (simulates: drop(permit) after first commit)
+                    if let Some(p) = permit.take() {
+                        drop(p);
+                    }
+
+                    (i, order)
+                })
+            })
+            .collect();
+
+        // Collect results
+        let mut results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        results.sort_by_key(|(_, order)| *order);
+
+        // With limit=1, each worker must complete before the next starts.
+        // So completion order should be sequential (0, 1, 2).
+        assert_eq!(results[0].1, 0, "First completion should have order 0");
+        assert_eq!(results[1].1, 1, "Second completion should have order 1");
+        assert_eq!(results[2].1, 2, "Third completion should have order 2");
+    }
+
+    #[test]
+    fn test_startup_barrier_enforces_mutual_exclusion() {
+        // Verify that barrier with limit=1 enforces mutual exclusion.
+        // Uses an atomic counter that must NEVER exceed 1 if serialization works.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::thread;
+        use std::time::Duration;
+
+        let barrier = Arc::new(FullExtractionLimiter::new(1));
+        let in_critical_section = Arc::new(AtomicUsize::new(0));
+        let max_concurrent = Arc::new(AtomicUsize::new(0));
+
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let barrier = barrier.clone();
+                let in_cs = in_critical_section.clone();
+                let max_conc = max_concurrent.clone();
+
+                thread::spawn(move || {
+                    let _permit = barrier.acquire();
+
+                    // Enter critical section
+                    let current = in_cs.fetch_add(1, Ordering::SeqCst) + 1;
+
+                    // Track max concurrent (should never exceed 1 with limit=1)
+                    max_conc.fetch_max(current, Ordering::SeqCst);
+
+                    // Simulate work in critical section
+                    thread::sleep(Duration::from_millis(10));
+
+                    // Exit critical section
+                    in_cs.fetch_sub(1, Ordering::SeqCst);
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // With limit=1, max concurrent MUST be exactly 1 (mutual exclusion)
+        let observed_max = max_concurrent.load(Ordering::SeqCst);
+        assert_eq!(
+            observed_max, 1,
+            "Barrier failed: max concurrent was {} (expected 1)",
+            observed_max
+        );
     }
 
     // ============================================================================

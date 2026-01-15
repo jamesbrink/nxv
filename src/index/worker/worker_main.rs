@@ -10,6 +10,9 @@ use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[cfg(unix)]
+use nix::sys::resource::{Resource, setrlimit};
+
 /// Memory threshold configuration from CLI (in MiB).
 /// Default: 6 GiB. Uses atomic for safe concurrent access.
 static MAX_MEMORY_MIB: AtomicUsize = AtomicUsize::new(6 * 1024);
@@ -19,6 +22,53 @@ static MAX_MEMORY_MIB: AtomicUsize = AtomicUsize::new(6 * 1024);
 /// This can be called at any time but should typically be set once at startup.
 pub fn set_max_memory(mib: usize) {
     MAX_MEMORY_MIB.store(mib, Ordering::Relaxed);
+}
+
+/// Set a hard memory limit using setrlimit(RLIMIT_AS).
+///
+/// This creates an OS-enforced limit on the virtual address space.
+/// If the worker tries to allocate beyond this limit:
+/// - `malloc()` returns NULL / allocations fail with ENOMEM
+/// - Nix evaluation may crash or error out
+/// - In worst case, OOM killer terminates the process
+///
+/// The parent process will detect the death and respawn the worker,
+/// potentially with a smaller batch size.
+///
+/// # Arguments
+/// * `limit_mib` - Maximum virtual address space in MiB
+///
+/// # Returns
+/// * `Ok(())` if limit was set successfully
+/// * `Err(message)` if setrlimit failed (non-fatal, worker continues)
+#[cfg(unix)]
+fn set_hard_memory_limit(limit_mib: usize) -> Result<(), String> {
+    // Convert MiB to bytes
+    let limit_bytes = (limit_mib as u64) * 1024 * 1024;
+
+    // Add 50% headroom for memory fragmentation and overhead.
+    // The soft limit (getrusage check) handles the actual threshold,
+    // this hard limit is a safety net for runaway allocations.
+    let hard_limit = limit_bytes + (limit_bytes / 2);
+
+    // Set both soft and hard limits to the same value
+    match setrlimit(Resource::RLIMIT_AS, hard_limit, hard_limit) {
+        Ok(()) => {
+            // Log via stderr (will be captured by parent's stderr reader)
+            eprintln!(
+                "trace: Worker set RLIMIT_AS to {} MiB (with {}% headroom)",
+                hard_limit / (1024 * 1024),
+                50
+            );
+            Ok(())
+        }
+        Err(e) => {
+            // Non-fatal: some systems may not support RLIMIT_AS or have restrictions
+            let msg = format!("Failed to set RLIMIT_AS: {}", e);
+            eprintln!("warning: {}", msg);
+            Err(msg)
+        }
+    }
 }
 
 /// Get the current memory usage in MiB.
@@ -163,6 +213,16 @@ fn worker_loop(reader: &mut LineReader, writer: &mut LineWriter) -> io::Result<(
 /// This function never returns normally - it either exits successfully
 /// or panics on unrecoverable errors.
 pub fn run_worker_main() -> ! {
+    // Set hard memory limit FIRST, before any Nix evaluation.
+    // This creates an OS-enforced ceiling on memory usage.
+    #[cfg(unix)]
+    {
+        let threshold_mib = MAX_MEMORY_MIB.load(Ordering::Relaxed);
+        if threshold_mib > 0 {
+            let _ = set_hard_memory_limit(threshold_mib);
+        }
+    }
+
     // Install a custom panic hook to handle broken pipe gracefully.
     // Workers inherit stderr from the parent, so when tee exits on Ctrl+C,
     // stderr is broken and write panics would cause abort().
@@ -253,5 +313,52 @@ mod tests {
 
         // Restore original value
         MAX_MEMORY_MIB.store(original, Ordering::Relaxed);
+    }
+
+    /// Test that set_hard_memory_limit works correctly.
+    ///
+    /// This test is ignored by default because setting RLIMIT_AS affects the
+    /// entire test process and can cause subsequent tests to fail with OOM.
+    /// Run it in isolation with: cargo test --features indexer test_set_hard_memory_limit -- --ignored
+    #[test]
+    #[ignore = "affects process-wide RLIMIT_AS, run in isolation"]
+    #[cfg(unix)]
+    fn test_set_hard_memory_limit() {
+        use nix::sys::resource::{Resource, getrlimit};
+
+        // Get current limits to work within allowed bounds
+        let (_current_soft, current_hard) =
+            getrlimit(Resource::RLIMIT_AS).expect("Failed to get current rlimit");
+
+        // If unlimited, we can set any value
+        // If limited, we can only lower it
+        if current_hard == u64::MAX {
+            // Can set any limit - use 16 GiB (safe headroom for tests)
+            let result = set_hard_memory_limit(16 * 1024);
+            assert!(result.is_ok(), "Failed to set memory limit: {:?}", result);
+
+            // Verify it was set (16 GiB + 50% headroom = 24 GiB)
+            let (soft, _) = getrlimit(Resource::RLIMIT_AS).expect("Failed to get rlimit");
+            let expected_bytes =
+                (16 * 1024 * 1024 * 1024_u64) + (16 * 1024 * 1024 * 1024_u64 / 2);
+            assert_eq!(soft, expected_bytes);
+        } else {
+            // Can only lower the limit - just verify the function is callable
+            // In restricted environments, setrlimit may fail with EPERM
+            let _ = set_hard_memory_limit(1024);
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_hard_limit_function_exists() {
+        // Simple test that the function exists and returns Result
+        // This doesn't actually call setrlimit (which would affect the process)
+        // just verifies the interface compiles correctly
+        fn _verify_signature() -> Result<(), String> {
+            // Function signature test - not executed
+            set_hard_memory_limit(1024)
+        }
+        // If we get here, the function signature is correct
     }
 }

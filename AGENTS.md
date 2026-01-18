@@ -5,7 +5,8 @@
 - `src/` contains the Rust CLI, database, remote update logic, server, and
   indexer (feature-gated). See `src/index/` for indexer internals and
   `src/server/` for the HTTP API.
-- `tests/` holds integration tests (notably `tests/integration.rs`).
+- `tests/` holds integration tests (notably `tests/integration.rs`) and
+  fixtures in `tests/fixtures/`.
 - `benches/` contains performance benchmarks (search, bloom filter, FFI).
 - `frontend/` contains the static HTML/CSS/JS for the web UI served by
   `nxv serve`.
@@ -13,8 +14,11 @@
   Use `nix develop .#website` for the website devshell.
 - `nix/` contains the NixOS module (`module.nix`) for running as a systemd
   service.
-- `docs-legacy/` hosts legacy implementation specs and design notes.
-- `scripts/` includes operational scripts (e.g., cache publishing).
+- `nixpkgs/` is a vendored nixpkgs tree used by the flake and module docs.
+- `scripts/` includes operational scripts and QA helpers (pre/post reindex).
+- `keys/` holds signing keys (local only); `publish/` is a staging area for
+  generated index artifacts.
+- `INDEXER_REDESIGN_SPEC.md` captures indexer design notes.
 
 ## Build, Test, and Development Commands
 
@@ -22,12 +26,16 @@
 - `nix develop .#website` enters the website devshell (Bun + bun2nix).
 - `cargo build` builds the debug CLI; `cargo build --features indexer` enables
   indexer support.
+- `cargo build --release` builds optimized binaries.
+- `cargo run -- <args>` runs the CLI with arguments.
 - `cargo test` runs the default test suite; `cargo test --features indexer`
   includes indexer tests.
 - `cargo clippy -- -D warnings` runs linting with warnings treated as errors.
 - `cargo fmt` formats Rust code.
 - `nix flake check` runs the full Nix CI checks.
 - Website: `cd website && bun install && bun run dev` starts the docs dev server.
+- QA scripts: `scripts/pre_reindex_qa.sh` and
+  `scripts/post_reindex_validation.sh`.
 
 ## Coding Style & Naming Conventions
 
@@ -43,6 +51,8 @@
   `tempfile`.
 - Some indexer tests require `nix` and are marked `#[ignore]`; run them
   explicitly when needed.
+- Regression fixture: `tests/fixtures/regression_packages.json` with
+  `NIXPKGS_PATH=/path/to/nixpkgs cargo test --features indexer test_regression_fixture -- --ignored`.
 
 ## Commit & Pull Request Guidelines
 
@@ -55,10 +65,14 @@
 ## Configuration & Data Paths
 
 - Key environment variables: `NXV_DB_PATH`, `NXV_API_URL`, `NXV_MANIFEST_URL`,
-  `NXV_PUBLIC_KEY`, `NXV_SECRET_KEY`, `NXV_API_TIMEOUT`, `NO_COLOR`.
+  `NXV_PUBLIC_KEY`, `NXV_SECRET_KEY`, `NXV_SKIP_VERIFY`, `NXV_API_TIMEOUT`,
+  `NXV_LOG`, `NXV_LOG_LEVEL`, `NXV_LOG_FORMAT`, `NXV_LOG_FILE`,
+  `NXV_LOG_ROTATION`, `NO_COLOR`, `NXV_INSTALL_DIR`, `NXV_VERSION`.
 - Default data locations are platform-specific (see `CLAUDE.md` and
   `README.md`).
 
 ## Agent Notes
 
 - For deeper architecture and feature details, read `CLAUDE.md`.
+- For usage docs and API semantics, check `README.md` and `website/`.
+- Use `/release` for release prep; it runs the project-defined release workflow.

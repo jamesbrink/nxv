@@ -1814,15 +1814,42 @@ impl Indexer {
                 // Skip store path extraction for old commits to avoid derivationStrict errors
                 let extract_store_paths = is_after_store_path_cutoff(commit.date);
 
+                // For large target lists (full extraction), use sequential processing
+                // to avoid multiplying baseline memory across workers.
+                // Each Nix worker loads ~6-8GB just for nixpkgs baseline.
+                const SEQUENTIAL_THRESHOLD: usize = 1000;
+                let use_sequential = target_list.len() >= SEQUENTIAL_THRESHOLD;
+
                 if let Some(ref pool) = worker_pool {
-                    // Parallel extraction using worker pool
-                    let results = pool.extract_parallel(
-                        worktree_path,
-                        systems,
-                        &target_list,
-                        extract_store_paths,
-                    );
-                    systems.iter().cloned().zip(results).collect()
+                    if use_sequential {
+                        // Large extraction: process systems ONE AT A TIME with parent-level batching.
+                        // This ensures workers can restart between batches to release memory.
+                        tracing::debug!(
+                            targets = target_list.len(),
+                            "Using sequential batched extraction for large target list"
+                        );
+                        systems
+                            .iter()
+                            .map(|system| {
+                                let result = pool.extract_batched(
+                                    system,
+                                    worktree_path,
+                                    &target_list,
+                                    extract_store_paths,
+                                );
+                                (system.clone(), result)
+                            })
+                            .collect()
+                    } else {
+                        // Small extraction: parallel is fine
+                        let results = pool.extract_parallel(
+                            worktree_path,
+                            systems,
+                            &target_list,
+                            extract_store_paths,
+                        );
+                        systems.iter().cloned().zip(results).collect()
+                    }
                 } else {
                     // Sequential extraction (fallback)
                     systems
@@ -3120,13 +3147,46 @@ fn process_range_worker(
         // Skip store path extraction for old commits to avoid derivationStrict errors
         let extract_store_paths = is_after_store_path_cutoff(commit.date);
 
+        // For large target lists (full extraction), use sequential processing
+        // to avoid multiplying baseline memory across workers.
+        // Each Nix worker loads ~6-8GB just for nixpkgs baseline.
+        const SEQUENTIAL_THRESHOLD: usize = 1000;
+        let use_sequential = target_attrs.len() >= SEQUENTIAL_THRESHOLD;
+
         let extraction_results: Vec<(
             String,
             std::result::Result<Vec<extractor::PackageInfo>, NxvError>,
         )> = if let Some(ref pool) = worker_pool {
-            let results =
-                pool.extract_parallel(worktree_path, systems, &target_attrs, extract_store_paths);
-            systems.iter().cloned().zip(results).collect()
+            if use_sequential {
+                // Large extraction: process systems ONE AT A TIME with parent-level batching.
+                // This ensures workers can restart between batches to release memory.
+                tracing::debug!(
+                    targets = target_attrs.len(),
+                    range = %range.label,
+                    "Using sequential batched extraction for large target list"
+                );
+                systems
+                    .iter()
+                    .map(|system| {
+                        let result = pool.extract_batched(
+                            system,
+                            worktree_path,
+                            &target_attrs,
+                            extract_store_paths,
+                        );
+                        (system.clone(), result)
+                    })
+                    .collect()
+            } else {
+                // Small extraction: parallel is fine
+                let results = pool.extract_parallel(
+                    worktree_path,
+                    systems,
+                    &target_attrs,
+                    extract_store_paths,
+                );
+                systems.iter().cloned().zip(results).collect()
+            }
         } else {
             systems
                 .iter()

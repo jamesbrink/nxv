@@ -640,6 +640,82 @@ impl WorkerPool {
         w.extract(system, repo_path, attrs, extract_store_paths)
     }
 
+    /// Extract packages with parent-level batching to control memory.
+    ///
+    /// For large extractions (>1000 packages), Nix workers accumulate memory
+    /// that isn't released between internal batches. This method batches at
+    /// the parent level, sending smaller chunks via IPC and allowing workers
+    /// to restart between batches if they hit memory limits.
+    ///
+    /// Each batch is sent as a separate IPC request. If a worker dies during
+    /// extraction (killed by watchdog or OOM), it will be respawned and the
+    /// batch retried automatically by the underlying Worker::extract().
+    pub fn extract_batched(
+        &self,
+        system: &str,
+        repo_path: &Path,
+        attrs: &[String],
+        extract_store_paths: bool,
+    ) -> Result<Vec<PackageInfo>> {
+        // Parent-level batch size: larger than worker internal batch (100)
+        // to reduce IPC overhead, but small enough that workers don't accumulate
+        // too much memory before a potential restart.
+        const PARENT_BATCH_SIZE: usize = 500;
+
+        if attrs.len() <= PARENT_BATCH_SIZE {
+            // Small extraction - no need for parent-level batching
+            return self.extract(system, repo_path, attrs, extract_store_paths);
+        }
+
+        let total_batches = attrs.len().div_ceil(PARENT_BATCH_SIZE);
+
+        tracing::debug!(
+            system = %system,
+            total_attrs = attrs.len(),
+            batch_size = PARENT_BATCH_SIZE,
+            batches = total_batches,
+            "Starting parent-level batched extraction"
+        );
+
+        let mut all_packages: Vec<PackageInfo> = Vec::with_capacity(attrs.len());
+
+        for (batch_idx, chunk) in attrs.chunks(PARENT_BATCH_SIZE).enumerate() {
+            // Wait for memory to clear between batches
+            self.wait_for_memory_clear();
+
+            tracing::trace!(
+                system = %system,
+                batch = batch_idx + 1,
+                total = total_batches,
+                chunk_size = chunk.len(),
+                "Processing parent batch"
+            );
+
+            match self.extract(system, repo_path, chunk, extract_store_paths) {
+                Ok(packages) => {
+                    all_packages.extend(packages);
+                }
+                Err(e) => {
+                    // Log error but continue with remaining batches
+                    tracing::warn!(
+                        system = %system,
+                        batch = batch_idx + 1,
+                        error = %e,
+                        "Parent batch failed, continuing with remaining batches"
+                    );
+                }
+            }
+        }
+
+        tracing::debug!(
+            system = %system,
+            total_packages = all_packages.len(),
+            "Parent-level batched extraction complete"
+        );
+
+        Ok(all_packages)
+    }
+
     /// Extract packages for multiple systems in parallel.
     ///
     /// Each system is assigned to a different worker. If there are more systems

@@ -867,7 +867,7 @@ impl Indexer {
             );
         }
 
-        self.process_commits(&mut db, &nixpkgs_path, &repo, commits, None)
+        self.process_commits(&mut db, &nixpkgs_path, &repo, commits, None, false)
     }
 
     /// Run an incremental index, processing only commits that have not yet been indexed.
@@ -1041,7 +1041,14 @@ impl Indexer {
                             );
                         }
 
-                        self.process_commits(&mut db, &nixpkgs_path, &repo, commits, Some(&hash))
+                        self.process_commits(
+                            &mut db,
+                            &nixpkgs_path,
+                            &repo,
+                            commits,
+                            Some(&hash),
+                            true,
+                        )
                     }
                     Err(_) => {
                         warn!(
@@ -1398,7 +1405,7 @@ impl Indexer {
     /// let mut db = Database::open("/tmp/index.db").unwrap();
     /// let repo = open_nixpkgs_repo("/path/to/nixpkgs").unwrap();
     /// let commits = repo.list_commits_touching_pkgs().unwrap();
-    /// let result = indexer.process_commits(&mut db, "/path/to/nixpkgs", &repo, commits, None).unwrap();
+    /// let result = indexer.process_commits(&mut db, "/path/to/nixpkgs", &repo, commits, None, false).unwrap();
     /// println!("Indexed {} commits", result.commits_processed);
     /// ```
     #[instrument(level = "debug", skip(self, db, nixpkgs_path, repo, commits, resume_from), fields(total_commits = commits.len()))]
@@ -1409,6 +1416,7 @@ impl Indexer {
         repo: &NixpkgsRepo,
         commits: Vec<git::CommitInfo>,
         resume_from: Option<&str>,
+        use_db_mapping: bool,
     ) -> Result<IndexResult> {
         let total_commits = commits.len();
         let systems = &self.config.systems;
@@ -1478,6 +1486,22 @@ impl Indexer {
         });
         let initial_cache_entries = blob_cache.len();
 
+        let db_file_map = if use_db_mapping {
+            Some(build_db_file_attr_map(db)?)
+        } else {
+            None
+        };
+        let db_all_attrs = if use_db_mapping {
+            Some(build_db_all_attrs(db)?)
+        } else {
+            None
+        };
+        let db_missing_source_attrs = if use_db_mapping {
+            db.get_attribute_paths_missing_source()?
+        } else {
+            Vec::new()
+        };
+
         // Build the initial file-to-attribute map
         let first_commit = commits
             .first()
@@ -1498,6 +1522,8 @@ impl Indexer {
                 worktree_path,
                 systems,
                 worker_pool.as_ref(),
+                db_file_map.as_ref(),
+                db_all_attrs.as_ref(),
             ) {
                 Ok((map, coverage)) => (map, first_commit.hash.clone(), coverage),
                 Err(e) => {
@@ -1589,6 +1615,8 @@ impl Indexer {
                     worktree_path,
                     systems,
                     worker_pool.as_ref(),
+                    db_file_map.as_ref(),
+                    db_all_attrs.as_ref(),
                 )
             {
                 file_attr_map = new_map;
@@ -1598,8 +1626,7 @@ impl Indexer {
 
             // Determine target attributes
             let mut target_attr_paths: HashSet<String> = HashSet::new();
-            let all_attrs: Option<&Vec<String>> =
-                file_attr_map.get("pkgs/top-level/all-packages.nix");
+            let all_attrs: Option<&Vec<String>> = file_attr_map.get(ALL_PACKAGES_PATH);
 
             // Check for infrastructure files and parse their diffs to extract affected attrs
             // First commit captures baseline state; periodic full extraction catches packages
@@ -1739,6 +1766,16 @@ impl Indexer {
                             );
                             needs_full_extraction = true;
                             for attr in all_attrs_list {
+                                target_attr_paths.insert(attr.clone());
+                            }
+                        } else if !db_missing_source_attrs.is_empty() {
+                            debug!(
+                                path = path,
+                                commit = %commit.short_hash,
+                                missing_source_attrs = db_missing_source_attrs.len(),
+                                "Unknown package file changed, targeting attrs missing source_path"
+                            );
+                            for attr in &db_missing_source_attrs {
                                 target_attr_paths.insert(attr.clone());
                             }
                         } else {
@@ -1919,6 +1956,8 @@ impl Indexer {
                 }
             }
 
+            update_file_attr_map_from_aggregates(&mut file_attr_map, &aggregates);
+
             result.packages_found += aggregates.len() as u64;
 
             trace!(
@@ -2076,10 +2115,7 @@ impl Indexer {
 /// 1. `all-packages.nix` imports/exports all packages, so any change triggers 18k+ targets
 /// 2. `aliases.nix` just defines aliases, not actual package versions
 /// 3. Changes to actual package files are still detected via path-based fallback heuristics
-const INFRASTRUCTURE_FILES: &[&str] = &[
-    "pkgs/top-level/all-packages.nix",
-    "pkgs/top-level/aliases.nix",
-];
+const INFRASTRUCTURE_FILES: &[&str] = &[ALL_PACKAGES_PATH, "pkgs/top-level/aliases.nix"];
 
 /// Directories under pkgs/ that contain infrastructure, not packages.
 /// Files in these directories should not be treated as package definitions.
@@ -2492,6 +2528,56 @@ fn normalize_position_file(repo_path: &Path, file: &str) -> Option<String> {
     None
 }
 
+fn build_db_file_attr_map(db: &Database) -> Result<HashMap<String, Vec<String>>> {
+    let attr_sources = db.get_attr_source_paths()?;
+    let mut map: HashMap<String, Vec<String>> = HashMap::new();
+    for (attr, path) in attr_sources {
+        map.entry(path).or_default().push(attr);
+    }
+
+    for attrs in map.values_mut() {
+        attrs.sort();
+        attrs.dedup();
+    }
+
+    Ok(map)
+}
+
+fn build_db_all_attrs(db: &Database) -> Result<Vec<String>> {
+    let mut attrs = db.get_attribute_paths()?;
+    attrs.sort();
+    attrs.dedup();
+    Ok(attrs)
+}
+
+fn update_file_attr_map_from_aggregates(
+    file_attr_map: &mut HashMap<String, Vec<String>>,
+    aggregates: &HashMap<String, PackageAggregate>,
+) {
+    let mut new_attrs: Vec<String> = Vec::new();
+
+    for agg in aggregates.values() {
+        new_attrs.push(agg.attribute_path.clone());
+        if let Some(source_path) = &agg.source_path {
+            let entry = file_attr_map.entry(source_path.clone()).or_default();
+            if !entry.contains(&agg.attribute_path) {
+                entry.push(agg.attribute_path.clone());
+            }
+        }
+    }
+
+    if !new_attrs.is_empty() {
+        let entry = file_attr_map
+            .entry(ALL_PACKAGES_PATH.to_string())
+            .or_default();
+        for attr in new_attrs {
+            if !entry.contains(&attr) {
+                entry.push(attr);
+            }
+        }
+    }
+}
+
 fn should_refresh_file_map(changed_paths: &[String]) -> bool {
     const TOP_LEVEL_FILES: [&str; 4] = [
         "pkgs/top-level/all-packages.nix",
@@ -2508,6 +2594,9 @@ fn should_refresh_file_map(changed_paths: &[String]) -> bool {
 /// Minimum coverage ratio from static analysis to use without Nix fallback.
 /// Below this threshold, we supplement with Nix-based extraction.
 const MIN_STATIC_COVERAGE: f64 = 0.50;
+
+/// Path to all-packages.nix (used for file-to-attr mapping and full extraction).
+const ALL_PACKAGES_PATH: &str = "pkgs/top-level/all-packages.nix";
 
 /// Path to the blob cache file (relative to data directory).
 const BLOB_CACHE_FILENAME: &str = "blob_cache.json";
@@ -2527,6 +2616,8 @@ const BLOB_CACHE_FILENAME: &str = "blob_cache.json";
 /// * `worktree_path` - Path to the checked-out worktree
 /// * `systems` - Target systems for Nix evaluation
 /// * `worker_pool` - Optional worker pool for parallel Nix evaluation
+/// * `db_file_map` - Optional file-to-attr map derived from the existing database
+/// * `db_all_attrs` - Optional complete attr list derived from the existing database
 ///
 /// # Returns
 /// A tuple of (file_attr_map, static_coverage_ratio) where:
@@ -2539,8 +2630,9 @@ fn build_hybrid_file_attr_map(
     worktree_path: &Path,
     systems: &[String],
     worker_pool: Option<&worker::WorkerPool>,
+    db_file_map: Option<&HashMap<String, Vec<String>>>,
+    db_all_attrs: Option<&Vec<String>>,
 ) -> Result<(HashMap<String, Vec<String>>, f64)> {
-    const ALL_PACKAGES_PATH: &str = "pkgs/top-level/all-packages.nix";
     const BASE_PATH: &str = "pkgs/top-level";
 
     // Step 1: Try to get static file map from cache
@@ -2598,56 +2690,83 @@ fn build_hybrid_file_attr_map(
         "Static analysis complete"
     );
 
-    // Step 3: ALWAYS get complete attr list from Nix for full extraction support.
-    // Static analysis is great for file-to-attr mappings, but for full extraction
-    // we need the complete list of package attrs from Nix evaluation.
-    // When coverage is below threshold, we also use Nix for file-to-attr mappings.
-    let needs_full_nix_supplement = static_coverage < MIN_STATIC_COVERAGE;
+    // Step 3: Merge database-derived mappings (preferred for incremental runs).
+    if let Some(db_map) = db_file_map {
+        for (file, attrs) in db_map {
+            let entry = file_attr_map.entry(file.clone()).or_default();
+            for attr in attrs {
+                if !entry.contains(attr) {
+                    entry.push(attr.clone());
+                }
+            }
+        }
+    }
+
+    if let Some(db_attrs) = db_all_attrs {
+        if !db_attrs.is_empty() {
+            let entry = file_attr_map
+                .entry(ALL_PACKAGES_PATH.to_string())
+                .or_default();
+            for attr in db_attrs {
+                if !entry.contains(attr) {
+                    entry.push(attr.clone());
+                }
+            }
+        }
+    }
+
+    // Step 4: Optionally supplement with Nix evaluation for missing coverage.
+    // We avoid Nix fallback when the database already provides attr mappings.
+    let db_map_empty = db_file_map.map_or(true, |map| map.is_empty());
+    let db_attrs_empty = db_all_attrs.map_or(true, |attrs| attrs.is_empty());
+    let needs_full_nix_supplement = static_coverage < MIN_STATIC_COVERAGE && db_map_empty;
+    let needs_nix_all_attrs = db_attrs_empty;
 
     tracing::debug!(
         commit = %&commit_hash[..8],
         static_coverage = %format!("{:.1}%", static_coverage * 100.0),
         needs_file_mappings = needs_full_nix_supplement,
+        needs_all_attrs = needs_nix_all_attrs,
         "Getting complete attr list from Nix for full extraction support"
     );
 
-    match build_file_attr_map(worktree_path, systems, worker_pool) {
-        Ok(nix_map) => {
-            // ALWAYS merge the all-packages.nix entry to ensure complete attr list
-            // for full extraction (first commit, periodic). This is critical for
-            // correctness - static analysis typically only captures ~50-70% of attrs.
-            if let Some(nix_all_attrs) = nix_map.get(ALL_PACKAGES_PATH) {
-                let entry = file_attr_map
-                    .entry(ALL_PACKAGES_PATH.to_string())
-                    .or_default();
-                for attr in nix_all_attrs {
-                    if !entry.contains(attr) {
-                        entry.push(attr.clone());
+    if needs_full_nix_supplement || needs_nix_all_attrs {
+        match build_file_attr_map(worktree_path, systems, worker_pool) {
+            Ok(nix_map) => {
+                // Merge the all-packages.nix entry to ensure complete attr list
+                if let Some(nix_all_attrs) = nix_map.get(ALL_PACKAGES_PATH) {
+                    let entry = file_attr_map
+                        .entry(ALL_PACKAGES_PATH.to_string())
+                        .or_default();
+                    for attr in nix_all_attrs {
+                        if !entry.contains(attr) {
+                            entry.push(attr.clone());
+                        }
                     }
                 }
-            }
 
-            // Only merge other file-to-attr mappings when static coverage is low
-            if needs_full_nix_supplement {
-                for (file, attrs) in nix_map {
-                    if file == ALL_PACKAGES_PATH {
-                        continue; // Already handled above
-                    }
-                    let entry = file_attr_map.entry(file).or_default();
-                    for attr in attrs {
-                        if !entry.contains(&attr) {
-                            entry.push(attr);
+                // Only merge other file-to-attr mappings when static coverage is low
+                if needs_full_nix_supplement {
+                    for (file, attrs) in nix_map {
+                        if file == ALL_PACKAGES_PATH {
+                            continue; // Already handled above
+                        }
+                        let entry = file_attr_map.entry(file).or_default();
+                        for attr in attrs {
+                            if !entry.contains(&attr) {
+                                entry.push(attr);
+                            }
                         }
                     }
                 }
             }
-        }
-        Err(e) => {
-            tracing::warn!(
-                commit = %&commit_hash[..8],
-                error = %e,
-                "Nix evaluation failed, full extraction may be incomplete"
-            );
+            Err(e) => {
+                tracing::warn!(
+                    commit = %&commit_hash[..8],
+                    error = %e,
+                    "Nix evaluation failed, full extraction may be incomplete"
+                );
+            }
         }
     }
 
@@ -2818,6 +2937,15 @@ fn process_range_worker(
     });
     let initial_cache_entries = blob_cache.len();
 
+    let (db_file_map, db_all_attrs, db_missing_source_attrs) = {
+        let db_guard = db.lock().unwrap();
+        (
+            build_db_file_attr_map(&db_guard)?,
+            build_db_all_attrs(&db_guard)?,
+            db_guard.get_attribute_paths_missing_source()?,
+        )
+    };
+
     // Determine if we should use parallel evaluation for systems
     let systems = &config.systems;
     let use_parallel = config.worker_count != Some(1) && systems.len() > 1;
@@ -2862,6 +2990,8 @@ fn process_range_worker(
             worktree_path,
             systems,
             worker_pool.as_ref(),
+            Some(&db_file_map),
+            Some(&db_all_attrs),
         ) {
             Ok((map, coverage)) => (map, first_commit.hash.clone(), coverage),
             Err(e) => {
@@ -2948,6 +3078,8 @@ fn process_range_worker(
                 worktree_path,
                 systems,
                 worker_pool.as_ref(),
+                Some(&db_file_map),
+                Some(&db_all_attrs),
             ) {
                 let map_ms = map_start.elapsed().as_millis();
                 tracing::trace!(
@@ -2966,7 +3098,7 @@ fn process_range_worker(
 
         // Determine target attributes
         let mut target_attr_paths: HashSet<String> = HashSet::new();
-        let all_attrs: Option<&Vec<String>> = file_attr_map.get("pkgs/top-level/all-packages.nix");
+        let all_attrs: Option<&Vec<String>> = file_attr_map.get(ALL_PACKAGES_PATH);
 
         // Check for infrastructure files and parse their diffs
         // First commit captures baseline state; periodic full extraction catches packages
@@ -3045,6 +3177,17 @@ fn process_range_worker(
                         );
                         needs_full_extraction = true;
                         for attr in all_attrs_list {
+                            target_attr_paths.insert(attr.clone());
+                        }
+                    } else if !db_missing_source_attrs.is_empty() {
+                        tracing::debug!(
+                            range = %range.label,
+                            path = path,
+                            commit = %&commit.hash[..8],
+                            missing_source_attrs = db_missing_source_attrs.len(),
+                            "Unknown package file changed, targeting attrs missing source_path"
+                        );
+                        for attr in &db_missing_source_attrs {
                             target_attr_paths.insert(attr.clone());
                         }
                     } else {
@@ -3236,6 +3379,8 @@ fn process_range_worker(
                 }
             }
         }
+
+        update_file_attr_map_from_aggregates(&mut file_attr_map, &aggregates);
 
         // Convert aggregates to PackageVersion records
         for aggregate in aggregates.values() {
@@ -5463,6 +5608,8 @@ index abc123..def456 100644
             worktree_path,
             &systems,
             None,
+            None,
+            None,
         );
 
         // Should succeed
@@ -5477,7 +5624,7 @@ index abc123..def456 100644
         assert!(coverage > 0.3, "Coverage {} should be > 0.3", coverage);
 
         // all-packages.nix should have many attrs (always supplemented by Nix)
-        let all_packages_attrs = file_map.get("pkgs/top-level/all-packages.nix");
+        let all_packages_attrs = file_map.get(ALL_PACKAGES_PATH);
         assert!(all_packages_attrs.is_some());
         assert!(
             all_packages_attrs.unwrap().len() > 5000,

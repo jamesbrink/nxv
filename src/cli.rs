@@ -365,7 +365,7 @@ pub struct IndexArgs {
     pub until: Option<String>,
 
     /// Limit the number of commits processed.
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub max_commits: Option<usize>,
 
     /// Total memory budget for all workers (e.g., "32G", "8GiB", "16384M").
@@ -384,7 +384,7 @@ pub struct IndexArgs {
     ///   "2017,2018"     - Process years 2017 and 2018 in parallel
     ///   "2017-2020"     - Single range from 2017 to 2019 (end exclusive)
     ///   "2017-2019,2020-2024" - Multiple explicit ranges
-    #[arg(long, value_name = "RANGES")]
+    #[arg(long, value_name = "RANGES", hide = true)]
     pub parallel_ranges: Option<String>,
 
     // === Hidden expert options (not shown in --help) ===

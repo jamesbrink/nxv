@@ -491,6 +491,59 @@ impl Database {
             .map_err(|e| e.into())
     }
 
+    /// Get the latest source_path per attribute_path.
+    ///
+    /// Uses the most recent `last_commit_date` to pick a stable source path for
+    /// each attribute, which is used to map file changes back to attributes.
+    #[cfg(feature = "indexer")]
+    pub fn get_attr_source_paths(&self) -> Result<std::collections::HashMap<String, String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT attribute_path, source_path \
+             FROM package_versions \
+             WHERE source_path IS NOT NULL \
+             ORDER BY attribute_path, last_commit_date DESC",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+
+        let mut map = std::collections::HashMap::new();
+        for row in rows {
+            let (attr, path): (String, String) = row?;
+            map.entry(attr).or_insert(path);
+        }
+        Ok(map)
+    }
+
+    /// Get distinct attribute paths known in the database.
+    #[cfg(feature = "indexer")]
+    pub fn get_attribute_paths(&self) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT attribute_path FROM package_versions")?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        let mut attrs = Vec::new();
+        for row in rows {
+            attrs.push(row?);
+        }
+        Ok(attrs)
+    }
+
+    /// Get attribute paths that have no known source_path across all versions.
+    #[cfg(feature = "indexer")]
+    pub fn get_attribute_paths_missing_source(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT attribute_path \
+             FROM package_versions \
+             GROUP BY attribute_path \
+             HAVING SUM(CASE WHEN source_path IS NOT NULL THEN 1 ELSE 0 END) = 0",
+        )?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        let mut attrs = Vec::new();
+        for row in rows {
+            attrs.push(row?);
+        }
+        Ok(attrs)
+    }
+
     /// Get checkpoint for a specific year range (parallel indexing).
     ///
     /// Returns the last indexed commit hash for the given range label.
@@ -977,6 +1030,99 @@ mod tests {
             desc, "Updated description",
             "description should be from latest"
         );
+    }
+
+    #[test]
+    #[cfg(feature = "indexer")]
+    fn test_attr_source_path_queries() {
+        use chrono::{TimeZone, Utc};
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let mut db = Database::open(&db_path).unwrap();
+
+        let date1 = Utc.with_ymd_and_hms(2022, 1, 1, 0, 0, 0).unwrap();
+        let date2 = Utc.with_ymd_and_hms(2022, 6, 1, 0, 0, 0).unwrap();
+
+        let packages = vec![
+            PackageVersion {
+                id: 0,
+                name: "python".to_string(),
+                version: "3.11.0".to_string(),
+                version_source: None,
+                first_commit_hash: "commit_a".to_string(),
+                first_commit_date: date1,
+                last_commit_hash: "commit_a".to_string(),
+                last_commit_date: date1,
+                attribute_path: "python311".to_string(),
+                description: None,
+                license: None,
+                homepage: None,
+                maintainers: None,
+                platforms: None,
+                source_path: Some(
+                    "pkgs/development/python-modules/python311/default.nix".to_string(),
+                ),
+                known_vulnerabilities: None,
+                store_paths: std::collections::HashMap::new(),
+            },
+            PackageVersion {
+                id: 0,
+                name: "python".to_string(),
+                version: "3.11.1".to_string(),
+                version_source: None,
+                first_commit_hash: "commit_b".to_string(),
+                first_commit_date: date2,
+                last_commit_hash: "commit_b".to_string(),
+                last_commit_date: date2,
+                attribute_path: "python311".to_string(),
+                description: None,
+                license: None,
+                homepage: None,
+                maintainers: None,
+                platforms: None,
+                source_path: Some(
+                    "pkgs/development/python-modules/python311/default.nix".to_string(),
+                ),
+                known_vulnerabilities: None,
+                store_paths: std::collections::HashMap::new(),
+            },
+            PackageVersion {
+                id: 0,
+                name: "curl".to_string(),
+                version: "8.0.0".to_string(),
+                version_source: None,
+                first_commit_hash: "commit_c".to_string(),
+                first_commit_date: date1,
+                last_commit_hash: "commit_c".to_string(),
+                last_commit_date: date1,
+                attribute_path: "curl".to_string(),
+                description: None,
+                license: None,
+                homepage: None,
+                maintainers: None,
+                platforms: None,
+                source_path: None,
+                known_vulnerabilities: None,
+                store_paths: std::collections::HashMap::new(),
+            },
+        ];
+
+        db.upsert_packages_batch(&packages).unwrap();
+
+        let attr_sources = db.get_attr_source_paths().unwrap();
+        assert_eq!(
+            attr_sources.get("python311"),
+            Some(&"pkgs/development/python-modules/python311/default.nix".to_string())
+        );
+        assert!(!attr_sources.contains_key("curl"));
+
+        let mut attrs = db.get_attribute_paths().unwrap();
+        attrs.sort();
+        assert_eq!(attrs, vec!["curl".to_string(), "python311".to_string()]);
+
+        let missing = db.get_attribute_paths_missing_source().unwrap();
+        assert_eq!(missing, vec!["curl".to_string()]);
     }
 
     #[test]

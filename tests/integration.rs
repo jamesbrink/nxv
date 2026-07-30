@@ -125,19 +125,23 @@ fn create_test_db(path: &std::path::Path) {
             (name, version, first_commit_hash, first_commit_date, last_commit_hash, last_commit_date,
              attribute_path, description, license, homepage)
         VALUES
-            ('python-3.11.0', '3.11.0', 'abc1234567890', 1700000000, 'def1234567890', 1700100000,
+            ('python-3.11.0', '3.11.0', 'abc1234567890', 1700000000, 'def1234567890000000000000000000000000000', 1700100000,
              'python', 'Python programming language', '["MIT"]', 'https://python.org'),
-            ('python-3.11.0', '3.11.0', 'abc1234567890', 1700000000, 'def1234567890', 1700100000,
+            ('python-3.11.0', '3.11.0', 'abc1234567890', 1700000000, 'def1234567890000000000000000000000000000', 1700100000,
              'python311', 'Python programming language', '["MIT"]', 'https://python.org'),
-            ('python-3.12.0', '3.12.0', 'ghi1234567890', 1701000000, 'jkl1234567890', 1701100000,
+            ('python-3.12.0', '3.12.0', 'ghi1234567890', 1701000000, 'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1', 1701100000,
              'python312', 'Python programming language', '["MIT"]', 'https://python.org'),
-            ('python2-2.7.18', '2.7.18', 'mno1234567890', 1600000000, 'pqr1234567890', 1600100000,
+            ('python2-2.7.18', '2.7.18', 'mno1234567890', 1600000000, 'b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2', 1600100000,
              'python2', 'Python 2 interpreter', '["PSF"]', 'https://python.org'),
-            ('nodejs-20.0.0', '20.0.0', 'stu1234567890', 1702000000, 'vwx1234567890', 1702100000,
+            ('nodejs-20.0.0', '20.0.0', 'stu1234567890', 1702000000, 'c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3', 1702100000,
              'nodejs', 'Node.js JavaScript runtime', '["MIT"]', 'https://nodejs.org'),
-            ('firefox-120.0', '120.0', 'aaa1234567890', 1703000000, 'bbb1234567890', 1703100000,
+            ('jq-1.7.1', '1.7.1', 'eee1234567890', 1702000000, 'e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4', 1702100000,
+             'jq', 'Command-line JSON processor', '["MIT"]', 'https://jqlang.github.io/jq/'),
+            ('jquake-1.8.5', '1.8.5', 'fff1234567890', 1705000000, 'f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5', 1705100000,
+             'jquake', 'A newer prefix sibling', '["MIT"]', 'https://example.com/jquake'),
+            ('firefox-120.0', '120.0', 'aaa1234567890', 1703000000, 'bbb1234567890000000000000000000000000000', 1703100000,
              'firefox', 'Mozilla Firefox web browser', '["MPL-2.0"]', 'https://firefox.com'),
-            ('rustc-1.75.0', '1.75.0', 'ccc1234567890', 1704000000, 'ddd1234567890', 1704100000,
+            ('rustc-1.75.0', '1.75.0', 'ccc1234567890', 1704000000, 'ddd1234567890000000000000000000000000000', 1704100000,
              'rustc', 'The Rust compiler', '["MIT", "Apache-2.0"]', 'https://rust-lang.org');
         "#,
     )
@@ -214,8 +218,40 @@ fn test_run_launches_one_modern_shell_with_multiple_packages() {
     let capture = std::fs::read_to_string(capture_path).unwrap();
     assert!(capture.contains("program=nix\n"));
     assert!(capture.contains("arg=shell\n"));
-    assert!(capture.contains("arg=nixpkgs/def1234567890#python\n"));
-    assert!(capture.contains("arg=nixpkgs/vwx1234567890#nodejs\n"));
+    assert!(capture.contains("arg=nixpkgs/def1234567890000000000000000000000000000#python\n"));
+    assert!(capture.contains("arg=nixpkgs/c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3#nodejs\n"));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_run_prefers_an_exact_attribute_over_newer_prefix_siblings() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    let bin_path = dir.path().join("bin");
+    let capture_path = dir.path().join("capture.txt");
+    create_test_db(&db_path);
+    std::fs::create_dir(&bin_path).unwrap();
+    install_fake_nix_commands(&bin_path);
+
+    nxv()
+        .args([
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "run",
+            "python",
+            "3.11",
+            "--with",
+            "jq",
+        ])
+        .env("PATH", prepend_path(&bin_path))
+        .env("NXV_TEST_CAPTURE", &capture_path)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Resolved jq -> jq 1.7.1"));
+
+    let capture = std::fs::read_to_string(capture_path).unwrap();
+    assert!(capture.contains("arg=nixpkgs/e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4#jq\n"));
+    assert!(!capture.contains("jquake"));
 }
 
 #[cfg(unix)]
@@ -237,7 +273,7 @@ fn test_run_resolves_through_remote_backend() {
             "version": "3.11.9",
             "first_commit_hash": "remote-first",
             "first_commit_date": "2024-01-01T00:00:00Z",
-            "last_commit_hash": "remote-last",
+            "last_commit_hash": "0123456789abcdef0123456789abcdef01234567",
             "last_commit_date": "2024-02-01T00:00:00Z",
             "attribute_path": "python311",
             "description": "Python",
@@ -277,7 +313,7 @@ fn test_run_resolves_through_remote_backend() {
 
     let capture = std::fs::read_to_string(capture_path).unwrap();
     assert!(capture.contains("program=nix\n"));
-    assert!(capture.contains("arg=nixpkgs/remote-last#python311\n"));
+    assert!(capture.contains("arg=nixpkgs/0123456789abcdef0123456789abcdef01234567#python311\n"));
 }
 
 #[cfg(unix)]
@@ -296,7 +332,7 @@ fn test_run_uses_one_legacy_shell_for_mixed_eras() {
             "INSERT INTO package_versions
              (name, version, first_commit_hash, first_commit_date, last_commit_hash,
               last_commit_date, attribute_path, description)
-             VALUES ('legacy-1.0', '1.0', 'old-first', 1500000000, 'old-last',
+             VALUES ('legacy-1.0', '1.0', 'old-first', 1500000000, 'fedcba9876543210fedcba9876543210fedcba98',
                      1500000100, 'legacy', 'Legacy test package')",
             [],
         )
@@ -323,8 +359,8 @@ fn test_run_uses_one_legacy_shell_for_mixed_eras() {
     let capture = std::fs::read_to_string(capture_path).unwrap();
     assert!(capture.contains("program=nix-shell\n"));
     assert!(capture.contains("arg=-p\n"));
-    assert!(capture.contains("archive/old-last.tar.gz"));
-    assert!(capture.contains("archive/vwx1234567890.tar.gz"));
+    assert!(capture.contains("archive/fedcba9876543210fedcba9876543210fedcba98.tar.gz"));
+    assert!(capture.contains("archive/c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3.tar.gz"));
 }
 
 #[cfg(unix)]
@@ -401,6 +437,76 @@ fn test_run_propagates_shell_exit_status_and_insecure_environment() {
     let capture = std::fs::read_to_string(capture_path).unwrap();
     assert!(capture.contains("allow_insecure=1\n"));
     assert!(capture.contains("arg=--impure\n"));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_run_reports_actionable_error_when_nix_is_unavailable() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    let empty_path = dir.path().join("empty-bin");
+    create_test_db(&db_path);
+    std::fs::create_dir(&empty_path).unwrap();
+
+    nxv()
+        .args([
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "run",
+            "python311",
+            "3.11",
+            "--exact",
+        ])
+        .env("PATH", &empty_path)
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("`nix`")
+                .and(predicate::str::contains("not found on PATH"))
+                .and(predicate::str::contains("install Nix")),
+        );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_run_reports_actionable_error_when_nix_shell_is_unavailable() {
+    use rusqlite::Connection;
+
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    let empty_path = dir.path().join("empty-bin");
+    create_test_db(&db_path);
+    Connection::open(&db_path)
+        .unwrap()
+        .execute(
+            "INSERT INTO package_versions
+             (name, version, first_commit_hash, first_commit_date, last_commit_hash,
+              last_commit_date, attribute_path, description)
+             VALUES ('legacy-1.0', '1.0', 'old-first', 1500000000,
+                     'fedcba9876543210fedcba9876543210fedcba98',
+                     1500000100, 'legacy', 'Legacy test package')",
+            [],
+        )
+        .unwrap();
+    std::fs::create_dir(&empty_path).unwrap();
+
+    nxv()
+        .args([
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "run",
+            "legacy",
+            "1.0",
+            "--exact",
+        ])
+        .env("PATH", &empty_path)
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("`nix-shell`")
+                .and(predicate::str::contains("not found on PATH"))
+                .and(predicate::str::contains("install Nix")),
+        );
 }
 
 #[test]

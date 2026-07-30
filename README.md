@@ -141,10 +141,12 @@ nxv run python 3.11 --with jq        # Add the latest jq
 nxv run python 3.11 --with nodejs@20 # Pin multiple package versions
 ```
 
-`nxv run` uses the same package/version matching as `search`, selects the best
-relevance-ranked result for each query, and opens one shell with every resolved
-package. Modern revisions use `nix shell`; environments containing a pre-flake
-revision automatically use a compatible pinned `nix-shell` expression.
+`nxv run` prefers an exact attribute match, then falls back to the same
+package/version scope and relevance rules as `search`. It opens one shell with
+every resolved package. Modern revisions use `nix shell`; environments
+containing a pre-flake revision automatically use a compatible pinned
+`nix-shell` expression. On Apple Silicon, that fallback evaluates packages as
+`x86_64-darwin` and requires Rosetta.
 
 ### Package Info & History
 

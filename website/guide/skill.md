@@ -144,9 +144,11 @@ nxv run python 2.7
 nxv run python 3.11 --with nodejs@20 --with jq
 ```
 
-`run` resolves every query first, chooses the best deterministic search result,
-and launches one pinned shell. It also handles pre-flake revisions and known
-insecure packages using the appropriate Nix invocation.
+`run` resolves every query first, prefers an exact attribute before falling
+back to deterministic search relevance, and launches one pinned shell. It also
+handles pre-flake revisions and known insecure packages using the appropriate
+Nix invocation. On Apple Silicon, pre-flake shells use `x86_64-darwin` and
+require Rosetta.
 
 Example agent pattern — generate a `nix shell` invocation for a specific version
 directly from the public API:

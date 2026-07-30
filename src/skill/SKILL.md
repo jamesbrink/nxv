@@ -212,10 +212,12 @@ nxv run python 3.11 --with nodejs@20 --with jq
 ```
 
 Additional `--with` values use `PACKAGE@VERSION` when a version is needed.
-nxv resolves every query before launch, chooses the first deterministic
-relevance-ranked match, and uses each result's latest observed commit. Modern
-revisions are combined in one `nix shell`; if any result predates flakes, nxv
-uses one compatible `nix-shell -p` environment instead.
+nxv resolves every query before launch, prefers an exact attribute match before
+falling back to search's deterministic relevance rules, and uses each result's
+latest observed commit. Modern revisions are combined in one `nix shell`; if
+any result predates flakes, nxv uses one compatible `nix-shell -p` environment
+instead. On Apple Silicon, the pre-flake fallback evaluates packages as
+`x86_64-darwin` and requires Rosetta.
 
 For manual command construction, take a `first_commit_hash` (or
 `last_commit_hash`) from search/history output and feed it to Nix:

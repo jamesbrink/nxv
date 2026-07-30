@@ -126,11 +126,11 @@ fn cmd_run(cli: &Cli, args: &cli::RunArgs) -> Result<()> {
     let mut packages = Vec::with_capacity(specs.len());
 
     for spec in &specs {
-        let result = backend.search(&SearchOptions {
+        let search_options = |exact| SearchOptions {
             query: spec.package.clone(),
             version: spec.version.clone(),
-            exact: args.exact,
-            all_depths: args.all_depths && spec.version.is_some(),
+            exact,
+            all_depths: !exact && args.all_depths && spec.version.is_some(),
             desc: false,
             license: None,
             sort: SortOrder::Relevance,
@@ -138,7 +138,17 @@ fn cmd_run(cli: &Cli, args: &cli::RunArgs) -> Result<()> {
             full: false,
             limit: 1,
             offset: 0,
-        })?;
+        };
+
+        // An exact attribute is always the strongest relevance signal. Fall
+        // back to the normal scoped prefix search only when that attribute
+        // does not provide the requested version.
+        let exact_result = backend.search(&search_options(true))?;
+        let result = if args.exact || !exact_result.data.is_empty() {
+            exact_result
+        } else {
+            backend.search(&search_options(false))?
+        };
 
         let Some(package) = result.data.into_iter().next() else {
             if !cli.quiet {
@@ -172,6 +182,17 @@ fn cmd_run(cli: &Cli, args: &cli::RunArgs) -> Result<()> {
         for package in insecure {
             eprintln!("  {} {}", package.attribute_path, package.version);
         }
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    if !cli.quiet
+        && packages
+            .iter()
+            .any(crate::db::queries::PackageVersion::predates_flakes)
+    {
+        eprintln!(
+            "Note: pre-flake packages use x86_64-darwin on Apple Silicon and require Rosetta."
+        );
     }
 
     run::ShellInvocation::from_packages(&packages)?.execute()

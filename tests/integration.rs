@@ -12,6 +12,37 @@ fn nxv() -> Command {
     Command::cargo_bin("nxv").unwrap()
 }
 
+#[cfg(unix)]
+fn install_fake_nix_commands(dir: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let script = r#"#!/bin/sh
+{
+  printf 'program=%s\n' "$(basename "$0")"
+  printf 'allow_insecure=%s\n' "${NIXPKGS_ALLOW_INSECURE:-}"
+  printf 'arg=%s\n' "$@"
+} > "$NXV_TEST_CAPTURE"
+exit "${NXV_TEST_EXIT_CODE:-0}"
+"#;
+
+    for program in ["nix", "nix-shell"] {
+        let path = dir.join(program);
+        std::fs::write(&path, script).unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+}
+
+#[cfg(unix)]
+fn prepend_path(dir: &std::path::Path) -> std::ffi::OsString {
+    let mut paths = vec![dir.to_path_buf()];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    std::env::join_paths(paths).unwrap()
+}
+
 /// Creates a SQLite test database at the given path populated with a schema and sample package rows.
 ///
 /// The database will contain `meta` and `package_versions` tables, relevant indexes,
@@ -131,6 +162,245 @@ fn test_help_displays() {
         .stdout(predicate::str::contains("stats"))
         .stdout(predicate::str::contains("history"))
         .stdout(predicate::str::contains("completions"));
+}
+
+// ============================================================================
+// Run Command Tests
+// ============================================================================
+
+#[test]
+fn test_run_help_describes_shell_and_multi_package_options() {
+    nxv()
+        .args(["run", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Open a shell"))
+        .stdout(predicate::str::contains("--version"))
+        .stdout(predicate::str::contains("--with"))
+        .stdout(predicate::str::contains("--all-depths"));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_run_launches_one_modern_shell_with_multiple_packages() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    let bin_path = dir.path().join("bin");
+    let capture_path = dir.path().join("capture.txt");
+    create_test_db(&db_path);
+    std::fs::create_dir(&bin_path).unwrap();
+    install_fake_nix_commands(&bin_path);
+
+    nxv()
+        .args([
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "run",
+            "python",
+            "3.11",
+            "--with",
+            "nodejs@20",
+        ])
+        .env("PATH", prepend_path(&bin_path))
+        .env("NXV_TEST_CAPTURE", &capture_path)
+        .assert()
+        .success()
+        .stderr(
+            predicate::str::contains("Resolved python@3.11 -> python 3.11.0").and(
+                predicate::str::contains("Resolved nodejs@20 -> nodejs 20.0.0"),
+            ),
+        );
+
+    let capture = std::fs::read_to_string(capture_path).unwrap();
+    assert!(capture.contains("program=nix\n"));
+    assert!(capture.contains("arg=shell\n"));
+    assert!(capture.contains("arg=nixpkgs/def1234567890#python\n"));
+    assert!(capture.contains("arg=nixpkgs/vwx1234567890#nodejs\n"));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_run_resolves_through_remote_backend() {
+    use mockito::Matcher;
+
+    let dir = tempdir().unwrap();
+    let bin_path = dir.path().join("bin");
+    let capture_path = dir.path().join("capture.txt");
+    std::fs::create_dir(&bin_path).unwrap();
+    install_fake_nix_commands(&bin_path);
+
+    let mut server = mockito::Server::new();
+    let response = serde_json::json!({
+        "data": [{
+            "id": 1,
+            "name": "python3",
+            "version": "3.11.9",
+            "first_commit_hash": "remote-first",
+            "first_commit_date": "2024-01-01T00:00:00Z",
+            "last_commit_hash": "remote-last",
+            "last_commit_date": "2024-02-01T00:00:00Z",
+            "attribute_path": "python311",
+            "description": "Python",
+            "license": ["Python-2.0"],
+            "homepage": "https://python.org",
+            "maintainers": [],
+            "platforms": ["x86_64-linux"],
+            "source_path": null,
+            "known_vulnerabilities": null
+        }],
+        "meta": {
+            "total": 1,
+            "limit": 1,
+            "offset": 0,
+            "has_more": false
+        }
+    });
+    let _search_mock = server
+        .mock("GET", "/api/v1/search")
+        .match_query(Matcher::AllOf(vec![
+            Matcher::UrlEncoded("q".into(), "python".into()),
+            Matcher::UrlEncoded("version".into(), "3.11".into()),
+            Matcher::UrlEncoded("limit".into(), "1".into()),
+        ]))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(response.to_string())
+        .create();
+
+    nxv()
+        .args(["run", "python", "3.11"])
+        .env("NXV_API_URL", server.url())
+        .env("PATH", prepend_path(&bin_path))
+        .env("NXV_TEST_CAPTURE", &capture_path)
+        .assert()
+        .success();
+
+    let capture = std::fs::read_to_string(capture_path).unwrap();
+    assert!(capture.contains("program=nix\n"));
+    assert!(capture.contains("arg=nixpkgs/remote-last#python311\n"));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_run_uses_one_legacy_shell_for_mixed_eras() {
+    use rusqlite::Connection;
+
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    let bin_path = dir.path().join("bin");
+    let capture_path = dir.path().join("capture.txt");
+    create_test_db(&db_path);
+    Connection::open(&db_path)
+        .unwrap()
+        .execute(
+            "INSERT INTO package_versions
+             (name, version, first_commit_hash, first_commit_date, last_commit_hash,
+              last_commit_date, attribute_path, description)
+             VALUES ('legacy-1.0', '1.0', 'old-first', 1500000000, 'old-last',
+                     1500000100, 'legacy', 'Legacy test package')",
+            [],
+        )
+        .unwrap();
+    std::fs::create_dir(&bin_path).unwrap();
+    install_fake_nix_commands(&bin_path);
+
+    nxv()
+        .args([
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "run",
+            "legacy",
+            "1.0",
+            "--exact",
+            "--with",
+            "nodejs@20",
+        ])
+        .env("PATH", prepend_path(&bin_path))
+        .env("NXV_TEST_CAPTURE", &capture_path)
+        .assert()
+        .success();
+
+    let capture = std::fs::read_to_string(capture_path).unwrap();
+    assert!(capture.contains("program=nix-shell\n"));
+    assert!(capture.contains("arg=-p\n"));
+    assert!(capture.contains("archive/old-last.tar.gz"));
+    assert!(capture.contains("archive/vwx1234567890.tar.gz"));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_run_resolves_all_packages_before_launching() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    let bin_path = dir.path().join("bin");
+    let capture_path = dir.path().join("capture.txt");
+    create_test_db(&db_path);
+    std::fs::create_dir(&bin_path).unwrap();
+    install_fake_nix_commands(&bin_path);
+
+    nxv()
+        .args([
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "run",
+            "python",
+            "--with",
+            "definitely-missing",
+        ])
+        .env("PATH", prepend_path(&bin_path))
+        .env("NXV_TEST_CAPTURE", &capture_path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "unable to resolve package specification `definitely-missing`",
+        ));
+
+    assert!(
+        !capture_path.exists(),
+        "Nix launched before all queries resolved"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_run_propagates_shell_exit_status_and_insecure_environment() {
+    use rusqlite::Connection;
+
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    let bin_path = dir.path().join("bin");
+    let capture_path = dir.path().join("capture.txt");
+    create_test_db(&db_path);
+    Connection::open(&db_path)
+        .unwrap()
+        .execute(
+            "UPDATE package_versions
+             SET known_vulnerabilities = '[\"CVE-test\"]'
+             WHERE attribute_path = 'firefox'",
+            [],
+        )
+        .unwrap();
+    std::fs::create_dir(&bin_path).unwrap();
+    install_fake_nix_commands(&bin_path);
+
+    nxv()
+        .args([
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "run",
+            "firefox",
+            "--exact",
+        ])
+        .env("PATH", prepend_path(&bin_path))
+        .env("NXV_TEST_CAPTURE", &capture_path)
+        .env("NXV_TEST_EXIT_CODE", "42")
+        .assert()
+        .code(42)
+        .stderr(predicate::str::contains("known vulnerabilities"));
+
+    let capture = std::fs::read_to_string(capture_path).unwrap();
+    assert!(capture.contains("allow_insecure=1\n"));
+    assert!(capture.contains("arg=--impure\n"));
 }
 
 #[test]

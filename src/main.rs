@@ -10,6 +10,7 @@ mod error;
 mod output;
 mod paths;
 mod remote;
+mod run;
 mod search;
 mod self_update;
 mod skill;
@@ -65,6 +66,7 @@ fn main() {
 
     let result = match &cli.command {
         Commands::Search(args) => cmd_search(&cli, args),
+        Commands::Run(args) => cmd_run(&cli, args),
         Commands::Update(args) => cmd_update(&cli, args),
         Commands::Sync(args) => cmd_sync(&cli, args),
         Commands::Info(args) => cmd_pkg_info(&cli, args),
@@ -109,6 +111,70 @@ fn main() {
         }
         std::process::exit(1);
     }
+}
+
+/// Resolve package queries and replace nxv with a pinned Nix shell.
+fn cmd_run(cli: &Cli, args: &cli::RunArgs) -> Result<()> {
+    use crate::search::{SearchOptions, SortOrder};
+
+    if args.all_depths && args.get_version().is_none() {
+        anyhow::bail!("--all-depths requires a version filter for the primary package");
+    }
+
+    let backend = get_backend_with_prompt(cli)?;
+    let specs = args.package_specs();
+    let mut packages = Vec::with_capacity(specs.len());
+
+    for spec in &specs {
+        let result = backend.search(&SearchOptions {
+            query: spec.package.clone(),
+            version: spec.version.clone(),
+            exact: args.exact,
+            all_depths: args.all_depths && spec.version.is_some(),
+            desc: false,
+            license: None,
+            sort: SortOrder::Relevance,
+            reverse: false,
+            full: false,
+            limit: 1,
+            offset: 0,
+        })?;
+
+        let Some(package) = result.data.into_iter().next() else {
+            if !cli.quiet {
+                if let Some(resolution) = result.resolution {
+                    print_version_search_miss(&spec.package, &resolution);
+                } else {
+                    eprintln!("No packages found matching '{}'", spec.package);
+                }
+            }
+            anyhow::bail!("unable to resolve package specification `{spec}`");
+        };
+
+        if !cli.quiet {
+            eprintln!(
+                "Resolved {} -> {} {} ({})",
+                spec,
+                package.attribute_path,
+                package.version,
+                package.last_commit_short()
+            );
+        }
+        packages.push(package);
+    }
+
+    let insecure: Vec<_> = packages
+        .iter()
+        .filter(|package| package.is_insecure())
+        .collect();
+    if !cli.quiet && !insecure.is_empty() {
+        eprintln!("Warning: selected package versions have known vulnerabilities:");
+        for package in insecure {
+            eprintln!("  {} {}", package.attribute_path, package.version);
+        }
+    }
+
+    run::ShellInvocation::from_packages(&packages)?.execute()
 }
 
 /// Selects and initializes the appropriate backend based on the `NXV_API_URL` environment variable.

@@ -54,7 +54,7 @@ _nxv_with_packages() {
 
     # Check if we're completing a package name argument
     case "${words[1]}" in
-        search|info|history)
+        search|info|history|run)
             # First positional argument after the command is the package name
             if [[ $cword -eq 2 ]] && [[ "$cur" != -* ]]; then
                 _nxv_complete_packages
@@ -62,6 +62,12 @@ _nxv_with_packages() {
             fi
             ;;
     esac
+
+    # Every --with value on `nxv run` starts another package query.
+    if [[ "${words[1]}" == "run" ]] && [[ "$prev" == "--with" ]] && [[ "$cur" != -* ]]; then
+        _nxv_complete_packages
+        return
+    fi
 
     # Fall back to default completion
     _nxv
@@ -119,9 +125,15 @@ _nxv_enhanced() {
     local curcontext="$curcontext" state line
     typeset -A opt_args
 
-    # Check if we're completing a package name argument for search/info/history
+    # Check if we're completing a package name argument for search/info/history/run
     # words[1] = command, words[2] = subcommand, words[3] = package argument
-    if [[ ${words[2]} == (search|info|history) ]] && [[ $CURRENT -eq 3 ]]; then
+    if [[ ${words[2]} == (search|info|history|run) ]] && [[ $CURRENT -eq 3 ]]; then
+        _nxv_packages
+        return
+    fi
+
+    # Every --with value on `nxv run` starts another package query.
+    if [[ ${words[2]} == run ]] && [[ ${words[CURRENT-1]} == --with ]]; then
         _nxv_packages
         return
     fi
@@ -154,10 +166,22 @@ function __nxv_complete_packages
     $cmd complete-package "$token" --limit 100 2>/dev/null
 end
 
+function __nxv_run_primary_package
+    set -l tokens (commandline -opc)
+    test (count $tokens) -eq 2; and test "$tokens[2]" = run
+end
+
+function __nxv_run_with_package
+    set -l tokens (commandline -opc)
+    test (count $tokens) -ge 3; and test "$tokens[2]" = run; and test "$tokens[-1]" = --with
+end
+
 # Add package completions for search, info, and history commands
 complete -c nxv -n "__fish_seen_subcommand_from search" -f -a "(__nxv_complete_packages)"
 complete -c nxv -n "__fish_seen_subcommand_from info" -f -a "(__nxv_complete_packages)"
 complete -c nxv -n "__fish_seen_subcommand_from history" -f -a "(__nxv_complete_packages)"
+complete -c nxv -n "__nxv_run_primary_package" -f -a "(__nxv_complete_packages)"
+complete -c nxv -n "__nxv_run_with_package" -f -a "(__nxv_complete_packages)"
 "#,
     )
 }
@@ -177,6 +201,8 @@ mod tests {
         // Should contain custom package completion
         assert!(output.contains("_nxv_complete_packages"));
         assert!(output.contains("complete-package"));
+        assert!(output.contains("search|info|history|run"));
+        assert!(output.contains(r#""$prev" == "--with""#));
     }
 
     #[test]
@@ -190,6 +216,8 @@ mod tests {
         // Should contain custom package completion
         assert!(output.contains("_nxv_packages"));
         assert!(output.contains("complete-package"));
+        assert!(output.contains("(search|info|history|run)"));
+        assert!(output.contains("words[CURRENT-1]"));
     }
 
     #[test]
@@ -203,5 +231,7 @@ mod tests {
         // Should contain custom package completion
         assert!(output.contains("__nxv_complete_packages"));
         assert!(output.contains("complete-package"));
+        assert!(output.contains("__nxv_run_primary_package"));
+        assert!(output.contains("__nxv_run_with_package"));
     }
 }

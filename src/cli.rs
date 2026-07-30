@@ -2,6 +2,7 @@
 
 use crate::output::OutputFormat;
 use crate::paths;
+use crate::run::PackageSpec;
 use crate::search::SortOrder;
 use crate::skill::Agent;
 use crate::version;
@@ -43,6 +44,9 @@ pub struct Cli {
 pub enum Commands {
     /// Search for package versions.
     Search(SearchArgs),
+
+    /// Open a shell with resolved package versions.
+    Run(RunArgs),
 
     /// Update nxv to the latest application release.
     ///
@@ -316,6 +320,51 @@ impl SearchArgs {
     /// Get the version filter from either positional or option argument.
     pub fn get_version(&self) -> Option<&str> {
         self.version.as_deref().or(self.version_opt.as_deref())
+    }
+}
+
+/// Arguments for the run command.
+#[derive(Parser, Debug)]
+pub struct RunArgs {
+    /// Package name or attribute path to resolve.
+    pub package: String,
+
+    /// Version to filter by (positional, prefix match).
+    #[arg(conflicts_with = "version_opt")]
+    pub version: Option<String>,
+
+    /// Filter by version (prefix match, alternative to positional).
+    #[arg(short = 'V', long = "version", conflicts_with = "version")]
+    pub version_opt: Option<String>,
+
+    /// Add another package, optionally with an @VERSION suffix.
+    #[arg(long = "with", value_name = "PACKAGE[@VERSION]")]
+    pub additional: Vec<PackageSpec>,
+
+    /// Perform exact attribute-path matching.
+    #[arg(short, long)]
+    pub exact: bool,
+
+    /// Include nested attribute-path depths in version searches.
+    #[arg(long, conflicts_with = "exact")]
+    pub all_depths: bool,
+}
+
+impl RunArgs {
+    /// Get the primary package version from either positional or option argument.
+    pub fn get_version(&self) -> Option<&str> {
+        self.version.as_deref().or(self.version_opt.as_deref())
+    }
+
+    /// Return the primary query followed by all `--with` queries.
+    pub fn package_specs(&self) -> Vec<PackageSpec> {
+        let mut specs = Vec::with_capacity(1 + self.additional.len());
+        specs.push(PackageSpec::new(
+            self.package.clone(),
+            self.get_version().map(str::to_string),
+        ));
+        specs.extend(self.additional.iter().cloned());
+        specs
     }
 }
 
@@ -748,6 +797,50 @@ mod tests {
         // Cannot use both positional version and -V/--version option
         let result = Cli::try_parse_from(["nxv", "search", "python", "2.7", "-V", "3.11"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_run_command_with_additional_packages() {
+        let args = Cli::try_parse_from([
+            "nxv",
+            "run",
+            "python",
+            "2.7",
+            "--with",
+            "nodejs@15",
+            "--with",
+            "jq",
+            "--all-depths",
+        ])
+        .unwrap();
+
+        match args.command {
+            Commands::Run(run) => {
+                assert_eq!(run.package, "python");
+                assert_eq!(run.get_version(), Some("2.7"));
+                assert_eq!(
+                    run.additional,
+                    [
+                        PackageSpec::new("nodejs".to_string(), Some("15".to_string())),
+                        PackageSpec::new("jq".to_string(), None),
+                    ]
+                );
+                assert!(run.all_depths);
+                assert!(!run.exact);
+            }
+            _ => panic!("Expected Run command"),
+        }
+    }
+
+    #[test]
+    fn test_run_version_option_and_positional_conflict() {
+        assert!(Cli::try_parse_from(["nxv", "run", "python", "2.7", "-V", "3.11"]).is_err());
+    }
+
+    #[test]
+    fn test_run_rejects_malformed_additional_specs() {
+        assert!(Cli::try_parse_from(["nxv", "run", "python", "--with", "@15"]).is_err());
+        assert!(Cli::try_parse_from(["nxv", "run", "python", "--with", "nodejs@"]).is_err());
     }
 
     #[test]

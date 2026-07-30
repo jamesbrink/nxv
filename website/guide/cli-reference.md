@@ -77,6 +77,49 @@ suggestions and indicate when deeper matches are available. Successful JSON
 searches keep returning an array of package rows; an empty miss emits no stdout.
 Diagnostics stay on stderr in either case.
 
+### run
+
+Resolve indexed package versions and open one interactive shell containing
+them.
+
+```bash
+nxv run <PACKAGE> [VERSION] [options]
+```
+
+**Options:**
+
+| Flag                         | Description                                   |
+| ---------------------------- | --------------------------------------------- |
+| `-V, --version <VERSION>`    | Primary version (alternative to positional)   |
+| `-e, --exact`                | Match exact attribute paths for every package |
+| `--all-depths`               | Include nested depths in version searches     |
+| `--with <PACKAGE[@VERSION]>` | Add another package; may be repeated           |
+
+**Examples:**
+
+```bash
+# Open a shell with the best Python 2.7 match
+nxv run python 2.7
+
+# Combine independently pinned package versions
+nxv run python 3.11 --with nodejs@20 --with jq
+
+# Require exact attribute paths
+nxv run python311 3.11 --exact --with nodejs@20
+```
+
+Each query prefers an exact attribute match, then falls back to the same
+relevance and shallowest-depth rules as [`search`](#search). nxv resolves every
+package before launching anything, selects the first deterministic match, and
+pins its latest observed commit. Modern revisions are passed as separate
+installables to one `nix shell` process. If any selected revision predates
+flakes, nxv instead creates one compatible `nix-shell -p` environment using
+pinned `fetchTarball` expressions. On Apple Silicon, pre-flake environments are
+evaluated as `x86_64-darwin` and require Rosetta.
+
+Known-insecure selections are called out before launch and automatically receive
+the Nix setting needed to evaluate them. If any query misses, no shell starts.
+
 ### info
 
 Show detailed information about a specific package version.

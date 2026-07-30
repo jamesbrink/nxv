@@ -52,16 +52,33 @@ _nxv_with_packages() {
     local cur prev words cword
     _init_completion || return
 
+    local subcommand="" subcommand_index=-1 i
+    for ((i = 1; i < cword; i++)); do
+        case "${words[i]}" in
+            search|info|history|run)
+                subcommand="${words[i]}"
+                subcommand_index=$i
+                break
+                ;;
+        esac
+    done
+
     # Check if we're completing a package name argument
-    case "${words[1]}" in
-        search|info|history)
+    case "$subcommand" in
+        search|info|history|run)
             # First positional argument after the command is the package name
-            if [[ $cword -eq 2 ]] && [[ "$cur" != -* ]]; then
+            if [[ $cword -eq $((subcommand_index + 1)) ]] && [[ "$cur" != -* ]]; then
                 _nxv_complete_packages
                 return
             fi
             ;;
     esac
+
+    # Every --with value on `nxv run` starts another package query.
+    if [[ "$subcommand" == "run" ]] && [[ "$prev" == "--with" ]] && [[ "$cur" != -* ]]; then
+        _nxv_complete_packages
+        return
+    fi
 
     # Fall back to default completion
     _nxv
@@ -118,10 +135,24 @@ _nxv_packages() {
 _nxv_enhanced() {
     local curcontext="$curcontext" state line
     typeset -A opt_args
+    local subcommand="" subcommand_index=0 i
 
-    # Check if we're completing a package name argument for search/info/history
-    # words[1] = command, words[2] = subcommand, words[3] = package argument
-    if [[ ${words[2]} == (search|info|history) ]] && [[ $CURRENT -eq 3 ]]; then
+    for ((i = 2; i < CURRENT; i++)); do
+        if [[ ${words[i]} == (search|info|history|run) ]]; then
+            subcommand="${words[i]}"
+            subcommand_index=$i
+            break
+        fi
+    done
+
+    # Check if we're completing a package name argument for search/info/history/run
+    if [[ -n "$subcommand" ]] && [[ $CURRENT -eq $((subcommand_index + 1)) ]]; then
+        _nxv_packages
+        return
+    fi
+
+    # Every --with value on `nxv run` starts another package query.
+    if [[ "$subcommand" == run ]] && [[ ${words[CURRENT-1]} == --with ]]; then
         _nxv_packages
         return
     fi
@@ -140,8 +171,22 @@ compdef _nxv_enhanced nxv-indexer
 
 /// Generate fish completions with dynamic package completion.
 fn generate_fish<W: Write>(buf: &mut W, base: &str) -> std::io::Result<()> {
-    // Write base completions first
-    buf.write_all(base.as_bytes())?;
+    // Attach dynamic candidates directly to clap's required `--with` value.
+    // Fish suppresses general argument completions while satisfying an option
+    // marked `--require-parameter`, so a separate completion rule is not enough.
+    let modified_base = base
+        .lines()
+        .map(|line| {
+            if line.contains("__fish_nxv_using_subcommand run") && line.contains("-l with ") {
+                format!("{line} -f -a \"(__nxv_complete_packages)\"")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    buf.write_all(modified_base.as_bytes())?;
+    buf.write_all(b"\n")?;
 
     // Add custom package completion function
     buf.write_all(
@@ -154,10 +199,17 @@ function __nxv_complete_packages
     $cmd complete-package "$token" --limit 100 2>/dev/null
 end
 
+function __nxv_run_primary_package
+    set -l tokens (commandline -opc)
+    set -l run_index (contains -i -- run $tokens)
+    test -n "$run_index"; and test (count $tokens) -eq $run_index
+end
+
 # Add package completions for search, info, and history commands
 complete -c nxv -n "__fish_seen_subcommand_from search" -f -a "(__nxv_complete_packages)"
 complete -c nxv -n "__fish_seen_subcommand_from info" -f -a "(__nxv_complete_packages)"
 complete -c nxv -n "__fish_seen_subcommand_from history" -f -a "(__nxv_complete_packages)"
+complete -c nxv -n "__nxv_run_primary_package" -f -a "(__nxv_complete_packages)"
 "#,
     )
 }
@@ -177,6 +229,9 @@ mod tests {
         // Should contain custom package completion
         assert!(output.contains("_nxv_complete_packages"));
         assert!(output.contains("complete-package"));
+        assert!(output.contains("search|info|history|run"));
+        assert!(output.contains(r#""$prev" == "--with""#));
+        assert!(output.contains("subcommand_index"));
     }
 
     #[test]
@@ -190,6 +245,9 @@ mod tests {
         // Should contain custom package completion
         assert!(output.contains("_nxv_packages"));
         assert!(output.contains("complete-package"));
+        assert!(output.contains("(search|info|history|run)"));
+        assert!(output.contains("words[CURRENT-1]"));
+        assert!(output.contains("subcommand_index"));
     }
 
     #[test]
@@ -203,5 +261,9 @@ mod tests {
         // Should contain custom package completion
         assert!(output.contains("__nxv_complete_packages"));
         assert!(output.contains("complete-package"));
+        assert!(output.contains("__nxv_run_primary_package"));
+        assert!(output.contains(r#"-l with -d 'Add another package"#));
+        assert!(output.contains(r#"-r -f -a "(__nxv_complete_packages)""#));
+        assert!(output.contains("contains -i -- run"));
     }
 }

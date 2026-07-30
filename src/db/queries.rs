@@ -83,7 +83,7 @@ fn is_plain_nix_identifier(segment: &str) -> bool {
 /// Prepare an attribute path for command emission: re-quote segments that
 /// aren't valid bare Nix identifiers. Returns the printable path and whether
 /// any segment needed quoting (the caller must then shell-quote the ref).
-fn nix_attr_for_command(attr: &str) -> (String, bool) {
+pub(crate) fn nix_attr_for_command(attr: &str) -> (String, bool) {
     let mut quoted_any = false;
     let parts: Vec<String> = attr
         .split('.')
@@ -92,7 +92,13 @@ fn nix_attr_for_command(attr: &str) -> (String, bool) {
                 segment.to_string()
             } else {
                 quoted_any = true;
-                format!("\"{}\"", segment.replace('\\', "\\\\").replace('"', "\\\""))
+                format!(
+                    "\"{}\"",
+                    segment
+                        .replace('\\', "\\\\")
+                        .replace('"', "\\\"")
+                        .replace("${", "\\${")
+                )
             }
         })
         .collect();
@@ -2452,6 +2458,14 @@ mod tests {
         // 2023-11-14 - after flakes
         let pkg = make_test_package(Utc.timestamp_opt(1700000000, 0).unwrap(), None);
         assert!(!pkg.predates_flakes());
+    }
+
+    #[test]
+    fn test_nix_attr_for_command_escapes_string_interpolation() {
+        let (attribute, quoted) = nix_attr_for_command(r#"set.${builtins.readFile "/secret"}"#);
+
+        assert!(quoted);
+        assert_eq!(attribute, r#"set."\${builtins"."readFile \"/secret\"}""#);
     }
 
     #[test]

@@ -39,6 +39,7 @@ Or visit **<https://nxv.urandom.io>** to search in your browser.
 ## Features
 
 - **Fast search** — Bloom filter for instant "not found" responses, SQLite FTS5 for full-text search
+- **Instant environments** — Resolve historical versions and jump straight into a pinned shell
 - **Version history** — See when each version was introduced and when it was superseded
 - **Multiple interfaces** — CLI tool, HTTP API server with web UI, or query via remote API
 - **NixOS module** — Run as a systemd service with automatic index updates
@@ -131,6 +132,21 @@ nxv search python --exact            # Exact name match only
 nxv search "json parser" --desc      # Search descriptions (FTS)
 nxv search python --format json      # JSON output
 ```
+
+### Jump Into a Package Shell
+
+```bash
+nxv run python 2.7                   # Resolve Python 2.7 and open a shell
+nxv run python 3.11 --with jq        # Add the latest jq
+nxv run python 3.11 --with nodejs@20 # Pin multiple package versions
+```
+
+`nxv run` prefers an exact attribute match, then falls back to the same
+package/version scope and relevance rules as `search`. It opens one shell with
+every resolved package. Modern revisions use `nix shell`; environments
+containing a pre-flake revision automatically use a compatible pinned
+`nix-shell` expression. On Apple Silicon, that fallback evaluates packages as
+`x86_64-darwin` and requires Rosetta.
 
 ### Package Info & History
 

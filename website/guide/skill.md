@@ -94,6 +94,8 @@ directly:
 ```
 /nxv search python 2.7
 /nxv search python 2.7.3 --all-depths
+/nxv run python 2.7
+/nxv run python 3.11 --with nodejs@20 --with jq
 /nxv info python311 3.11.4
 /nxv history nodejs-15_x
 ```
@@ -104,6 +106,8 @@ question matches its description:
 > "Which nixpkgs commit had python 2.7?"
 >
 > "Give me the `nix shell` command for nodejs 15.14."
+>
+> "Open a shell with Python 3.11 and Node.js 20."
 >
 > "When was ruby 2.6 last in nixpkgs?"
 
@@ -132,6 +136,19 @@ attribute-path tier first. If no version matches, API consumers should inspect
 `all_depths=true` only when nested package-set matches are intentional.
 Successful CLI JSON searches return an array; an empty miss emits no stdout,
 with the miss explanation written to stderr.
+
+For an interactive environment, agents can skip command construction entirely:
+
+```bash
+nxv run python 2.7
+nxv run python 3.11 --with nodejs@20 --with jq
+```
+
+`run` resolves every query first, prefers an exact attribute before falling
+back to deterministic search relevance, and launches one pinned shell. It also
+handles pre-flake revisions and known insecure packages using the appropriate
+Nix invocation. On Apple Silicon, pre-flake shells use `x86_64-darwin` and
+require Rosetta.
 
 Example agent pattern — generate a `nix shell` invocation for a specific version
 directly from the public API:

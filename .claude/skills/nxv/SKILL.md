@@ -16,6 +16,8 @@ nxv search python                        # All python packages (most recent per 
 nxv search python 2.7                    # Filter by version (prefix match)
 nxv search python --exact                # Exact attribute name only
 nxv search "json parser" --desc          # Full-text search package descriptions
+nxv run python 2.7                       # Resolve and open a pinned shell
+nxv run python 3.11 --with nodejs@20     # Multi-package shell
 nxv info python311                       # Detailed info for current version
 nxv info python311 3.11.4                # Detailed info for specific version
 nxv history python311                    # Version timeline (first/last seen)
@@ -35,7 +37,7 @@ nxv skill list                           # Agents, skill paths, install status
 
 Parse `$ARGUMENTS` to determine the action:
 
-- If arguments look like a **subcommand** (`search`, `info`, `history`, `stats`, `update`, `sync`, `serve`, `completions`, `skill`, and indexer-only `index`, `dedupe`, `publish`, `keygen`), run that subcommand.
+- If arguments look like a **subcommand** (`search`, `run`, `info`, `history`, `stats`, `update`, `sync`, `serve`, `completions`, `skill`, and indexer-only `index`, `dedupe`, `publish`, `keygen`), run that subcommand.
 - If arguments look like a **package name** (e.g. `python`, `nodejs 15`, `ruby 2.6`), default to `nxv search`.
 - If arguments look like a **question** ("when was X added", "which commit has Y"), pick `search` or `history` accordingly.
 - If no arguments, run `nxv stats` to give the user a quick health check of their index.
@@ -201,7 +203,24 @@ Note the field names differ from search (`first_seen`/`last_seen`, not `first_co
 
 ## Using a Found Version
 
-The whole point. Take a `first_commit_hash` (or `last_commit_hash`) from search/history output and feed it to Nix:
+The quickest interactive path is `nxv run`, which resolves the same package and
+version query as `search` and opens one pinned shell:
+
+```bash
+nxv run python 2.7
+nxv run python 3.11 --with nodejs@20 --with jq
+```
+
+Additional `--with` values use `PACKAGE@VERSION` when a version is needed.
+nxv resolves every query before launch, prefers an exact attribute match before
+falling back to search's deterministic relevance rules, and uses each result's
+latest observed commit. Modern revisions are combined in one `nix shell`; if
+any result predates flakes, nxv uses one compatible `nix-shell -p` environment
+instead. On Apple Silicon, the pre-flake fallback evaluates packages as
+`x86_64-darwin` and requires Rosetta.
+
+For manual command construction, take a `first_commit_hash` (or
+`last_commit_hash`) from search/history output and feed it to Nix:
 
 ```bash
 # Drop into a shell with that exact version
@@ -490,7 +509,7 @@ curl -s "https://nxv.urandom.io/api/v1/stats" | \
 
 ## Practical Tips
 
-- **Just want a python 2.7 shell?** `nxv search python 2.7 --exact --format json | jq -r '.[0].first_commit_hash'`, then `nix shell nixpkgs/<hash>#python`.
+- **Just want a python 2.7 shell?** Run `nxv run python 2.7`; nxv resolves the best match and handles old pre-flake revisions automatically.
 - **Use `--exact`** when one exact attribute is required. Default version searches stay within the shallowest matching tier; use `--all-depths` only when nested variants are intentional.
 - **Use `--desc`** for fuzzy intent ("a package that does X") instead of exact name searches.
 - **Set `NXV_API_URL=https://nxv.urandom.io`** to skip the ~220MB index download entirely if you only need occasional lookups.

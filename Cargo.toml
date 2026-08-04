@@ -1,6 +1,6 @@
 [package]
 name = "nxv"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2024"
 # rusqlite 0.40 -> libsqlite3-sys 0.38 uses cfg_select!, stable since 1.95
 # (libsqlite3-sys declares no rust-version itself, so without this older

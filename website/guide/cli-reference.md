@@ -9,7 +9,7 @@ Complete documentation for all nxv commands and options.
 | `--db-path <DB_PATH>`  | Path to the index database (default: platform data dir) |
 | `-v, --verbose...`     | Enable verbose output (`-v` info, `-vv` debug)          |
 | `-q, --quiet`          | Suppress all output except errors                       |
-| `--no-color`           | Disable colored output (also: `NO_COLOR` env)           |
+| `--no-color`           | Disable colored output (also: any non-empty `NO_COLOR`) |
 | `--api-timeout <SECS>` | API request timeout in seconds (default: 30)            |
 | `-h, --help`           | Print help                                              |
 | `-V, --version`        | Print version                                           |

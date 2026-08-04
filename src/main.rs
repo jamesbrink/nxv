@@ -58,8 +58,10 @@ fn main() {
     // literal `~` directory.
     cli.db_path = paths::expand_tilde(&cli.db_path);
 
-    // Handle no-color flag
-    if cli.no_color {
+    // NO_COLOR follows the cross-CLI convention: any non-empty value disables
+    // color, regardless of its contents. Parse it separately from clap so
+    // conventional values such as NO_COLOR=1 are not treated as bool literals.
+    if cli.no_color || no_color_env_disables(std::env::var_os("NO_COLOR").as_deref()) {
         // Disable colors globally - this affects if_supports_color() calls
         owo_colors::set_override(false);
     }
@@ -111,6 +113,10 @@ fn main() {
         }
         std::process::exit(1);
     }
+}
+
+fn no_color_env_disables(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|value| !value.is_empty())
 }
 
 /// Resolve package queries and replace nxv with a pinned Nix shell.
@@ -1592,4 +1598,23 @@ fn cmd_serve(cli: &Cli, args: &cli::ServeArgs) -> Result<()> {
     rt.block_on(run_server(config))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod no_color_tests {
+    use super::no_color_env_disables;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn non_empty_no_color_values_disable_color_regardless_of_contents() {
+        for value in ["1", "0", "true", "false", "always"] {
+            assert!(no_color_env_disables(Some(OsStr::new(value))));
+        }
+    }
+
+    #[test]
+    fn missing_or_empty_no_color_does_not_disable_color() {
+        assert!(!no_color_env_disables(None));
+        assert!(!no_color_env_disables(Some(OsStr::new(""))));
+    }
 }

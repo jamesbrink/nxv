@@ -28,7 +28,7 @@ pub struct Cli {
     pub quiet: bool,
 
     /// Disable colored output.
-    #[arg(long, env = "NO_COLOR")]
+    #[arg(long)]
     pub no_color: bool,
 
     /// API request timeout in seconds (when using remote backend).
@@ -411,7 +411,12 @@ pub struct SyncArgs {
     pub manifest_url: Option<String>,
 
     /// Skip manifest signature verification (INSECURE - use only for development/testing).
-    #[arg(long, env = "NXV_SKIP_VERIFY")]
+    #[arg(
+        long,
+        env = "NXV_SKIP_VERIFY",
+        action = clap::ArgAction::SetTrue,
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
     pub skip_verify: bool,
 
     /// Custom public key for manifest signature verification (for self-hosted indexes).
@@ -886,6 +891,45 @@ mod tests {
             }
             _ => panic!("Expected Sync command"),
         }
+    }
+
+    #[test]
+    fn test_sync_skip_verify_flag() {
+        let args = Cli::try_parse_from(["nxv", "sync", "--skip-verify"]).unwrap();
+        match args.command {
+            Commands::Sync(sync) => assert!(sync.skip_verify),
+            _ => panic!("Expected Sync command"),
+        }
+    }
+
+    #[test]
+    fn test_sync_skip_verify_boolish_value_parser() {
+        use clap::builder::TypedValueParser;
+
+        let command = clap::Command::new("nxv");
+        let parser = clap::builder::BoolishValueParser::new();
+        for (value, expected) in [
+            ("1", true),
+            ("true", true),
+            ("yes", true),
+            ("on", true),
+            ("0", false),
+            ("false", false),
+            ("no", false),
+            ("off", false),
+        ] {
+            assert_eq!(
+                parser
+                    .parse_ref(&command, None, std::ffi::OsStr::new(value))
+                    .unwrap(),
+                expected
+            );
+        }
+        assert!(
+            parser
+                .parse_ref(&command, None, std::ffi::OsStr::new("sometimes"))
+                .is_err()
+        );
     }
 
     #[test]

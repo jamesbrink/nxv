@@ -571,9 +571,9 @@ The `manifest.json` format:
 | `NXV_MANIFEST_URL` | Custom manifest URL for index downloads |
 | `NXV_PUBLIC_KEY` | Custom public key for manifest verification (path or raw key) |
 | `NXV_SECRET_KEY` | Secret key for manifest signing (path or raw key content) |
-| `NXV_SKIP_VERIFY` | Skip manifest signature verification (set to any value) |
+| `NXV_SKIP_VERIFY` | Skip signature verification with `1`/`true`/`yes`/`on`; `0`/`false`/`no`/`off` keep it enabled |
 | `NXV_API_TIMEOUT` | API request timeout in seconds (default: 30) |
-| `NO_COLOR` | Disable colored output |
+| `NO_COLOR` | Disable colored output when set to any non-empty value |
 | `NXV_HOST` | `nxv serve` bind address (default: `127.0.0.1`) |
 | `NXV_PORT` | `nxv serve` port (default: `8080`) |
 | `NXV_RATE_LIMIT` | `nxv serve` max requests per second per IP |

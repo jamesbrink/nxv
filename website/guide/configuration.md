@@ -24,11 +24,11 @@ the index.
 
 ### Index Updates
 
-| Variable           | Description                                 | Default         |
-| ------------------ | ------------------------------------------- | --------------- |
-| `NXV_MANIFEST_URL` | Custom manifest URL for index downloads     | GitHub releases |
-| `NXV_PUBLIC_KEY`   | Custom public key for manifest verification | Built-in key    |
-| `NXV_SKIP_VERIFY`  | Skip manifest signature verification        | `false`         |
+| Variable           | Description                                                                                     | Default         |
+| ------------------ | ----------------------------------------------------------------------------------------------- | --------------- |
+| `NXV_MANIFEST_URL` | Custom manifest URL for index downloads                                                         | GitHub releases |
+| `NXV_PUBLIC_KEY`   | Custom public key for manifest verification                                                     | Built-in key    |
+| `NXV_SKIP_VERIFY`  | Skip manifest signature verification with `1`/`true`/`yes`/`on`; `0`/`false`/`no`/`off` keep verification enabled | `false`         |
 
 These index variables apply to `nxv sync`. `nxv update` only updates the
 application and does not read index configuration.
@@ -62,9 +62,9 @@ These only apply to builds with the `indexer` feature:
 
 ### Output
 
-| Variable   | Description            | Default |
-| ---------- | ---------------------- | ------- |
-| `NO_COLOR` | Disable colored output | Not set |
+| Variable   | Description                                            | Default |
+| ---------- | ------------------------------------------------------ | ------- |
+| `NO_COLOR` | Disable colored output when set to any non-empty value | Not set |
 
 ## Data Directories
 

@@ -53,7 +53,7 @@ Every CLI invocation accepts:
 | `--db-path <PATH>`     | Path to the index database (default: platform data dir)     |
 | `-v, --verbose`        | `-v` info, `-vv` debug (SQL queries, HTTP requests)         |
 | `-q, --quiet`          | Suppress all output except errors                           |
-| `--no-color`           | Disable colored output (also honors `NO_COLOR`)             |
+| `--no-color`           | Disable colored output (also honors any non-empty `NO_COLOR`) |
 | `--api-timeout <SECS>` | API request timeout when using remote backend (default: 30) |
 
 ## Local vs Remote Backend
@@ -435,14 +435,14 @@ Most users never need these — they consume a pre-built published index via `nx
 | `NXV_MANIFEST_URL`   | Override the manifest URL used by `nxv sync`                           |
 | `NXV_PUBLIC_KEY`     | Public key for manifest verification (path or raw key)                 |
 | `NXV_SECRET_KEY`     | Secret key for `nxv publish --sign` (path or raw content)              |
-| `NXV_SKIP_VERIFY`    | Skip minisign signature check (INSECURE — dev/testing only)            |
+| `NXV_SKIP_VERIFY`    | `1`/`true`/`yes`/`on` skip; `0`/`false`/`no`/`off` do not (INSECURE)   |
 | `NXV_VERSION`        | Pin the version installed by `install.sh` (self-update targets latest) |
 | `NXV_HOST`           | `nxv serve` bind host                                                  |
 | `NXV_PORT`           | `nxv serve` listen port                                                |
 | `NXV_RATE_LIMIT`     | `nxv serve` per-IP rate limit (req/sec)                                |
 | `NXV_RATE_LIMIT_BURST` | `nxv serve` per-IP rate-limit burst size (default: 2x rate_limit)    |
 | `NXV_FRONTEND_DIR`   | `nxv serve` reads frontend assets from disk on every request (dev mode)|
-| `NO_COLOR`           | Disable ANSI colors                                                    |
+| `NO_COLOR`           | Disable ANSI colors when set to any non-empty value                    |
 
 ## Data Paths
 

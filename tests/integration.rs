@@ -1533,6 +1533,20 @@ fn test_no_color_option() {
 }
 
 #[test]
+fn test_no_color_environment_accepts_conventional_value() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    create_test_db(&db_path);
+
+    nxv()
+        .args(["--db-path", db_path.to_str().unwrap(), "search", "python"])
+        .env("NO_COLOR", "1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("python"));
+}
+
+#[test]
 fn test_verbose_conflicts_with_quiet() {
     nxv()
         .args(["-v", "-q", "stats"])
@@ -2721,6 +2735,7 @@ fn test_sync_fails_without_signature_when_verify_enabled() {
             "--manifest-url",
             &manifest_url,
         ])
+        .env("NXV_SKIP_VERIFY", "0")
         .assert()
         .failure()
         .stderr(
@@ -2797,17 +2812,17 @@ fn test_sync_skip_verify_shows_warning() {
     let bloom_path = dir.path().join("index.bloom");
     let manifest_url = format!("{}/manifest.json", server.url());
 
-    // Update with --skip-verify should succeed but show a warning
+    // NXV_SKIP_VERIFY=1 should succeed but show the same warning as --skip-verify.
     nxv()
         .args([
             "--db-path",
             db_path.to_str().unwrap(),
             "sync",
-            "--skip-verify",
             "--manifest-url",
             &manifest_url,
         ])
         .env("NXV_BLOOM_PATH", bloom_path.to_str().unwrap())
+        .env("NXV_SKIP_VERIFY", "1")
         .assert()
         .success()
         .stderr(predicate::str::contains(
@@ -2817,7 +2832,7 @@ fn test_sync_skip_verify_shows_warning() {
     // Database should be created
     assert!(
         db_path.exists(),
-        "Database should be created with --skip-verify"
+        "Database should be created with NXV_SKIP_VERIFY=1"
     );
 }
 

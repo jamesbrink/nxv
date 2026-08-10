@@ -295,7 +295,7 @@ in
           manifestArgs = lib.optionalString (cfg.manifestUrl != null) "--manifest-url ${cfg.manifestUrl}";
           publicKeyArgs = lib.optionalString (cfg.publicKey != null) "--public-key ${toString cfg.publicKey}";
           skipVerifyArgs = lib.optionalString cfg.skipVerify "--skip-verify";
-          updateArgs = lib.concatStringsSep " " (
+          syncArgs = lib.concatStringsSep " " (
             lib.filter (s: s != "") [
               manifestArgs
               publicKeyArgs
@@ -317,7 +317,7 @@ in
           ExecStartPre = pkgs.writeShellScript "nxv-bootstrap" ''
             if [ ! -f "${cfg.dataDir}/index.db" ]; then
               echo "Database not found, downloading index..."
-              ${cfg.package}/bin/nxv --db-path ${cfg.dataDir}/index.db update ${updateArgs}
+              ${cfg.package}/bin/nxv --db-path ${cfg.dataDir}/index.db sync ${syncArgs}
             fi
           '';
           ExecStart = ''
@@ -369,7 +369,7 @@ in
           manifestArgs = lib.optionalString (cfg.manifestUrl != null) "--manifest-url ${cfg.manifestUrl}";
           publicKeyArgs = lib.optionalString (cfg.publicKey != null) "--public-key ${toString cfg.publicKey}";
           skipVerifyArgs = lib.optionalString cfg.skipVerify "--skip-verify";
-          updateArgs = lib.concatStringsSep " " (
+          syncArgs = lib.concatStringsSep " " (
             lib.filter (s: s != "") [
               manifestArgs
               publicKeyArgs
@@ -381,7 +381,8 @@ in
           Type = "oneshot";
           User = cfg.user;
           Group = cfg.group;
-          ExecStart = "${cfg.package}/bin/nxv --db-path ${cfg.dataDir}/index.db update ${updateArgs}";
+          # `nxv update` self-updates the binary; `nxv sync` refreshes the index.
+          ExecStart = "${cfg.package}/bin/nxv --db-path ${cfg.dataDir}/index.db sync ${syncArgs}";
 
           # Hardening options
           NoNewPrivileges = true;

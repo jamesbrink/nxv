@@ -290,9 +290,7 @@ impl PackageVersion {
 
     /// Check if the package has known vulnerabilities.
     pub fn is_insecure(&self) -> bool {
-        self.known_vulnerabilities
-            .as_ref()
-            .is_some_and(|v| !v.is_empty() && v != "[]" && v != "null")
+        has_vulnerabilities(self.known_vulnerabilities.as_deref())
     }
 
     /// Get parsed known vulnerabilities as a vector of strings.
@@ -302,6 +300,16 @@ impl PackageVersion {
             .map(super::json_array::parse)
             .unwrap_or_default()
     }
+}
+
+/// Whether a stored `known_vulnerabilities` value represents a real advisory.
+///
+/// The column holds a JSON array, but nixpkgs eras and ingestion paths spell "no
+/// advisory" three different ways — SQL `NULL`, the empty string, `[]`, and the
+/// literal `null`. This is the single definition of "insecure"; the SQL in
+/// [`get_version_history`] mirrors it with matching `NOT IN` predicates.
+pub fn has_vulnerabilities(value: Option<&str>) -> bool {
+    value.is_some_and(|v| !v.is_empty() && v != "[]" && v != "null")
 }
 
 /// Per-channel snapshot ingestion coverage (schema v4 indexes).
@@ -771,32 +779,93 @@ pub fn get_last_occurrence(
     }
 }
 
-/// Version history entry: (version, first_seen, last_seen, is_insecure).
-pub type VersionHistoryEntry = (String, DateTime<Utc>, DateTime<Utc>, bool);
+/// One version in a package's history, with the advisory that applies to it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VersionHistoryEntry {
+    pub version: String,
+    pub first_seen: DateTime<Utc>,
+    pub last_seen: DateTime<Utc>,
+    /// Whether nixpkgs reports a known advisory for this version.
+    pub insecure: bool,
+    /// The advisory JSON array covering this version, or `None` when clean.
+    ///
+    /// Sourced from this `(attribute_path, version)` row when it carries one,
+    /// otherwise from the newest sibling attribute packaging the same `name` at
+    /// the same `version` — see [`get_version_history`] for why.
+    ///
+    /// `None` while `insecure` is `true` only happens against a remote server
+    /// that predates this field and sends the flag by itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vulnerabilities: Option<String>,
+}
+
+impl VersionHistoryEntry {
+    /// Build an entry from a stored `known_vulnerabilities` value, deriving the
+    /// flag so the two can never disagree.
+    pub fn from_advisory(
+        version: String,
+        first_seen: DateTime<Utc>,
+        last_seen: DateTime<Utc>,
+        vulnerabilities: Option<String>,
+    ) -> Self {
+        let vulnerabilities = vulnerabilities.filter(|v| has_vulnerabilities(Some(v)));
+        Self {
+            version,
+            first_seen,
+            last_seen,
+            insecure: vulnerabilities.is_some(),
+            vulnerabilities,
+        }
+    }
+
+    /// Whether this version has a known advisory in nixpkgs.
+    pub fn is_insecure(&self) -> bool {
+        self.insecure
+    }
+
+    /// Advisory strings for display, empty when none are known.
+    pub fn vulnerability_list(&self) -> Vec<String> {
+        self.vulnerabilities
+            .as_deref()
+            .map(super::json_array::parse)
+            .unwrap_or_default()
+    }
+}
 
 /// Retrieves the version history for a package attribute path.
 ///
 /// Returns each distinct version for the given `package` (matched against `attribute_path`)
 /// along with the earliest `first_commit_date`, the latest `last_commit_date` for that version,
-/// and a flag indicating if any record for that version has known vulnerabilities.
-/// Results are ordered by `first_seen` (earliest first_commit_date) descending.
+/// and the advisory that applies to it. Results are ordered by `first_seen` descending.
+///
+/// # Advisory scope
+///
+/// The advisory is looked up by `(name, version)` — the package's pname and version,
+/// **not** the attribute path and **not** the version string alone.
+///
+/// Matching on the version string alone is wrong: `nxv` 0.7.1 is unrelated to
+/// `zeronet` 0.7.1, and flagging one because of the other tainted 125k rows (issue #80).
+///
+/// Matching on the attribute path alone is also wrong: nixpkgs packages the same
+/// software under several attributes, and `known_vulnerabilities` follows the newest
+/// observation of each `(attribute_path, version)` row without being backfilled. So
+/// `emacs` 28.2 retired in 2023 holding `NULL` while `emacs28` 28.2 carried the same
+/// build until 2025 and picked up CVE-2024-53920. The `name` scope recovers those.
 ///
 /// # Arguments
 ///
 /// * `package` - The package attribute path to filter versions by.
-///
-/// # Returns
-///
-/// A `Vec<VersionHistoryEntry>` where each entry is `(version, first_seen, last_seen, is_insecure)`,
-/// and `first_seen` / `last_seen` are `DateTime<Utc>` values.
 ///
 /// # Examples
 ///
 /// ```
 /// // assumes `conn` is an open rusqlite::Connection
 /// let history = get_version_history(&conn, "python").unwrap();
-/// for (version, first_seen, last_seen, is_insecure) in history {
-///     println!("{}: {} - {} (insecure: {})", version, first_seen, last_seen, is_insecure);
+/// for entry in history {
+///     println!(
+///         "{}: {} - {} (insecure: {})",
+///         entry.version, entry.first_seen, entry.last_seen, entry.is_insecure()
+///     );
 /// }
 /// ```
 pub fn get_version_history(
@@ -811,53 +880,34 @@ pub fn get_version_history(
     }
 
     // Schema v4 stores one row per (attribute_path, version), so the historical
-    // GROUP BY/MIN/MAX query is redundant. Keep the cross-attribute security
-    // semantics by checking the partial vulnerability index per returned row.
+    // GROUP BY/MIN/MAX query is redundant. Prefer this row's own advisory and fall
+    // back to the newest sibling attribute packaging the same name at the same
+    // version (see "Advisory scope" above).
     let mut stmt = conn.prepare(
         r#"
         SELECT pv.version,
                pv.first_commit_date as first_seen,
                pv.last_commit_date as last_seen,
-               EXISTS (
-                   SELECT 1
-                   FROM package_versions iv
-                   WHERE iv.version = pv.version
-                     AND iv.known_vulnerabilities IS NOT NULL
-                     AND iv.known_vulnerabilities != ''
-                     AND iv.known_vulnerabilities != '[]'
-                     AND iv.known_vulnerabilities != 'null'
-                   LIMIT 1
-               ) as is_insecure
+               COALESCE(
+                   NULLIF(NULLIF(NULLIF(pv.known_vulnerabilities, ''), '[]'), 'null'),
+                   (
+                       SELECT iv.known_vulnerabilities
+                       FROM package_versions iv
+                       WHERE iv.name = pv.name
+                         AND iv.version = pv.version
+                         AND iv.known_vulnerabilities IS NOT NULL
+                         AND iv.known_vulnerabilities NOT IN ('', '[]', 'null')
+                       ORDER BY iv.last_commit_date DESC
+                       LIMIT 1
+                   )
+               ) as vulnerabilities
         FROM package_versions pv
         WHERE pv.attribute_path = ?
         ORDER BY pv.first_commit_date DESC
         "#,
     )?;
 
-    let rows = stmt.query_map([package], |row| {
-        let version: String = row.get(0)?;
-        let first_ts: i64 = row.get(1)?;
-        let last_ts: i64 = row.get(2)?;
-        let is_insecure: i64 = row.get(3)?;
-
-        let first_seen = Utc.timestamp_opt(first_ts, 0).single().ok_or_else(|| {
-            rusqlite::Error::FromSqlConversionFailure(
-                1,
-                rusqlite::types::Type::Integer,
-                format!("Invalid first_seen timestamp: {}", first_ts).into(),
-            )
-        })?;
-
-        let last_seen = Utc.timestamp_opt(last_ts, 0).single().ok_or_else(|| {
-            rusqlite::Error::FromSqlConversionFailure(
-                2,
-                rusqlite::types::Type::Integer,
-                format!("Invalid last_seen timestamp: {}", last_ts).into(),
-            )
-        })?;
-
-        Ok((version, first_seen, last_seen, is_insecure != 0))
-    })?;
+    let rows = stmt.query_map([package], version_history_row)?;
 
     let mut results = Vec::new();
     for row in rows {
@@ -866,28 +916,62 @@ pub fn get_version_history(
     Ok(results)
 }
 
+/// Shared row mapper for both version-history query shapes.
+fn version_history_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<VersionHistoryEntry> {
+    let version: String = row.get(0)?;
+    let first_ts: i64 = row.get(1)?;
+    let last_ts: i64 = row.get(2)?;
+    let vulnerabilities: Option<String> = row.get(3)?;
+
+    let first_seen = Utc.timestamp_opt(first_ts, 0).single().ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            1,
+            rusqlite::types::Type::Integer,
+            format!("Invalid first_seen timestamp: {}", first_ts).into(),
+        )
+    })?;
+
+    let last_seen = Utc.timestamp_opt(last_ts, 0).single().ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            2,
+            rusqlite::types::Type::Integer,
+            format!("Invalid last_seen timestamp: {}", last_ts).into(),
+        )
+    })?;
+
+    Ok(VersionHistoryEntry::from_advisory(
+        version,
+        first_seen,
+        last_seen,
+        vulnerabilities,
+    ))
+}
+
 fn get_version_history_grouped(
     conn: &rusqlite::Connection,
     package: &str,
 ) -> Result<Vec<VersionHistoryEntry>> {
     let has_vulnerabilities_column =
         table_has_column(conn, "package_versions", "known_vulnerabilities")?;
+    // Pre-v4 indexes hold several rows per (attribute_path, version), so the advisory
+    // is aggregated rather than read off a single row. Scoped by (name, version) for
+    // the same reasons as the v4 query above.
     let sql = if has_vulnerabilities_column {
         r#"
-        WITH insecure_versions AS (
-            SELECT DISTINCT version
+        WITH insecure_packages AS (
+            SELECT name, version, MAX(known_vulnerabilities) as vulnerabilities
             FROM package_versions
             WHERE known_vulnerabilities IS NOT NULL
-              AND known_vulnerabilities != ''
-              AND known_vulnerabilities != '[]'
-              AND known_vulnerabilities != 'null'
+              AND known_vulnerabilities NOT IN ('', '[]', 'null')
+            GROUP BY name, version
         )
         SELECT pv.version,
                MIN(pv.first_commit_date) as first_seen,
                MAX(pv.last_commit_date) as last_seen,
-               CASE WHEN iv.version IS NOT NULL THEN 1 ELSE 0 END as is_insecure
+               MAX(iv.vulnerabilities) as vulnerabilities
         FROM package_versions pv
-        LEFT JOIN insecure_versions iv ON pv.version = iv.version
+        LEFT JOIN insecure_packages iv
+               ON iv.name = pv.name AND iv.version = pv.version
         WHERE pv.attribute_path = ?
         GROUP BY pv.version
         ORDER BY first_seen DESC
@@ -897,7 +981,7 @@ fn get_version_history_grouped(
         SELECT version,
                MIN(first_commit_date) as first_seen,
                MAX(last_commit_date) as last_seen,
-               0 as is_insecure
+               NULL as vulnerabilities
         FROM package_versions
         WHERE attribute_path = ?
         GROUP BY version
@@ -906,30 +990,7 @@ fn get_version_history_grouped(
     };
     let mut stmt = conn.prepare(sql)?;
 
-    let rows = stmt.query_map([package], |row| {
-        let version: String = row.get(0)?;
-        let first_ts: i64 = row.get(1)?;
-        let last_ts: i64 = row.get(2)?;
-        let is_insecure: i64 = row.get(3)?;
-
-        let first_seen = Utc.timestamp_opt(first_ts, 0).single().ok_or_else(|| {
-            rusqlite::Error::FromSqlConversionFailure(
-                1,
-                rusqlite::types::Type::Integer,
-                format!("Invalid first_seen timestamp: {}", first_ts).into(),
-            )
-        })?;
-
-        let last_seen = Utc.timestamp_opt(last_ts, 0).single().ok_or_else(|| {
-            rusqlite::Error::FromSqlConversionFailure(
-                2,
-                rusqlite::types::Type::Integer,
-                format!("Invalid last_seen timestamp: {}", last_ts).into(),
-            )
-        })?;
-
-        Ok((version, first_seen, last_seen, is_insecure != 0))
-    })?;
+    let rows = stmt.query_map([package], version_history_row)?;
 
     let mut results = Vec::new();
     for row in rows {
@@ -1797,8 +1858,171 @@ mod tests {
         let history = get_version_history(db.connection(), "python").unwrap();
         assert_eq!(history.len(), 2);
         // Should be ordered by first_seen DESC, so 3.12.0 first
-        assert_eq!(history[0].0, "3.12.0");
-        assert_eq!(history[1].0, "3.11.0");
+        assert_eq!(history[0].version, "3.12.0");
+        assert_eq!(history[1].version, "3.11.0");
+    }
+
+    /// Build a v4 index holding just the rows a test cares about.
+    fn advisory_test_db(rows: &str) -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(&format!(
+            r#"
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO meta (key, value) VALUES ('schema_version', '4');
+            CREATE TABLE package_versions (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                version TEXT NOT NULL,
+                first_commit_hash TEXT NOT NULL,
+                first_commit_date INTEGER NOT NULL,
+                last_commit_hash TEXT NOT NULL,
+                last_commit_date INTEGER NOT NULL,
+                attribute_path TEXT NOT NULL,
+                description TEXT,
+                license TEXT,
+                homepage TEXT,
+                maintainers TEXT,
+                platforms TEXT,
+                source_path TEXT,
+                known_vulnerabilities TEXT,
+                UNIQUE(attribute_path, version)
+            );
+            INSERT INTO package_versions
+                (name, version, first_commit_hash, first_commit_date,
+                 last_commit_hash, last_commit_date, attribute_path,
+                 known_vulnerabilities)
+            VALUES {rows};
+            "#
+        ))
+        .unwrap();
+        conn
+    }
+
+    /// Regression for issue #80: `nxv` 0.7.1 was flagged insecure because
+    /// `zeronet` 0.7.1 carries an advisory. A shared version string is not a
+    /// shared package — this tainted 125k rows across 72k attribute paths.
+    #[test]
+    fn test_version_history_ignores_unrelated_package_at_same_version() {
+        let conn = advisory_test_db(
+            "('nxv', '0.7.1', 'a', 100, 'b', 200, 'nxv', NULL),
+             ('zeronet', '0.7.1', 'c', 100, 'd', 200, 'zeronet',
+              '[\"Unmaintained. Probable XSS/code injection vulnerability.\"]')",
+        );
+
+        let history = get_version_history(&conn, "nxv").unwrap();
+        assert_eq!(history.len(), 1);
+        assert!(
+            !history[0].is_insecure(),
+            "nxv 0.7.1 must not inherit zeronet's advisory"
+        );
+        assert_eq!(history[0].vulnerabilities, None);
+
+        // ...and the package that really is insecure keeps saying so.
+        let history = get_version_history(&conn, "zeronet").unwrap();
+        assert!(history[0].is_insecure());
+    }
+
+    /// The signal the fix must NOT lose. `known_vulnerabilities` follows the
+    /// newest observation of each (attribute_path, version) row and is never
+    /// backfilled, so `emacs` 28.2 retired in 2023 holding NULL while `emacs28`
+    /// 28.2 shipped the same build until 2025 and picked up the CVEs. Scoping by
+    /// name recovers it; scoping by attribute_path would not.
+    #[test]
+    fn test_version_history_inherits_advisory_from_sibling_attribute() {
+        let conn = advisory_test_db(
+            "('emacs', '28.2', 'a', 100, 'b', 200, 'emacs', NULL),
+             ('emacs', '28.2', 'c', 100, 'd', 300, 'emacs28',
+              '[\"CVE-2024-53920\"]')",
+        );
+
+        let history = get_version_history(&conn, "emacs").unwrap();
+        assert_eq!(history.len(), 1);
+        assert!(
+            history[0].is_insecure(),
+            "emacs 28.2 is the same build as emacs28 28.2"
+        );
+        assert_eq!(
+            history[0].vulnerability_list(),
+            vec!["CVE-2024-53920".to_string()],
+            "the advisory text travels with the flag"
+        );
+    }
+
+    /// A row's own advisory wins over a sibling's, and the empty spellings of
+    /// "no advisory" (NULL, '', '[]', 'null') all read as clean.
+    #[test]
+    fn test_version_history_prefers_own_advisory_and_ignores_empty_spellings() {
+        let conn = advisory_test_db(
+            "('pkg', '1.0', 'a', 100, 'b', 200, 'pkg', '[\"OWN-CVE\"]'),
+             ('pkg', '1.0', 'c', 100, 'd', 300, 'pkg-alias', '[\"SIBLING-CVE\"]'),
+             ('clean', '2.0', 'e', 100, 'f', 200, 'clean-empty', ''),
+             ('clean', '2.0', 'g', 100, 'h', 200, 'clean-array', '[]'),
+             ('clean', '2.0', 'i', 100, 'j', 200, 'clean-null', 'null')",
+        );
+
+        let history = get_version_history(&conn, "pkg").unwrap();
+        assert_eq!(
+            history[0].vulnerability_list(),
+            vec!["OWN-CVE".to_string()],
+            "the row's own advisory takes precedence over a newer sibling's"
+        );
+
+        for attr in ["clean-empty", "clean-array", "clean-null"] {
+            let history = get_version_history(&conn, attr).unwrap();
+            assert!(!history[0].is_insecure(), "{attr} should read as clean");
+        }
+    }
+
+    /// Same two cases against the pre-v4 grouped query, which aggregates several
+    /// rows per (attribute_path, version).
+    #[test]
+    fn test_legacy_version_history_scopes_advisories_by_name() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO meta (key, value) VALUES ('schema_version', '3');
+            CREATE TABLE package_versions (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                version TEXT NOT NULL,
+                first_commit_hash TEXT NOT NULL,
+                first_commit_date INTEGER NOT NULL,
+                last_commit_hash TEXT NOT NULL,
+                last_commit_date INTEGER NOT NULL,
+                attribute_path TEXT NOT NULL,
+                description TEXT,
+                license TEXT,
+                homepage TEXT,
+                maintainers TEXT,
+                platforms TEXT,
+                source_path TEXT,
+                known_vulnerabilities TEXT
+            );
+            INSERT INTO package_versions
+                (name, version, first_commit_hash, first_commit_date,
+                 last_commit_hash, last_commit_date, attribute_path,
+                 known_vulnerabilities)
+            VALUES
+                ('nxv', '0.7.1', 'a', 100, 'b', 200, 'nxv', NULL),
+                ('nxv', '0.7.1', 'a2', 50, 'b2', 250, 'nxv', NULL),
+                ('zeronet', '0.7.1', 'c', 100, 'd', 200, 'zeronet', '["XSS"]'),
+                ('emacs', '28.2', 'e', 100, 'f', 200, 'emacs', NULL),
+                ('emacs', '28.2', 'g', 100, 'h', 300, 'emacs28', '["CVE-2024-53920"]');
+            "#,
+        )
+        .unwrap();
+
+        let history = get_version_history(&conn, "nxv").unwrap();
+        assert_eq!(history.len(), 1, "grouped query still collapses rows");
+        assert!(!history[0].is_insecure());
+
+        let history = get_version_history(&conn, "emacs").unwrap();
+        assert!(history[0].is_insecure());
+        assert_eq!(
+            history[0].vulnerability_list(),
+            vec!["CVE-2024-53920".to_string()]
+        );
     }
 
     #[test]
@@ -1844,9 +2068,9 @@ mod tests {
 
         let history = get_version_history(&conn, "python").unwrap();
         assert_eq!(history.len(), 1);
-        assert_eq!(history[0].0, "3.11.0");
-        assert_eq!(history[0].1, Utc.timestamp_opt(50, 0).unwrap());
-        assert_eq!(history[0].2, Utc.timestamp_opt(300, 0).unwrap());
+        assert_eq!(history[0].version, "3.11.0");
+        assert_eq!(history[0].first_seen, Utc.timestamp_opt(50, 0).unwrap());
+        assert_eq!(history[0].last_seen, Utc.timestamp_opt(300, 0).unwrap());
     }
 
     #[test]
@@ -1884,10 +2108,10 @@ mod tests {
 
         let history = get_version_history(&conn, "python").unwrap();
         assert_eq!(history.len(), 1);
-        assert_eq!(history[0].0, "3.11.0");
-        assert_eq!(history[0].1, Utc.timestamp_opt(50, 0).unwrap());
-        assert_eq!(history[0].2, Utc.timestamp_opt(300, 0).unwrap());
-        assert!(!history[0].3);
+        assert_eq!(history[0].version, "3.11.0");
+        assert_eq!(history[0].first_seen, Utc.timestamp_opt(50, 0).unwrap());
+        assert_eq!(history[0].last_seen, Utc.timestamp_opt(300, 0).unwrap());
+        assert!(!history[0].is_insecure());
     }
 
     #[test]

@@ -273,8 +273,17 @@ pub struct VersionHistorySchema {
     pub first_seen: DateTime<Utc>,
     /// Last time this version was seen.
     pub last_seen: DateTime<Utc>,
-    /// Whether this version has known vulnerabilities.
+    /// Whether nixpkgs reports a known advisory for this software version.
+    ///
+    /// Scoped by package name and version, so every attribute packaging the same
+    /// build agrees (`emacs` and `emacs28` at 28.2 are both flagged). This is not
+    /// the same question as "will nix refuse to build this attribute at this
+    /// revision" — for that, read `known_vulnerabilities` off the version itself
+    /// via `/packages/{attr}/versions/{version}/first`.
     pub is_insecure: bool,
+    /// The advisory text as a JSON array, omitted when the version is clean.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vulnerabilities: Option<String>,
 }
 
 /// Package version info (re-export with ToSchema).

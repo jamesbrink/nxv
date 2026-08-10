@@ -32,9 +32,10 @@ struct PaginationMeta {
 
 /// Version history entry from API (for deserialization).
 ///
-/// Note: `is_insecure` uses `#[serde(default)]` to default to `false` when
-/// connecting to older API versions that don't include this field. This ensures
-/// backwards compatibility - older servers simply report all versions as secure.
+/// Note: both advisory fields use `#[serde(default)]` so older servers stay
+/// usable — they simply report every version as secure. `vulnerabilities` was
+/// added alongside the advisory-scope fix; a server that predates it still sends
+/// `is_insecure`, which is enough to render the flag without the advisory text.
 #[derive(Debug, Deserialize)]
 struct ApiVersionHistoryEntry {
     version: String,
@@ -44,6 +45,9 @@ struct ApiVersionHistoryEntry {
     /// for backwards compatibility with older API versions.
     #[serde(default)]
     is_insecure: bool,
+    /// The advisory JSON array, when the server reports one.
+    #[serde(default)]
+    vulnerabilities: Option<String>,
 }
 
 /// HTTP client for the nxv API.
@@ -345,15 +349,18 @@ impl ApiClient {
     ///
     /// # Returns
     ///
-    /// A vector of `VersionHistoryEntry` tuples in the form `(version, first_seen, last_seen, is_insecure)`.
+    /// A vector of `VersionHistoryEntry` records.
     ///
     /// # Examples
     ///
     /// ```
     /// let client = ApiClient::new("https://nxv.example.com").unwrap();
     /// let history = client.get_version_history("org/package").unwrap();
-    /// for (version, first_seen, last_seen, is_insecure) in history {
-    ///     println!("{}: {} - {} (insecure: {})", version, first_seen, last_seen, is_insecure);
+    /// for entry in history {
+    ///     println!(
+    ///         "{}: {} - {} (insecure: {})",
+    ///         entry.version, entry.first_seen, entry.last_seen, entry.is_insecure()
+    ///     );
     /// }
     /// ```
     pub fn get_version_history(&self, attr: &str) -> Result<Vec<VersionHistoryEntry>> {
@@ -367,7 +374,18 @@ impl ApiClient {
             Ok(response) => Ok(response
                 .data
                 .into_iter()
-                .map(|e| (e.version, e.first_seen, e.last_seen, e.is_insecure))
+                .map(|e| {
+                    let mut entry = VersionHistoryEntry::from_advisory(
+                        e.version,
+                        e.first_seen,
+                        e.last_seen,
+                        e.vulnerabilities,
+                    );
+                    // A server predating the advisory field sends `is_insecure`
+                    // alone; keep the flag rather than silently dropping it.
+                    entry.insecure |= e.is_insecure;
+                    entry
+                })
                 .collect()),
             Err(NxvError::PackageNotFound(_)) => Ok(Vec::new()),
             Err(e) => Err(e),

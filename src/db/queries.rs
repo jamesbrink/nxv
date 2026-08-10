@@ -318,6 +318,11 @@ pub struct ChannelCoverageStat {
     pub channel: String,
     pub releases_ingested: i64,
     pub releases_pending: i64,
+    /// Of `releases_pending`, those from the pre-2020 nix-env era. Ordinary
+    /// runs never retry these — they are only ingested under
+    /// `nxv index --backfill-evals`, which needs `nix` on the machine.
+    #[serde(default)]
+    pub releases_pending_eval_era: i64,
     pub releases_failed: i64,
     pub releases_skipped: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1173,6 +1178,8 @@ fn get_channel_coverage(conn: &rusqlite::Connection) -> Result<Vec<ChannelCovera
         SELECT r.channel,
                SUM(r.status = 'ingested'),
                SUM(r.status = 'pending'),
+               SUM(r.status = 'pending' AND r.source = 'nix_env'
+                   AND r.release_date < ?1),
                SUM(r.status = 'failed'),
                SUM(r.status = 'skipped'),
                (SELECT release_name FROM releases n
@@ -1184,16 +1191,17 @@ fn get_channel_coverage(conn: &rusqlite::Connection) -> Result<Vec<ChannelCovera
           FROM releases r GROUP BY r.channel ORDER BY r.channel
         "#,
     )?;
-    let rows = stmt.query_map([], |row| {
+    let rows = stmt.query_map([super::releases::eval_era_before().timestamp()], |row| {
         Ok(ChannelCoverageStat {
             channel: row.get(0)?,
             releases_ingested: row.get::<_, Option<i64>>(1)?.unwrap_or(0),
             releases_pending: row.get::<_, Option<i64>>(2)?.unwrap_or(0),
-            releases_failed: row.get::<_, Option<i64>>(3)?.unwrap_or(0),
-            releases_skipped: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
-            newest_release: row.get(5)?,
+            releases_pending_eval_era: row.get::<_, Option<i64>>(3)?.unwrap_or(0),
+            releases_failed: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
+            releases_skipped: row.get::<_, Option<i64>>(5)?.unwrap_or(0),
+            newest_release: row.get(6)?,
             newest_release_date: row
-                .get::<_, Option<i64>>(6)?
+                .get::<_, Option<i64>>(7)?
                 .and_then(|ts| Utc.timestamp_opt(ts, 0).single()),
         })
     })?;

@@ -8,7 +8,7 @@
 //! ANALYSIS.md); this one refuses the snapshot and pages the operator.
 
 use crate::db::Database;
-use crate::db::releases::{ReleaseRecord, ReleaseSource};
+use crate::db::releases::{ReleaseRecord, ReleaseSource, UnsettledReleases, eval_era_before};
 use crate::error::Result;
 use crate::index::snapshot::SnapshotEntry;
 use chrono::{DateTime, Datelike, Utc};
@@ -308,11 +308,12 @@ pub struct RunReport {
     /// Hours between now and the newest observation across channels.
     pub head_lag_hours: Option<i64>,
     /// Releases dated at or before the newest ingested observation that are
-    /// neither ingested nor skipped — holes that retries still need to fill.
-    /// Publishing ingested progress is safe regardless (gate-failed
-    /// snapshots never write rows), but a persistently nonzero value means
-    /// some window's versions stay missing until its release succeeds.
-    pub unsettled_before_watermark: Option<i64>,
+    /// neither ingested nor skipped, split by whether an ordinary run can still
+    /// reach them. Publishing ingested progress is safe regardless (gate-failed
+    /// snapshots never write rows), but a persistently nonzero `retryable`
+    /// count means some window's versions stay missing until its release
+    /// succeeds, while `needs_eval` will not move without `--backfill-evals`.
+    pub unsettled_before_watermark: Option<UnsettledReleases>,
     /// Total distinct attribute paths in the index after the run.
     pub total_attrs: Option<i64>,
     /// Total (attr, version) rows after the run.
@@ -355,7 +356,7 @@ impl RunReport {
         if let Some(newest) = db.newest_ingested_release(None)? {
             self.head_lag_hours = Some((Utc::now() - newest.release_date).num_hours());
             self.unsettled_before_watermark =
-                Some(db.unsettled_release_count_before(newest.release_date)?);
+                Some(db.unsettled_releases_before(newest.release_date, eval_era_before())?);
         }
 
         let conn = db.connection();
@@ -414,9 +415,22 @@ impl RunReport {
             eprintln!("  index: {attrs} distinct attrs, {rows} (attr, version) rows");
         }
         if let Some(unsettled) = self.unsettled_before_watermark
-            && unsettled > 0
+            && unsettled.total > 0
         {
-            eprintln!("  unsettled releases before watermark: {unsettled} (holes pending retry)");
+            eprint!("  unsettled releases before watermark: {}", unsettled.total);
+            if unsettled.needs_eval > 0 {
+                eprint!(
+                    " ({} pre-2020 nix-env era, unreachable without --backfill-evals",
+                    unsettled.needs_eval
+                );
+                if unsettled.retryable() > 0 {
+                    eprint!("; {} pending retry", unsettled.retryable());
+                }
+                eprint!(")");
+            } else {
+                eprint!(" (holes pending retry)");
+            }
+            eprintln!();
         }
         if let Some(lag) = self.head_lag_hours {
             eprintln!(

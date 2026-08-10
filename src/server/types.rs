@@ -369,6 +369,9 @@ pub struct ChannelCoverageSchema {
     pub channel: String,
     pub releases_ingested: i64,
     pub releases_pending: i64,
+    /// Of `releases_pending`, the pre-2020 nix-env-era releases. Scheduled runs
+    /// never retry these; only `nxv index --backfill-evals` ingests them.
+    pub releases_pending_eval_era: i64,
     pub releases_failed: i64,
     pub releases_skipped: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -415,6 +418,7 @@ impl From<IndexStats> for IndexStatsSchema {
                     channel: c.channel,
                     releases_ingested: c.releases_ingested,
                     releases_pending: c.releases_pending,
+                    releases_pending_eval_era: c.releases_pending_eval_era,
                     releases_failed: c.releases_failed,
                     releases_skipped: c.releases_skipped,
                     newest_release: c.newest_release,

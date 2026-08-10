@@ -33,6 +33,14 @@ pub const DEFAULT_BASE_URL: &str = "https://nix-releases.s3.amazonaws.com";
 /// before mid-2020 that 404 get reclassified to the nix-env era.
 pub const PACKAGES_JSON_SAFE_AFTER: &str = "2020-06-01T00:00:00Z";
 
+// The date of that first artifact — `db::releases::PACKAGES_JSON_FIRST_ARTIFACT`,
+// which lives there so `nxv stats` can report the same era boundary without the
+// indexer feature. Between it and PACKAGES_JSON_SAFE_AFTER the bucket is mixed,
+// so plan-time date classification guesses NixEnv and the fetch-time probe
+// corrects it. Runs without --backfill-evals still admit that window: those
+// releases cost one GET and no evaluation, and excluding them stranded ~200
+// nixos-unstable-small snapshots that had artifacts all along.
+
 /// A channel we ingest, mapped to its S3 prefix.
 #[derive(Debug, Clone)]
 pub struct ChannelSpec {

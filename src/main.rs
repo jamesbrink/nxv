@@ -1020,6 +1020,19 @@ fn cmd_stats(cli: &Cli) -> Result<()> {
             print!("{}: {} ingested", ch.channel, ch.releases_ingested);
             if ch.releases_pending > 0 {
                 print!(", {} pending", ch.releases_pending);
+                // A bare count reads as a backlog the next run will work off.
+                // Pre-2020 releases are not that: nothing but an explicit
+                // `nxv index --backfill-evals` will ever pick them up.
+                if ch.releases_pending_eval_era > 0 {
+                    if ch.releases_pending_eval_era == ch.releases_pending {
+                        print!(" (pre-2020, needs --backfill-evals)");
+                    } else {
+                        print!(
+                            " ({} pre-2020, needs --backfill-evals)",
+                            ch.releases_pending_eval_era
+                        );
+                    }
+                }
             }
             if ch.releases_failed > 0 {
                 print!(", {} failed", ch.releases_failed);

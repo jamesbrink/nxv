@@ -23,9 +23,13 @@ nixpkgs checkout. It ingests channel-release snapshots from releases.nixos.org:
   decompressed) that enumerates all ~144k attributes — including nested package
   sets (`python3Packages.*`, `haskellPackages.*`, `nodePackages.*`, ...) — with
   versions and metadata. No Nix evaluation is needed for this era.
-- **2016-09 → 2020-06**: releases predate `packages.json`. Opt in with
-  `--backfill-evals` to evaluate each release's `nixexprs.tar.xz` with `nix-env`
-  (the only path that requires `nix`).
+- **2020-03-27 → 2020-06**: a mixed window. `packages.json.br` first appears on
+  2020-03-27, but not every release in that window has one, so the source is
+  settled by probing each release rather than by its date. Ordinary runs cover
+  this window — a probe costs one request and no evaluation.
+- **2016-09 → 2020-03-27**: releases predate `packages.json` entirely. Opt in
+  with `--backfill-evals` to evaluate each release's `nixexprs.tar.xz` with
+  `nix-env` (the only path that requires `nix`).
 
 Every stored commit is a real Hydra-built channel commit: the
 `(attribute, version)` pair was verifiably present at both ends of its range.
@@ -85,6 +89,21 @@ nxv index --backfill-evals
 
 Interrupting with Ctrl+C is safe: each release commits atomically together with
 its row in the `releases` ledger, so unfinished releases simply stay `pending`.
+
+### Reading the Pending Count
+
+`nxv stats` and the end-of-run report split `pending` releases into the ones a
+run will pick up and the ones it structurally cannot:
+
+```
+nixos-unstable-small: 4017 ingested, 3099 pending (2902 pre-2020, needs --backfill-evals)
+```
+
+The pre-2020 portion is not a backlog and will not shrink on its own — no
+scheduled run includes it, and `--retry-failed` does not reach it either. It is
+a standing choice to trade a decade of coarse historical coverage against hours
+of `nix-env` evaluation. Everything outside that portion is genuine queued work
+the next run will attempt.
 
 ### Resuming and Incremental Updates
 

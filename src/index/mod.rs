@@ -152,7 +152,7 @@ pub fn run_index(cli: &Cli, args: &IndexArgs) -> Result<()> {
             (_, Some(u)) if r.release_date > u => false,
             _ => true,
         })
-        .filter(|r| args.backfill_evals || r.source != ReleaseSource::NixEnv)
+        .filter(|r| args.backfill_evals || !needs_eval(r))
         .collect();
     if let Some(max) = args.max_releases {
         worklist.truncate(max);
@@ -215,6 +215,7 @@ pub fn run_index(cli: &Cli, args: &IndexArgs) -> Result<()> {
             &channel_prefixes,
             worklist,
             jobs,
+            args.backfill_evals,
             &shutdown,
             &mut report,
             &progress,
@@ -390,17 +391,37 @@ impl Aggregator {
     }
 }
 
+/// Whether a planned release can only be ingested by evaluating it with `nix`.
+///
+/// The plan-time source is a guess from the release date, and the fetch-time
+/// probe is what settles it (DESIGN §2: probe, never date-classify) — but the
+/// probe lives downstream of the work-list filter, so anything excluded here is
+/// never probed at all. A `NixEnv` guess dated on or after the first known
+/// `packages.json.br` is therefore admitted: worst case it 404s and is recorded
+/// as needing `--backfill-evals`, best case it ingests with no evaluation.
+fn needs_eval(release: &ReleaseRecord) -> bool {
+    if release.source != ReleaseSource::NixEnv {
+        return false;
+    }
+    release.release_date < crate::db::releases::eval_era_before()
+}
+
 /// Fetch + parse one release (worker side; no DB access).
 ///
 /// The plan-time source is a guess from the release date; the truth is
 /// per-release (DESIGN §2: probe, never date-classify). So nix-env-era
-/// releases first probe packages.json.br — the ~60 releases between the
-/// first artifact (2020-03-27) and the safe-after line get the zero-eval
-/// path, and the probe is one cheap 404 for genuinely pre-artifact releases.
+/// releases first probe packages.json.br — the releases between the first
+/// artifact (2020-03-27) and the safe-after line get the zero-eval path.
+///
+/// `allow_eval` mirrors `--backfill-evals`. Without it a probe miss is an
+/// error rather than a silent fallback to `nix-env`: the scheduled publish runs
+/// have no `nix` and must not start evaluating a decade of history because one
+/// artifact was missing.
 fn fetch_release(
     s3: &S3Client,
     prefix: &str,
     release: &ReleaseRecord,
+    allow_eval: bool,
 ) -> Result<(Vec<SnapshotEntry>, ReleaseSource)> {
     match release.source {
         ReleaseSource::PackagesJson => s3
@@ -409,6 +430,12 @@ fn fetch_release(
         ReleaseSource::NixEnv => match s3.fetch_packages_json(prefix, &release.release_name) {
             Ok(entries) => Ok((entries, ReleaseSource::PackagesJson)),
             Err(NxvError::NetworkMessage(msg)) if msg.contains("HTTP 404") => {
+                if !allow_eval {
+                    return Err(NxvError::Config(format!(
+                        "{} has no packages.json.br; re-run with --backfill-evals to evaluate it",
+                        release.release_name
+                    )));
+                }
                 eval::ingest_nix_env_release(s3, prefix, &release.release_name)
                     .map(|entries| (entries, ReleaseSource::NixEnv))
             }
@@ -428,6 +455,7 @@ fn ingest_worklist(
     channel_prefixes: &HashMap<String, String>,
     worklist: Vec<ReleaseRecord>,
     jobs: usize,
+    allow_eval: bool,
     shutdown: &Arc<AtomicBool>,
     report: &mut RunReport,
     progress: &dyn Fn(&str),
@@ -480,7 +508,7 @@ fn ingest_worklist(
                     continue;
                 };
                 let prefix = prefixes.get(&release.channel).cloned().unwrap_or_default();
-                let result = fetch_release(&s3, &prefix, &release);
+                let result = fetch_release(&s3, &prefix, &release, allow_eval);
                 if tx.send((seq, result)).is_err() {
                     break;
                 }
@@ -722,6 +750,55 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
     use tempfile::tempdir;
+
+    fn planned_release(release_date: DateTime<Utc>, source: ReleaseSource) -> ReleaseRecord {
+        ReleaseRecord {
+            id: 1,
+            channel: "nixos-unstable-small".to_string(),
+            release_name: "nixos-20.09pre218523.4a3f9aced7f".to_string(),
+            commit_hash: "a".repeat(40),
+            commit_count: None,
+            release_date,
+            source,
+            status: crate::db::releases::ReleaseStatus::Pending,
+            attempts: 0,
+            last_attempt_at: None,
+            attr_count: None,
+            error: None,
+            ingested_at: None,
+        }
+    }
+
+    /// The work-list filter runs before the fetch-time probe, so a `NixEnv`
+    /// guess inside the mixed window must survive it — otherwise the probe that
+    /// would reclassify it never runs. ~200 nixos-unstable-small snapshots sat
+    /// permanently pending for exactly this reason.
+    #[test]
+    fn test_needs_eval_admits_releases_after_the_first_artifact() {
+        let day = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
+
+        assert!(
+            needs_eval(&planned_release(
+                day("2019-01-01T00:00:00Z"),
+                ReleaseSource::NixEnv
+            )),
+            "genuinely pre-artifact releases still require --backfill-evals"
+        );
+        assert!(
+            !needs_eval(&planned_release(
+                day("2020-04-15T00:00:00Z"),
+                ReleaseSource::NixEnv
+            )),
+            "a date-guessed NixEnv release inside the mixed window must be probed"
+        );
+        assert!(
+            !needs_eval(&planned_release(
+                day("2019-01-01T00:00:00Z"),
+                ReleaseSource::PackagesJson
+            )),
+            "an artifact-backed release never needs an evaluation"
+        );
+    }
 
     fn test_package(attr: &str, version: &str) -> PackageVersion {
         PackageVersion {

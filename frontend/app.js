@@ -57,7 +57,7 @@
     health: null,
     reqSeq: 0,
     historyCache: new Map(),
-    firstHashCache: new Map(),
+    firstRowCache: new Map(),
     renderedRows: [], // cached for instant view-switch on toggle
     resolution: null,
   };
@@ -787,12 +787,16 @@
             : legacy
               ? ' text-[var(--color-amber-glow)]'
               : ' text-[var(--color-fog-0)]';
+          const vulns = parseJsonArrayOrString(v.vulnerabilities);
+          const vulnTitle = escapeHtml(
+            vulns.length ? vulns.join(' · ') : 'known vulnerabilities'
+          );
           return `
             <li class="grid grid-cols-[minmax(90px,auto)_1fr_auto] items-center gap-4 px-3 py-2 rounded-[7px] hover:bg-[var(--color-ink-2)] transition">
               <span class="mono text-[12.5px]${tag} tabular-nums">${escapeHtml(v.version)}</span>
               <span class="mono text-[11px] text-[var(--color-fog-3)] tabular-nums">${fmtDate(v.first_seen)}<span class="text-[var(--color-ink-4)] mx-2">→</span>${fmtDate(v.last_seen)}</span>
               <span class="flex items-center gap-2">
-                ${v.is_insecure ? '<span class="chip danger" style="font-size:10px; padding:1px 5px;">insecure</span>' : ''}
+                ${v.is_insecure ? `<span class="chip danger" style="font-size:10px; padding:1px 5px;" title="${vulnTitle}">insecure</span>` : ''}
                 ${legacy ? '<span class="chip warn" style="font-size:10px; padding:1px 5px;">pre-flakes</span>' : ''}
                 <button class="btn btn-ghost" data-history-copy="${idx}" title="copy flake ref">copy</button>
               </span>
@@ -806,12 +810,13 @@
           if (!v) return;
           b.textContent = '…';
           try {
-            const hash = await fetchFirstHash(r.attr, v.version);
+            const row = await fetchFirstOccurrence(r.attr, v.version);
+            const rowVulns = parseJsonArrayOrString(row.known_vulnerabilities);
             const synth = {
               attr: r.attr,
-              hash,
+              hash: row.first_commit_hash || '',
               last: v.last_seen,
-              insecure: v.is_insecure ? ['insecure'] : null,
+              insecure: rowVulns.length ? rowVulns : null,
               legacy: predatesFlakes(v.last_seen),
             };
             copy(buildFlakeCmd(synth));
@@ -849,15 +854,20 @@
     return versions;
   }
 
-  async function fetchFirstHash(attr, version) {
+  // Returns the first-occurrence row, not just its hash: the copied flake
+  // command needs this row's own known_vulnerabilities to decide on
+  // NIXPKGS_ALLOW_INSECURE. The history entry's `is_insecure` is a broader
+  // question (does this software version have an advisory at all), so it is the
+  // wrong input for a command that has to match what nix does at that revision.
+  async function fetchFirstOccurrence(attr, version) {
     const key = `${attr}::${version}`;
-    if (STATE.firstHashCache.has(key)) return STATE.firstHashCache.get(key);
+    if (STATE.firstRowCache.has(key)) return STATE.firstRowCache.get(key);
     const { json } = await api(
       `${API_BASE}/packages/${encodeURIComponent(attr)}/versions/${encodeURIComponent(version)}/first`
     );
-    const hash = json?.data?.first_commit_hash || '';
-    STATE.firstHashCache.set(key, hash);
-    return hash;
+    const row = json?.data || {};
+    STATE.firstRowCache.set(key, row);
+    return row;
   }
 
   function drawTimeline(history) {

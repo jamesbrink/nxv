@@ -290,7 +290,26 @@ the index or refuses to emit a slow artifact.
 
 `is_insecure` is not stored as a column — it's derived at query time from
 `known_vulnerabilities` (a non-empty JSON array means the package is flagged
-insecure). The HTTP API's version-history endpoint surfaces this as a boolean.
+insecure). The HTTP API's version-history endpoint surfaces this as a boolean
+alongside the advisory text in `vulnerabilities`.
+
+Version history resolves the advisory by **package name and version**, not by
+attribute path and not by version string alone:
+
+- Version string alone would be wrong in the obvious direction — `nxv` 0.7.1 has
+  nothing to do with `zeronet` 0.7.1.
+- Attribute path alone would be wrong in the subtle direction. Each
+  `(attribute_path, version)` row keeps the `known_vulnerabilities` of its newest
+  observation and is never backfilled, so an advisory added after an attribute
+  stopped shipping a version never reaches that row. `emacs` 28.2 retired in
+  2023 holding no advisory while `emacs28` 28.2 carried the identical build until
+  2025 and picked up CVE-2024-53920.
+
+Name scoping answers "does this software version have a known advisory". That is
+a broader question than "will nix refuse to build this attribute at this
+revision" — for the latter, read `known_vulnerabilities` off the version itself
+(`/packages/{attr}/versions/{version}/first`), which is what the copy-to-clipboard
+commands use to decide on `NIXPKGS_ALLOW_INSECURE`.
 
 ## Troubleshooting
 

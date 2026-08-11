@@ -23,9 +23,9 @@ nixpkgs checkout. It ingests channel-release snapshots from releases.nixos.org:
   decompressed) that enumerates all ~144k attributes — including nested package
   sets (`python3Packages.*`, `haskellPackages.*`, `nodePackages.*`, ...) — with
   versions and metadata. No Nix evaluation is needed for this era.
-- **2020-03-27 → 2020-06**: a mixed window. `packages.json.br` first appears on
-  2020-03-27, but not every release in that window has one, so the source is
-  settled by probing each release rather than by its date. Ordinary runs cover
+- **2020-03-27 → 2020-06**: `packages.json.br` first appears on 2020-03-27, but
+  the boundary falls mid-release-name (`20.09pre`), so the source is settled by
+  probing each release rather than inferred from its date. Ordinary runs cover
   this window — a probe costs one request and no evaluation.
 - **2016-09 → 2020-03-27**: releases predate `packages.json` entirely. Opt in
   with `--backfill-evals` to evaluate each release's `nixexprs.tar.xz` with
@@ -96,14 +96,16 @@ its row in the `releases` ledger, so unfinished releases simply stay `pending`.
 run will pick up and the ones it structurally cannot:
 
 ```
-nixos-unstable-small: 4017 ingested, 3099 pending (2902 pre-2020, needs --backfill-evals)
+nixos-unstable-small: 4017 ingested, 3099 pending, 1 skipped (newest: …); 2902 pre-2020, needs --backfill-evals
+nixpkgs-unstable: 4191 ingested, 22 failed, 1 skipped (newest: …); 22 pre-2020, needs --backfill-evals
 ```
 
-The pre-2020 portion is not a backlog and will not shrink on its own — no
-scheduled run includes it, and `--retry-failed` does not reach it either. It is
-a standing choice to trade a decade of coarse historical coverage against hours
-of `nix-env` evaluation. Everything outside that portion is genuine queued work
-the next run will attempt.
+The trailing clause counts pending **and** failed releases from the nix-env era.
+Neither is a backlog and neither shrinks on its own — no scheduled run includes
+them, and `--retry-failed` alone does not reach them (it takes
+`--retry-failed --backfill-evals`). It is a standing choice to trade a decade of
+coarse historical coverage against hours of `nix-env` evaluation. Everything
+outside that clause is genuine queued work the next run will attempt.
 
 ### Resuming and Incremental Updates
 

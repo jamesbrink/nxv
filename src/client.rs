@@ -46,7 +46,12 @@ struct ApiVersionHistoryEntry {
     #[serde(default)]
     is_insecure: bool,
     /// The advisory JSON array, when the server reports one.
-    #[serde(default)]
+    ///
+    /// `deserialize_opt` accepts both the array a current server sends and the
+    /// bare string older fixtures carry. Without it `#[serde(default)]` covers
+    /// only a *missing* field, and every package with an advisory fails to
+    /// decode — taking the whole `nxv history` command down with it.
+    #[serde(default, deserialize_with = "crate::db::json_array::deserialize_opt")]
     vulnerabilities: Option<String>,
 }
 

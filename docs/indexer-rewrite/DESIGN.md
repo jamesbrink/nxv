@@ -65,11 +65,16 @@ a commit that has version X" — always gets a true endpoint.
     typically **hours behind master** (measured 9h vs 1.4d for
     nixpkgs-unstable). Ingested from where its packages.json exists.
 - **Source selection is a per-release probe**: every release tries
-  `packages.json.br` first and falls back to nix-env on 404 — never decided
-  by date or prefix (the boundary is mid-`20.09pre`, and 198 releases were
-  renamed `21.03pre` before becoming `21.05pre`). The plan-time date guess
-  is only a worklist hint (`--backfill-evals` filtering); the ledger source
-  is corrected to the mechanism that actually produced the data.
+  `packages.json.br` first and, under `--backfill-evals`, falls back to
+  nix-env on 404 — never decided by date or prefix (the boundary is
+  mid-`20.09pre`, and 198 releases were renamed `21.03pre` before becoming
+  `21.05pre`). Without that flag a 404 parks the release as `skipped` rather
+  than starting an evaluation the run did not ask for. The plan-time date
+  guess is only a worklist hint, and it must stay permissive enough that the
+  probe actually runs: the filter excludes only releases dated before the
+  first known artifact (2020-03-27), not every date-guessed nix-env row.
+  The ledger source is corrected to the mechanism that actually produced the
+  data.
 - **Parsing requirements** (all verified the hard way):
   - Event-based XML parsing (quick-xml) per `<Contents>` block with
     optional elements — post-Feb-2025 objects embed

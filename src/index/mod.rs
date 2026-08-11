@@ -413,10 +413,11 @@ fn needs_eval(release: &ReleaseRecord) -> bool {
 /// releases first probe packages.json.br — the releases between the first
 /// artifact (2020-03-27) and the safe-after line get the zero-eval path.
 ///
-/// `allow_eval` mirrors `--backfill-evals`. Without it a probe miss is an
-/// error rather than a silent fallback to `nix-env`: the scheduled publish runs
-/// have no `nix` and must not start evaluating a decade of history because one
-/// artifact was missing.
+/// `allow_eval` mirrors `--backfill-evals`. Without it a probe miss is a
+/// [`NxvError::NeedsEval`] rather than a silent fallback to `nix-env`: a run
+/// that did not opt into evaluation must not spend hours on one because a
+/// single artifact was missing. The release is parked as `skipped`, since no
+/// amount of retrying will produce an artifact that does not exist.
 fn fetch_release(
     s3: &S3Client,
     prefix: &str,
@@ -431,10 +432,7 @@ fn fetch_release(
             Ok(entries) => Ok((entries, ReleaseSource::PackagesJson)),
             Err(NxvError::NetworkMessage(msg)) if msg.contains("HTTP 404") => {
                 if !allow_eval {
-                    return Err(NxvError::Config(format!(
-                        "{} has no packages.json.br; re-run with --backfill-evals to evaluate it",
-                        release.release_name
-                    )));
+                    return Err(NxvError::NeedsEval(release.release_name.clone()));
                 }
                 eval::ingest_nix_env_release(s3, prefix, &release.release_name)
                     .map(|entries| (entries, ReleaseSource::NixEnv))
@@ -524,7 +522,8 @@ fn ingest_worklist(
         std::result::Result<(Vec<SnapshotEntry>, ReleaseSource), NxvError>,
     > = BTreeMap::new();
     let mut next_seq = 0usize;
-    let mut prev_attrs: HashMap<String, (HashSet<String>, ReleaseSource)> = HashMap::new();
+    let mut prev_attrs: HashMap<String, (HashSet<String>, ReleaseSource, DateTime<Utc>)> =
+        HashMap::new();
     let mut aggregator = Aggregator::default();
     let mut hard_error: Option<NxvError> = None;
 
@@ -556,7 +555,7 @@ fn ingest_worklist(
                         &entries,
                         prev_attrs
                             .get(&release.channel)
-                            .map(|(attrs, source)| (attrs, *source)),
+                            .map(|(attrs, source, date)| (attrs, *source, *date)),
                         &sentinels,
                     )?;
 
@@ -584,6 +583,7 @@ fn ingest_worklist(
                         (
                             entries.iter().map(|e| e.attribute_path.clone()).collect(),
                             release.source,
+                            release.release_date,
                         ),
                     );
 
@@ -599,6 +599,19 @@ fn ingest_worklist(
                     if aggregator.should_flush() {
                         aggregator.flush(db)?;
                     }
+                }
+                // A release that needs an evaluation this run may not do is
+                // parked terminally, not failed: retrying cannot change the
+                // answer, and counting it as a failure reddens CI on a
+                // permanent condition. `--retry-failed --backfill-evals`
+                // resurrects it.
+                Err(NxvError::NeedsEval(name)) => {
+                    progress(&format!("  skipping {name}: no packages.json.br"));
+                    db.mark_release_skipped(
+                        release.id,
+                        "no packages.json.br; needs --backfill-evals",
+                    )?;
+                    report.skipped += 1;
                 }
                 Err(e) => {
                     progress(&format!("  FAILED {}: {e}", release.release_name));

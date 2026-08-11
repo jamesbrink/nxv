@@ -38,7 +38,7 @@ before the subcommand.
 | `--strict`             | `false`     | Treat monitor warnings (count floors, sentinels, head lag) as fatal             |
 | `--report <PATH>`      | -           | Write the end-of-run coverage report as JSON to this path                       |
 | `--retry-failed`       | `false`     | Retry releases that were parked as failed/skipped                               |
-| `--backfill-evals`     | `false`     | Also ingest the pre-2020 era via `nix-env` over `nixexprs.tar.xz` (needs `nix`) |
+| `--backfill-evals`     | `false`     | Also ingest the pre-2020-03-27 era via `nix-env` over `nixexprs.tar.xz`, and allow a `nix-env` fallback for any later release missing `packages.json.br` (needs `nix`) |
 | `--head-eval`          | `false`     | Evaluate nixpkgs master HEAD when channel observations lag (needs `nix`)        |
 | `--full`               | `false`     | Re-queue every known release instead of only new ones                           |
 | `--max-releases <N>`   | -           | Limit the number of releases ingested this run (for testing)                    |

@@ -1348,7 +1348,13 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
                             "first_seen": entry.first_seen.to_rfc3339(),
                             "last_seen": entry.last_seen.to_rfc3339(),
                             "is_insecure": entry.is_insecure(),
-                            "known_vulnerabilities": entry.vulnerabilities,
+                            // An array, matching `nxv history <pkg> <version>`
+                            // and every other JSON surface — never the stored
+                            // JSON-array string.
+                            "known_vulnerabilities": entry
+                                .vulnerabilities
+                                .as_ref()
+                                .map(|v| db::json_array::parse(v)),
                         })
                     })
                     .collect();
@@ -1383,8 +1389,12 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
                 let mut advisories = Vec::new();
                 for entry in history {
                     let insecure = entry.is_insecure();
-                    if insecure {
-                        advisories.push((entry.version.clone(), entry.vulnerability_list()));
+                    // Only versions with actual text to show. A remote server
+                    // predating the advisory field sends the flag alone, which
+                    // would otherwise print a heading with nothing under it.
+                    let vulns = entry.vulnerability_list();
+                    if !vulns.is_empty() {
+                        advisories.push((entry.version.clone(), vulns));
                     }
                     let version_display = if insecure {
                         format!("{} ⚠", entry.version)

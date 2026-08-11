@@ -1050,7 +1050,11 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let entry = &json["data"].as_array().unwrap()[0];
         assert_eq!(entry["is_insecure"], true);
-        assert_eq!(entry["vulnerabilities"], "[\"CVE-2024-53920\"]");
+        assert_eq!(
+            entry["vulnerabilities"],
+            serde_json::json!(["CVE-2024-53920"]),
+            "the advisory ships as a real array, not the stored JSON string"
+        );
 
         let (_, json) = get_json(&app, "/api/v1/packages/unrelated/history").await;
         let entry = &json["data"].as_array().unwrap()[0];

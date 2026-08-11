@@ -305,11 +305,16 @@ impl PackageVersion {
 /// Whether a stored `known_vulnerabilities` value represents a real advisory.
 ///
 /// The column holds a JSON array, but nixpkgs eras and ingestion paths spell "no
-/// advisory" three different ways — SQL `NULL`, the empty string, `[]`, and the
-/// literal `null`. This is the single definition of "insecure"; the SQL in
-/// [`get_version_history`] mirrors it with matching `NOT IN` predicates.
+/// advisory" several ways — SQL `NULL`, the empty string, whitespace, `[]`, and
+/// the `null` / `None` sentinels. Deferring to [`json_array::parse`] keeps this
+/// answer identical to what the value actually renders as, so a version can
+/// never be flagged insecure and then display an empty advisory list.
+///
+/// This is the single definition of "insecure". The SQL in
+/// [`get_version_history`] approximates it with `NOT IN ('', '[]', 'null')` as a
+/// cheap pre-filter; anything that slips through is dropped here.
 pub fn has_vulnerabilities(value: Option<&str>) -> bool {
-    value.is_some_and(|v| !v.is_empty() && v != "[]" && v != "null")
+    value.is_some_and(|v| !super::json_array::parse(v).is_empty())
 }
 
 /// Per-channel snapshot ingestion coverage (schema v4 indexes).
@@ -902,7 +907,9 @@ pub fn get_version_history(
                          AND iv.version = pv.version
                          AND iv.known_vulnerabilities IS NOT NULL
                          AND iv.known_vulnerabilities NOT IN ('', '[]', 'null')
-                       ORDER BY iv.last_commit_date DESC
+                       -- attribute_path breaks last_commit_date ties so the
+                       -- same index always answers with the same advisory.
+                       ORDER BY iv.last_commit_date DESC, iv.attribute_path ASC
                        LIMIT 1
                    )
                ) as vulnerabilities
@@ -961,23 +968,37 @@ fn get_version_history_grouped(
     // Pre-v4 indexes hold several rows per (attribute_path, version), so the advisory
     // is aggregated rather than read off a single row. Scoped by (name, version) for
     // the same reasons as the v4 query above.
+    //
+    // The CTE is restricted to the names this attribute path actually uses. Without
+    // that it groups the whole table on every call — the partial vulnerability index
+    // is keyed on version alone, so adding `name` forces a full materialization
+    // (measured: 19 s per call on a 1.8M-row index, against 0.4 s restricted).
+    //
+    // MAX() picks lexicographically when one (name, version) carries several
+    // distinct advisory texts. That is deterministic but not the newest-wins rule
+    // the v4 query uses; the two can only disagree on a genuine tie, and pre-v4
+    // indexes are read-only legacy.
     let sql = if has_vulnerabilities_column {
         r#"
         WITH insecure_packages AS (
             SELECT name, version, MAX(known_vulnerabilities) as vulnerabilities
             FROM package_versions
-            WHERE known_vulnerabilities IS NOT NULL
+            WHERE name IN (SELECT name FROM package_versions WHERE attribute_path = ?1)
+              AND known_vulnerabilities IS NOT NULL
               AND known_vulnerabilities NOT IN ('', '[]', 'null')
             GROUP BY name, version
         )
         SELECT pv.version,
                MIN(pv.first_commit_date) as first_seen,
                MAX(pv.last_commit_date) as last_seen,
-               MAX(iv.vulnerabilities) as vulnerabilities
+               COALESCE(
+                   MAX(NULLIF(NULLIF(NULLIF(pv.known_vulnerabilities, ''), '[]'), 'null')),
+                   MAX(iv.vulnerabilities)
+               ) as vulnerabilities
         FROM package_versions pv
         LEFT JOIN insecure_packages iv
                ON iv.name = pv.name AND iv.version = pv.version
-        WHERE pv.attribute_path = ?
+        WHERE pv.attribute_path = ?1
         GROUP BY pv.version
         ORDER BY first_seen DESC
         "#
@@ -1979,6 +2000,31 @@ mod tests {
             let history = get_version_history(&conn, attr).unwrap();
             assert!(!history[0].is_insecure(), "{attr} should read as clean");
         }
+    }
+
+    /// `has_vulnerabilities` must agree with what the value actually renders
+    /// as, or a version gets a red flag and an empty advisory list under it.
+    #[test]
+    fn test_has_vulnerabilities_matches_rendered_output() {
+        for clean in [None, Some(""), Some("  "), Some("[]"), Some("null")] {
+            assert!(!has_vulnerabilities(clean), "{clean:?} should read clean");
+        }
+        // Sentinels json_array::parse discards must not count as advisories.
+        for sentinel in ["None", " null ", "\n"] {
+            assert!(!has_vulnerabilities(Some(sentinel)), "{sentinel:?}");
+            assert!(super::super::json_array::parse(sentinel).is_empty());
+        }
+        assert!(has_vulnerabilities(Some(r#"["CVE-1"]"#)));
+
+        // Whatever the predicate accepts must render as something.
+        let entry = VersionHistoryEntry::from_advisory(
+            "1.0".to_string(),
+            Utc.timestamp_opt(1, 0).unwrap(),
+            Utc.timestamp_opt(2, 0).unwrap(),
+            Some("None".to_string()),
+        );
+        assert!(!entry.is_insecure());
+        assert!(entry.vulnerability_list().is_empty());
     }
 
     /// Same two cases against the pre-v4 grouped query, which aggregates several

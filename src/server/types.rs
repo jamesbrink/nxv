@@ -282,7 +282,13 @@ pub struct VersionHistorySchema {
     /// via `/packages/{attr}/versions/{version}/first`.
     pub is_insecure: bool,
     /// The advisory text as a JSON array, omitted when the version is clean.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    ///
+    /// Stored as a JSON-array string; serialized as a real array, matching
+    /// `known_vulnerabilities` on the package endpoints.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::db::json_array::serialize_opt"
+    )]
     pub vulnerabilities: Option<String>,
 }
 

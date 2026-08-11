@@ -815,6 +815,10 @@
             const synth = {
               attr: r.attr,
               hash: row.first_commit_hash || '',
+              // buildFlakeCmd prefers lastHash: first_commit_hash can predate
+              // flakes even when the version's last-seen commit does not
+              // (issue #21). The row carries it, so pass it through.
+              lastHash: row.last_commit_hash || '',
               last: v.last_seen,
               insecure: rowVulns.length ? rowVulns : null,
               legacy: predatesFlakes(v.last_seen),

@@ -273,8 +273,24 @@ pub struct VersionHistorySchema {
     pub first_seen: DateTime<Utc>,
     /// Last time this version was seen.
     pub last_seen: DateTime<Utc>,
-    /// Whether this version has known vulnerabilities.
+    /// Whether nixpkgs reports a known advisory for this software version.
+    ///
+    /// Scoped by package name and version, so every attribute packaging the same
+    /// build agrees (`emacs` and `emacs28` at 28.2 are both flagged). This is not
+    /// the same question as "will nix refuse to build this attribute at this
+    /// revision" — for that, read `known_vulnerabilities` off the version itself
+    /// via `/packages/{attr}/versions/{version}/first`.
     pub is_insecure: bool,
+    /// The advisory text as a JSON array, omitted when the version is clean.
+    ///
+    /// Stored as a JSON-array string; serialized as a real array, matching
+    /// `known_vulnerabilities` on the package endpoints.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::db::json_array::serialize_opt"
+    )]
+    #[schema(value_type = Option<Vec<String>>)]
+    pub vulnerabilities: Option<String>,
 }
 
 /// Package version info (re-export with ToSchema).
@@ -360,6 +376,10 @@ pub struct ChannelCoverageSchema {
     pub channel: String,
     pub releases_ingested: i64,
     pub releases_pending: i64,
+    /// Unsettled releases (pending or failed) from the pre-2020 nix-env era.
+    /// Scheduled runs never reach these; only `nxv index --backfill-evals`
+    /// ingests them.
+    pub releases_needing_eval: i64,
     pub releases_failed: i64,
     pub releases_skipped: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -406,6 +426,7 @@ impl From<IndexStats> for IndexStatsSchema {
                     channel: c.channel,
                     releases_ingested: c.releases_ingested,
                     releases_pending: c.releases_pending,
+                    releases_needing_eval: c.releases_needing_eval,
                     releases_failed: c.releases_failed,
                     releases_skipped: c.releases_skipped,
                     newest_release: c.newest_release,

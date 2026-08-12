@@ -8,7 +8,7 @@
 //! ANALYSIS.md); this one refuses the snapshot and pages the operator.
 
 use crate::db::Database;
-use crate::db::releases::{ReleaseRecord, ReleaseSource};
+use crate::db::releases::{ReleaseRecord, ReleaseSource, UnsettledReleases, eval_era_before};
 use crate::error::Result;
 use crate::index::snapshot::SnapshotEntry;
 use chrono::{DateTime, Datelike, Utc};
@@ -33,6 +33,13 @@ const BASELINE_HARD_FRACTION: f64 = 0.70;
 /// Deaths in a single advance beyond this fraction of the total trigger an
 /// advisory (mass renames are legitimate, e.g. python3xPackages flips).
 const DEATHS_WARN_FRACTION: f64 = 0.05;
+
+/// Births/deaths are only meaningful between snapshots that are actually
+/// adjacent. Channel advances land hours apart; anything beyond this is a
+/// coverage gap (a backfilled window meeting the present, a stalled channel),
+/// where "attrs disappeared in one advance" would measure years of ordinary
+/// churn rather than a single bad snapshot.
+const MAX_ADVANCE_GAP_DAYS: i64 = 30;
 
 /// `--strict` head-lag threshold: newest observation older than this fails CI.
 pub const HEAD_LAG_STRICT_HOURS: i64 = 72;
@@ -188,7 +195,7 @@ pub fn evaluate_release_gate(
     db: &Database,
     release: &ReleaseRecord,
     entries: &[SnapshotEntry],
-    prev_attrs: Option<(&HashSet<String>, ReleaseSource)>,
+    prev_attrs: Option<(&HashSet<String>, ReleaseSource, DateTime<Utc>)>,
     sentinels: &[Sentinel],
 ) -> Result<GateResult> {
     let mut result = GateResult {
@@ -263,9 +270,13 @@ pub fn evaluate_release_gate(
 
     // 4. Births/deaths vs the previous snapshot in this run. Skipped across
     // era boundaries (the one-time +33k birth event at 2020-03-27 is
-    // expected, not an anomaly).
-    if let Some((prev, prev_source)) = prev_attrs
+    // expected, not an anomaly) and across long gaps: a run that ingests a
+    // backfilled 2020 window followed by today's release would otherwise
+    // compare snapshots six years apart and report every retired attribute as
+    // a mass death. Consecutive snapshots are hours apart, never weeks.
+    if let Some((prev, prev_source, prev_date)) = prev_attrs
         && prev_source == release.source
+        && (release.release_date - prev_date).num_days() <= MAX_ADVANCE_GAP_DAYS
     {
         let births = attrs.iter().filter(|a| !prev.contains(**a)).count();
         let deaths = prev.iter().filter(|a| !attrs.contains(a.as_str())).count();
@@ -308,11 +319,12 @@ pub struct RunReport {
     /// Hours between now and the newest observation across channels.
     pub head_lag_hours: Option<i64>,
     /// Releases dated at or before the newest ingested observation that are
-    /// neither ingested nor skipped — holes that retries still need to fill.
-    /// Publishing ingested progress is safe regardless (gate-failed
-    /// snapshots never write rows), but a persistently nonzero value means
-    /// some window's versions stay missing until its release succeeds.
-    pub unsettled_before_watermark: Option<i64>,
+    /// neither ingested nor skipped, split by whether an ordinary run can still
+    /// reach them. Publishing ingested progress is safe regardless (gate-failed
+    /// snapshots never write rows), but a persistently nonzero `retryable`
+    /// count means some window's versions stay missing until its release
+    /// succeeds, while `needs_eval` will not move without `--backfill-evals`.
+    pub unsettled_before_watermark: Option<UnsettledReleases>,
     /// Total distinct attribute paths in the index after the run.
     pub total_attrs: Option<i64>,
     /// Total (attr, version) rows after the run.
@@ -355,7 +367,7 @@ impl RunReport {
         if let Some(newest) = db.newest_ingested_release(None)? {
             self.head_lag_hours = Some((Utc::now() - newest.release_date).num_hours());
             self.unsettled_before_watermark =
-                Some(db.unsettled_release_count_before(newest.release_date)?);
+                Some(db.unsettled_releases_before(newest.release_date, eval_era_before())?);
         }
 
         let conn = db.connection();
@@ -414,9 +426,22 @@ impl RunReport {
             eprintln!("  index: {attrs} distinct attrs, {rows} (attr, version) rows");
         }
         if let Some(unsettled) = self.unsettled_before_watermark
-            && unsettled > 0
+            && unsettled.total > 0
         {
-            eprintln!("  unsettled releases before watermark: {unsettled} (holes pending retry)");
+            eprint!("  unsettled releases before watermark: {}", unsettled.total);
+            if unsettled.needs_eval > 0 {
+                eprint!(
+                    " ({} pre-2020 nix-env era, unreachable without --backfill-evals",
+                    unsettled.needs_eval
+                );
+                if unsettled.retryable() > 0 {
+                    eprint!("; {} pending retry", unsettled.retryable());
+                }
+                eprint!(")");
+            } else {
+                eprint!(" (holes pending retry)");
+            }
+            eprintln!();
         }
         if let Some(lag) = self.head_lag_hours {
             eprintln!(
@@ -680,7 +705,11 @@ mod tests {
             &db,
             &rel,
             &entries,
-            Some((&prev, ReleaseSource::PackagesJson)),
+            Some((
+                &prev,
+                ReleaseSource::PackagesJson,
+                Utc.timestamp_opt(T_2026 - 86_400, 0).unwrap(),
+            )),
             &builtin_sentinels(&[]),
         )
         .unwrap();
@@ -706,12 +735,63 @@ mod tests {
             &db,
             &rel,
             &entries,
-            Some((&prev, ReleaseSource::NixEnv)),
+            Some((
+                &prev,
+                ReleaseSource::NixEnv,
+                Utc.timestamp_opt(1_585_267_200 - 86_400, 0).unwrap(),
+            )),
             &builtin_sentinels(&[]),
         )
         .unwrap();
         assert!(gate.passed());
         assert_eq!(gate.births, None, "era boundary must skip births/deaths");
         assert!(gate.warnings.is_empty());
+    }
+
+    /// A run that ingests a backfilled 2020 window and then today's release
+    /// compares snapshots six years apart. Every attribute retired since is
+    /// not a mass death in "one advance", and under --strict the bogus warning
+    /// would fail the run.
+    #[test]
+    fn test_births_deaths_skipped_across_long_gap() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path().join("t.db")).unwrap();
+        let rel = release("nixos-unstable-small", ReleaseSource::PackagesJson, T_2026);
+
+        let entries = base_entries(140_000);
+        // The 2020 snapshot: 61k attrs, almost none of them today's.
+        let prev: HashSet<String> = (0..61_000).map(|i| format!("attr2020_{i}")).collect();
+        let six_years_earlier = Utc.timestamp_opt(T_2026 - 6 * 365 * 86_400, 0).unwrap();
+
+        let gate = evaluate_release_gate(
+            &db,
+            &rel,
+            &entries,
+            Some((&prev, ReleaseSource::PackagesJson, six_years_earlier)),
+            &builtin_sentinels(&[]),
+        )
+        .unwrap();
+        assert!(gate.passed());
+        assert_eq!(
+            gate.deaths, None,
+            "snapshots years apart are not consecutive advances"
+        );
+        assert!(gate.warnings.is_empty());
+
+        // A normal same-day advance is still measured.
+        let gate = evaluate_release_gate(
+            &db,
+            &rel,
+            &entries,
+            Some((
+                &prev,
+                ReleaseSource::PackagesJson,
+                Utc.timestamp_opt(T_2026 - 86_400, 0).unwrap(),
+            )),
+            &builtin_sentinels(&[]),
+        )
+        .unwrap();
+        assert_eq!(gate.deaths, Some(61_000));
+        assert!(!gate.warnings.is_empty());
     }
 }

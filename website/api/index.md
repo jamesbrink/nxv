@@ -210,11 +210,19 @@ curl "http://localhost:8080/api/v1/packages/python311/history"
       "version": "3.11.3",
       "first_seen": "2023-04-05T00:00:00Z",
       "last_seen": "2023-06-14T00:00:00Z",
-      "is_insecure": false
+      "is_insecure": true,
+      "vulnerabilities": "[\"CVE-2023-24329\"]"
     }
   ]
 }
 ```
+
+`is_insecure` means nixpkgs reports a known advisory for that **software
+version**, resolved by package name so every attribute packaging the same build
+agrees. `vulnerabilities` carries the advisory text and is omitted when the
+version is clean. Neither field tells you whether nix will refuse to build a
+given attribute at a given revision — for that, read `known_vulnerabilities` from
+`/packages/{attr}/versions/{version}/first`.
 
 ### Index Statistics
 

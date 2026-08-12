@@ -23,9 +23,13 @@ nixpkgs checkout. It ingests channel-release snapshots from releases.nixos.org:
   decompressed) that enumerates all ~144k attributes — including nested package
   sets (`python3Packages.*`, `haskellPackages.*`, `nodePackages.*`, ...) — with
   versions and metadata. No Nix evaluation is needed for this era.
-- **2016-09 → 2020-06**: releases predate `packages.json`. Opt in with
-  `--backfill-evals` to evaluate each release's `nixexprs.tar.xz` with `nix-env`
-  (the only path that requires `nix`).
+- **2020-03-27 → 2020-06**: `packages.json.br` first appears on 2020-03-27, but
+  the boundary falls mid-release-name (`20.09pre`), so the source is settled by
+  probing each release rather than inferred from its date. Ordinary runs cover
+  this window — a probe costs one request and no evaluation.
+- **2016-09 → 2020-03-27**: releases predate `packages.json` entirely. Opt in
+  with `--backfill-evals` to evaluate each release's `nixexprs.tar.xz` with
+  `nix-env` (the only path that requires `nix`).
 
 Every stored commit is a real Hydra-built channel commit: the
 `(attribute, version)` pair was verifiably present at both ends of its range.
@@ -85,6 +89,23 @@ nxv index --backfill-evals
 
 Interrupting with Ctrl+C is safe: each release commits atomically together with
 its row in the `releases` ledger, so unfinished releases simply stay `pending`.
+
+### Reading the Pending Count
+
+`nxv stats` and the end-of-run report split `pending` releases into the ones a
+run will pick up and the ones it structurally cannot:
+
+```
+nixos-unstable-small: 4017 ingested, 3099 pending, 1 skipped (newest: …); 2902 pre-2020, needs --backfill-evals
+nixpkgs-unstable: 4191 ingested, 22 failed, 1 skipped (newest: …); 22 pre-2020, needs --backfill-evals
+```
+
+The trailing clause counts pending **and** failed releases from the nix-env era.
+Neither is a backlog and neither shrinks on its own — no scheduled run includes
+them, and `--retry-failed` alone does not reach them (it takes
+`--retry-failed --backfill-evals`). It is a standing choice to trade a decade of
+coarse historical coverage against hours of `nix-env` evaluation. Everything
+outside that clause is genuine queued work the next run will attempt.
 
 ### Resuming and Incremental Updates
 
@@ -290,7 +311,26 @@ the index or refuses to emit a slow artifact.
 
 `is_insecure` is not stored as a column — it's derived at query time from
 `known_vulnerabilities` (a non-empty JSON array means the package is flagged
-insecure). The HTTP API's version-history endpoint surfaces this as a boolean.
+insecure). The HTTP API's version-history endpoint surfaces this as a boolean
+alongside the advisory text in `vulnerabilities`.
+
+Version history resolves the advisory by **package name and version**, not by
+attribute path and not by version string alone:
+
+- Version string alone would be wrong in the obvious direction — `nxv` 0.7.1 has
+  nothing to do with `zeronet` 0.7.1.
+- Attribute path alone would be wrong in the subtle direction. Each
+  `(attribute_path, version)` row keeps the `known_vulnerabilities` of its newest
+  observation and is never backfilled, so an advisory added after an attribute
+  stopped shipping a version never reaches that row. `emacs` 28.2 retired in
+  2023 holding no advisory while `emacs28` 28.2 carried the identical build until
+  2025 and picked up CVE-2024-53920.
+
+Name scoping answers "does this software version have a known advisory". That is
+a broader question than "will nix refuse to build this attribute at this
+revision" — for the latter, read `known_vulnerabilities` off the version itself
+(`/packages/{attr}/versions/{version}/first`), which is what the copy-to-clipboard
+commands use to decide on `NIXPKGS_ALLOW_INSECURE`.
 
 ## Troubleshooting
 

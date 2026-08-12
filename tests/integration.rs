@@ -4641,3 +4641,80 @@ fn test_checked_in_skill_copies_match_template() {
         );
     }
 }
+
+/// Regression: the history endpoint serializes the advisory as a JSON array,
+/// and the CLI's mirror struct must decode that. When it declared a bare
+/// `Option<String>`, `nxv history` against a remote failed outright for every
+/// package carrying an advisory — while clean packages kept working, which made
+/// it look intermittent.
+#[test]
+fn test_remote_history_decodes_advisory_array() {
+    let mut server = mockito::Server::new();
+
+    let response = serde_json::json!({
+        "data": [
+            {
+                "version": "28.2",
+                "first_seen": "2022-09-14T04:24:08Z",
+                "last_seen": "2023-12-11T23:24:52Z",
+                "is_insecure": true,
+                "vulnerabilities": ["CVE-2024-53920", "CVE-2025-1244"]
+            },
+            {
+                "version": "30.2",
+                "first_seen": "2025-08-15T12:53:23Z",
+                "last_seen": "2026-08-10T14:30:10Z",
+                "is_insecure": false
+            }
+        ]
+    });
+
+    let _mock = server
+        .mock("GET", "/api/v1/packages/emacs/history")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(response.to_string())
+        .create();
+
+    nxv()
+        .args(["history", "emacs", "--format", "plain"])
+        .env("NXV_API_URL", server.url())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "28.2\t2022-09-14\t2023-12-11\tyes",
+        ))
+        .stdout(predicate::str::contains("30.2\t2025-08-15\t2026-08-10\tno"));
+}
+
+/// A server predating the advisory field sends `is_insecure` with no text. The
+/// flag must survive, and the table must not print an advisory heading with
+/// nothing under it.
+#[test]
+fn test_remote_history_accepts_flag_without_advisory_text() {
+    let mut server = mockito::Server::new();
+
+    let response = serde_json::json!({
+        "data": [{
+            "version": "1.0.0",
+            "first_seen": "2024-01-01T00:00:00Z",
+            "last_seen": "2024-06-01T00:00:00Z",
+            "is_insecure": true
+        }]
+    });
+
+    let _mock = server
+        .mock("GET", "/api/v1/packages/legacy-pkg/history")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(response.to_string())
+        .create();
+
+    nxv()
+        .args(["history", "legacy-pkg"])
+        .env("NXV_API_URL", server.url())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("1.0.0 ⚠"))
+        .stdout(predicate::str::contains("Known vulnerabilities").not());
+}

@@ -1010,6 +1010,58 @@ mod tests {
         assert!(data[0]["version"].is_string());
         assert!(data[0]["first_seen"].is_string());
         assert!(data[0]["last_seen"].is_string());
+        assert_eq!(data[0]["is_insecure"], false);
+        assert!(
+            data[0].get("vulnerabilities").is_none(),
+            "clean versions omit the advisory field"
+        );
+    }
+
+    /// The history endpoint reports advisories per software version, so an
+    /// unrelated package sharing a version string is not flagged (issue #80),
+    /// and a sibling attribute packaging the same build is.
+    #[tokio::test]
+    async fn test_get_version_history_advisory_scope() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            INSERT INTO package_versions
+                (name, version, first_commit_hash, first_commit_date,
+                 last_commit_hash, last_commit_date, attribute_path,
+                 known_vulnerabilities)
+            VALUES
+                ('emacs', '28.2', 'i111', 1700000000, 'i222', 1700100000, 'emacs', NULL),
+                ('emacs', '28.2', 'i333', 1700000000, 'i444', 1700900000, 'emacs28',
+                 '["CVE-2024-53920"]'),
+                ('unrelated', '28.2', 'i555', 1700000000, 'i666', 1700100000, 'unrelated', NULL);
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None, None);
+
+        let (status, json) = get_json(&app, "/api/v1/packages/emacs/history").await;
+        assert_eq!(status, StatusCode::OK);
+        let entry = &json["data"].as_array().unwrap()[0];
+        assert_eq!(entry["is_insecure"], true);
+        assert_eq!(
+            entry["vulnerabilities"],
+            serde_json::json!(["CVE-2024-53920"]),
+            "the advisory ships as a real array, not the stored JSON string"
+        );
+
+        let (_, json) = get_json(&app, "/api/v1/packages/unrelated/history").await;
+        let entry = &json["data"].as_array().unwrap()[0];
+        assert_eq!(
+            entry["is_insecure"], false,
+            "a shared version string is not a shared package"
+        );
     }
 
     #[tokio::test]

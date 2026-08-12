@@ -1034,6 +1034,16 @@ fn cmd_stats(cli: &Cli) -> Result<()> {
                 }
                 print!(")");
             }
+            // Bare pending/failed counts read as work the next run will get to.
+            // Pre-2020 nix-env releases are not that: no scheduled run includes
+            // them and the retry ladder will never run again, so say so instead
+            // of leaving a number that looks like a backlog.
+            if ch.releases_needing_eval > 0 {
+                print!(
+                    "; {} pre-2020, needs --backfill-evals",
+                    ch.releases_needing_eval
+                );
+            }
             println!();
         }
     }
@@ -1329,12 +1339,19 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
             cli::OutputFormatArg::Json => {
                 let json_history: Vec<_> = history
                     .iter()
-                    .map(|(v, first, last, is_insecure)| {
+                    .map(|entry| {
                         serde_json::json!({
-                            "version": v,
-                            "first_seen": first.to_rfc3339(),
-                            "last_seen": last.to_rfc3339(),
-                            "is_insecure": is_insecure,
+                            "version": entry.version,
+                            "first_seen": entry.first_seen.to_rfc3339(),
+                            "last_seen": entry.last_seen.to_rfc3339(),
+                            "is_insecure": entry.is_insecure(),
+                            // An array, matching `nxv history <pkg> <version>`
+                            // and every other JSON surface — never the stored
+                            // JSON-array string.
+                            "known_vulnerabilities": entry
+                                .vulnerabilities
+                                .as_ref()
+                                .map(|v| db::json_array::parse(v)),
                         })
                     })
                     .collect();
@@ -1342,13 +1359,13 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
             }
             cli::OutputFormatArg::Plain => {
                 println!("VERSION\tFIRST_SEEN\tLAST_SEEN\tINSECURE");
-                for (version, first, last, is_insecure) in history {
+                for entry in history {
                     println!(
                         "{}\t{}\t{}\t{}",
-                        version,
-                        first.format("%Y-%m-%d"),
-                        last.format("%Y-%m-%d"),
-                        if is_insecure { "yes" } else { "no" }
+                        entry.version,
+                        entry.first_seen.format("%Y-%m-%d"),
+                        entry.last_seen.format("%Y-%m-%d"),
+                        if entry.is_insecure() { "yes" } else { "no" }
                     );
                 }
             }
@@ -1366,25 +1383,41 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
                     .set_content_arrangement(ContentArrangement::Dynamic)
                     .set_header(vec!["Version", "First Seen", "Last Seen"]);
 
-                for (version, first, last, is_insecure) in history {
-                    let version_display = if is_insecure {
-                        format!("{} ⚠", version)
+                let mut advisories = Vec::new();
+                for entry in history {
+                    let insecure = entry.is_insecure();
+                    // Only versions with actual text to show. A remote server
+                    // predating the advisory field sends the flag alone, which
+                    // would otherwise print a heading with nothing under it.
+                    let vulns = entry.vulnerability_list();
+                    if !vulns.is_empty() {
+                        advisories.push((entry.version.clone(), vulns));
+                    }
+                    let version_display = if insecure {
+                        format!("{} ⚠", entry.version)
                     } else {
-                        version
+                        entry.version
                     };
-                    let version_color = if is_insecure {
-                        Color::Red
-                    } else {
-                        Color::Green
-                    };
+                    let version_color = if insecure { Color::Red } else { Color::Green };
                     table.add_row(vec![
                         Cell::new(&version_display).fg(version_color),
-                        Cell::new(first.format("%Y-%m-%d").to_string()).fg(Color::White),
-                        Cell::new(last.format("%Y-%m-%d").to_string()).fg(Color::White),
+                        Cell::new(entry.first_seen.format("%Y-%m-%d").to_string()).fg(Color::White),
+                        Cell::new(entry.last_seen.format("%Y-%m-%d").to_string()).fg(Color::White),
                     ]);
                 }
 
                 println!("{table}");
+
+                if !advisories.is_empty() {
+                    use owo_colors::OwoColorize;
+                    println!();
+                    println!("{}", "Known vulnerabilities".bold().underline().red());
+                    for (version, vulns) in &advisories {
+                        for vuln in vulns {
+                            println!("  {} {} {}", "•".red(), version.red().bold(), vuln);
+                        }
+                    }
+                }
             }
         }
     }

@@ -12,6 +12,23 @@ use super::Database;
 use crate::error::Result;
 use chrono::{DateTime, TimeZone, Utc};
 use rusqlite::Row;
+use serde::{Deserialize, Serialize};
+
+/// Earliest date a `packages.json.br` exists anywhere in the release bucket
+/// (nixpkgs-20.09pre218523.4a3f9aced7f, 2020-03-27).
+///
+/// Releases older than this can only be ingested by evaluating them with
+/// `nix-env`, i.e. under `nxv index --backfill-evals`. That makes it the line
+/// between "unsettled and awaiting retry" and "unsettled and out of reach of
+/// every scheduled run", which both the run report and `nxv stats` distinguish.
+pub const PACKAGES_JSON_FIRST_ARTIFACT: &str = "2020-03-27T00:00:00Z";
+
+/// [`PACKAGES_JSON_FIRST_ARTIFACT`] parsed, for use in queries.
+pub fn eval_era_before() -> DateTime<Utc> {
+    PACKAGES_JSON_FIRST_ARTIFACT
+        .parse()
+        .expect("PACKAGES_JSON_FIRST_ARTIFACT is a valid RFC 3339 timestamp")
+}
 
 /// Maximum automatic retry attempts before a release is parked as `skipped`.
 pub const MAX_ATTEMPTS: i64 = 5;
@@ -359,18 +376,52 @@ impl Database {
         Ok(out)
     }
 
-    /// Count of releases dated at or before `watermark_date` that are
-    /// neither `ingested` nor `skipped` — holes that retries still need to
-    /// fill. Surfaced in the run report and `nxv stats`.
+    /// Releases dated at or before `watermark_date` that are neither `ingested`
+    /// nor `skipped`. Surfaced in the run report and `nxv stats`.
+    ///
+    /// Split by whether an ordinary run can still reach them. Rows from the
+    /// pre-artifact nix-env era are only ever ingested under `--backfill-evals`,
+    /// so a scheduled run will never retry them however many times it runs —
+    /// reporting them as holes awaiting retry is simply false.
     #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
-    pub fn unsettled_release_count_before(&self, watermark_date: DateTime<Utc>) -> Result<i64> {
-        let unsettled: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM releases \
-             WHERE release_date <= ? AND status NOT IN ('ingested', 'skipped')",
-            rusqlite::params![watermark_date.timestamp()],
-            |row| row.get(0),
-        )?;
-        Ok(unsettled)
+    pub fn unsettled_releases_before(
+        &self,
+        watermark_date: DateTime<Utc>,
+        eval_era_before: DateTime<Utc>,
+    ) -> Result<UnsettledReleases> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*), \
+                        COALESCE(SUM(source = 'nix_env' AND release_date < ?2), 0) \
+                 FROM releases \
+                 WHERE release_date <= ?1 AND status NOT IN ('ingested', 'skipped')",
+                rusqlite::params![watermark_date.timestamp(), eval_era_before.timestamp()],
+                |row| {
+                    Ok(UnsettledReleases {
+                        total: row.get(0)?,
+                        needs_eval: row.get(1)?,
+                    })
+                },
+            )
+            .map_err(Into::into)
+    }
+}
+
+/// Breakdown of releases before the watermark that never settled.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnsettledReleases {
+    /// All unsettled releases before the watermark.
+    pub total: i64,
+    /// Those only reachable with `--backfill-evals`, and so not retried by
+    /// scheduled runs.
+    pub needs_eval: i64,
+}
+
+impl UnsettledReleases {
+    /// Unsettled releases an ordinary run will pick up again.
+    #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
+    pub fn retryable(&self) -> i64 {
+        self.total - self.needs_eval
     }
 }
 
@@ -572,11 +623,12 @@ mod tests {
         assert_eq!(coverage.len(), 1);
         assert_eq!(coverage[0].ingested, 1);
 
-        assert_eq!(db.unsettled_release_count_before(date(2_000)).unwrap(), 0);
+        let unsettled = db.unsettled_releases_before(date(2_000), date(0)).unwrap();
+        assert_eq!(unsettled, UnsettledReleases::default());
     }
 
     #[test]
-    fn test_unsettled_release_count_before() {
+    fn test_unsettled_releases_before() {
         let (_dir, db) = open_test_db();
         db.insert_release_pending(
             "nixpkgs-unstable",
@@ -587,8 +639,43 @@ mod tests {
             ReleaseSource::PackagesJson,
         )
         .unwrap();
-        assert_eq!(db.unsettled_release_count_before(date(2_000)).unwrap(), 1);
-        assert_eq!(db.unsettled_release_count_before(date(500)).unwrap(), 0);
+
+        let unsettled = db
+            .unsettled_releases_before(date(2_000), date(500))
+            .unwrap();
+        assert_eq!(unsettled.total, 1);
+        assert_eq!(unsettled.needs_eval, 0);
+        assert_eq!(unsettled.retryable(), 1);
+
+        assert_eq!(
+            db.unsettled_releases_before(date(500), date(500)).unwrap(),
+            UnsettledReleases::default(),
+            "the watermark bounds the count"
+        );
+    }
+
+    /// Pre-artifact nix-env rows are counted apart: no scheduled run retries
+    /// them, so reporting them as pending retry would be false.
+    #[test]
+    fn test_unsettled_releases_separates_eval_era() {
+        let (_dir, db) = open_test_db();
+        for (name, when, source) in [
+            ("old-eval", date(100), ReleaseSource::NixEnv),
+            ("probe-era", date(800), ReleaseSource::NixEnv),
+            ("modern", date(1_000), ReleaseSource::PackagesJson),
+        ] {
+            db.insert_release_pending("nixpkgs-unstable", name, "a", None, when, source)
+                .unwrap();
+        }
+
+        // Anything dated before the first artifact needs an evaluation; the
+        // nix_env row after it is only a plan-time guess the probe can correct.
+        let unsettled = db
+            .unsettled_releases_before(date(2_000), date(500))
+            .unwrap();
+        assert_eq!(unsettled.total, 3);
+        assert_eq!(unsettled.needs_eval, 1);
+        assert_eq!(unsettled.retryable(), 2);
     }
 
     #[test]

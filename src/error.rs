@@ -59,6 +59,18 @@ pub enum NxvError {
     #[cfg(feature = "indexer")]
     #[error("Configuration error: {0}")]
     Config(String),
+
+    /// A release has no `packages.json.br` and the run may not evaluate.
+    ///
+    /// Distinct from a failure: retrying cannot change the answer, since only
+    /// `--backfill-evals` can ingest it. The coordinator parks such a release
+    /// as `skipped` immediately rather than burning the retry ladder and
+    /// reporting five red runs over two days for a permanent condition.
+    #[cfg(feature = "indexer")]
+    #[error(
+        "{0} has no packages.json.br; ingest it with `nxv index --retry-failed --backfill-evals`"
+    )]
+    NeedsEval(String),
 }
 
 /// Result type alias for nxv operations.

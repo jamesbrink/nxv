@@ -195,9 +195,17 @@ nxv history python311 --format json
   "version": "3.11.4",
   "first_seen": "2023-06-15T00:00:00+00:00",
   "last_seen": "2023-12-01T00:00:00+00:00",
-  "is_insecure": false
+  "is_insecure": false,
+  "known_vulnerabilities": null
 }
 ```
+
+`is_insecure` means nixpkgs reports a known advisory for that software version,
+resolved by package **name** so every attribute packaging the same build agrees
+(`emacs` and `emacs28` at 28.2 are both flagged). It does not tell you whether
+nix will refuse to build a specific attribute at a specific revision — for that,
+name the version (`nxv history <pkg> <version>`) and read its own
+`known_vulnerabilities`.
 
 Note the field names differ from search (`first_seen`/`last_seen`, not `first_commit_date`/`last_commit_date`), and there are no commit hashes. Adding `--full`, or naming a version (`nxv history python311 3.11.4`), switches the output to the full search row shape documented above — use one of those when you need a commit hash to feed to `nix shell`. Like the compact timeline, bare `--full` resolves the package by its exact installable `attribute_path`.
 

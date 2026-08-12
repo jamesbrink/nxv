@@ -363,11 +363,12 @@ pub async fn get_version_history(
 
     let entries: Vec<_> = history
         .into_iter()
-        .map(|(version, first, last, is_insecure)| VersionHistorySchema {
-            version,
-            first_seen: first,
-            last_seen: last,
-            is_insecure,
+        .map(|entry| VersionHistorySchema {
+            version: entry.version,
+            first_seen: entry.first_seen,
+            last_seen: entry.last_seen,
+            is_insecure: entry.insecure,
+            vulnerabilities: entry.vulnerabilities,
         })
         .collect();
 
